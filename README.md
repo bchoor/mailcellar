@@ -2,7 +2,7 @@
 
 MailCellar keeps every Gmail message you have, searchable and private, on Cloudflare's free tier. Delete mail from Gmail; it stays in your cellar.
 
-It is a Cloudflare-native take on [msgvault](https://github.com/wesm/msgvault): the same model (a system of record, a blob store, a fast index) rebuilt from Cloudflare services.
+MailCellar is inspired by [msgvault](https://github.com/wesm/msgvault) by Wes McKinney ([wesm](https://github.com/wesm)), MIT licensed. It keeps msgvault's model (a system of record, a blob store, a fast index) and rebuilds it from Cloudflare services.
 
 | msgvault | MailCellar |
 | --- | --- |
@@ -13,6 +13,21 @@ It is a Cloudflare-native take on [msgvault](https://github.com/wesm/msgvault): 
 | TUI and web UI | Web app on [Lumen UI](https://github.com/columenlabs/lumen-ui) |
 
 Principles: each user's mail lives only in that user's stores and is read only through their session; shared metrics are content-free events in Workers Analytics Engine.
+
+## Learning from msgvault
+
+Before building a piece, read how msgvault does it and keep its behaviour where it fits Cloudflare.
+
+| MailCellar piece | Read in msgvault |
+| --- | --- |
+| Gmail client, quota and rate limiting | `internal/gmail/client.go`, `ratelimit.go`, `api.go` |
+| Full and incremental sync, checkpoints | `internal/sync/sync.go`, `incremental.go`, `item_errors.go` |
+| MIME parsing, charsets, dates, attachments | `internal/mime/parse.go`, `charset.go`, `date.go` |
+| Schema: messages, participants, labels, FTS | `internal/store/schema.sql`, `schema_sqlite.sql` |
+| Drill-down views: senders, domains, labels, time | `internal/tui/`, `internal/query/` |
+| Deletion staging (later phase) | `internal/deletion/` |
+
+Rules that carry over: list and search queries never scan message bodies, and `EXISTS` replaces `SELECT DISTINCT` over joins.
 
 ## Status
 
