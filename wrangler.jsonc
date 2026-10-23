@@ -1,0 +1,10 @@
+{
+  // MailCellar on the Bchoor@gmail.com Cloudflare account, Workers Free.
+  // Today it serves the web app's static build; the sync Workflow and mailbox
+  // Durable Object join this config in later PRs (see the delivery plan).
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mailcellar",
+  "account_id": "87a4f50952b4b2ce00cab6c2680e63ae",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./apps/web/dist", "not_found_handling": "single-page-application" }
+}
