@@ -1,0 +1,24 @@
+name: Setup Bun
+description: Install Bun and the workspace from bun.lock
+
+inputs:
+  bun-version:
+    description: Bun version
+    required: false
+    default: "1.4.4"
+
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: ${{ inputs.bun-version }}
+    # Only Bun's download cache, never node_modules (a stale one can keep an old major linked).
+    - uses: actions/cache@v4
+      with:
+        path: ~/.bun/install/cache
+        key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+        restore-keys: bun-${{ runner.os }}-${{ runner.arch }}-
+    - name: Install workspace
+      shell: bash
+      run: bun install --frozen-lockfile

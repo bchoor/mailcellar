@@ -2,11 +2,19 @@
   "name": "mailcellar",
   "private": true,
   "type": "module",
-  "workspaces": ["apps/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "bun run --filter=@mailcellar/web dev",
     "build": "bun run --filter=@mailcellar/web build",
+    "type-check": "bun run --filter='*' type-check",
+    "test": "bun run --filter=@mailcellar/worker test",
+    "check": "bun run type-check && bun run build && bun run test",
     "deploy": "bun run build && wrangler deploy"
   },
-  "devDependencies": { "wrangler": "4.152.0" }
+  "devDependencies": {
+    "wrangler": "4.152.0"
+  }
 }

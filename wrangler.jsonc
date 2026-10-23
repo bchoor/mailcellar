@@ -1,10 +1,24 @@
 {
   // MailCellar on the Bchoor@gmail.com Cloudflare account, Workers Free.
-  // Today it serves the web app's static build; the sync Workflow and mailbox
-  // Durable Object join this config in later PRs (see the delivery plan).
+  // One Worker serves the app (static assets) and the API (/api/*), and hosts the
+  // per-user mailbox Durable Object. The sync Workflow joins in phase 2.
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "mailcellar",
   "account_id": "87a4f50952b4b2ce00cab6c2680e63ae",
+  "main": "apps/worker/src/index.ts",
   "compatibility_date": "2026-10-01",
-  "assets": { "directory": "./apps/web/dist", "not_found_handling": "single-page-application" }
+  "routes": [{ "pattern": "mailcellar.icaruslab.dev", "custom_domain": true }],
+  "assets": {
+    "directory": "./apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": { "APP_VERSION": "dev" },
+  "durable_objects": {
+    "bindings": [{ "name": "MAILBOX", "class_name": "MailboxDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MailboxDO"] }],
+  "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
+  "observability": { "enabled": true }
 }
