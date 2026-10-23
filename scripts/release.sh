@@ -24,7 +24,7 @@ git fetch -q origin main --tags
 LATEST=$(git tag --list 'v0.*' --sort=-v:refname | head -1)
 if [ -z "$LATEST" ]; then
   echo "no v0.* tag yet: tag the first commit v0.0.0 (docs/releases.md)" >&2
-  exit 1
+  [ "$DRY_RUN" = 1 ] && exit 0 || exit 1
 fi
 IFS=. read -r _ MINOR PATCH <<< "${LATEST#v}"
 
