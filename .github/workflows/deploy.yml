@@ -1,7 +1,8 @@
 name: Deploy
 
 # Deploys main to the mailcellar Worker (mailcellar.icaruslab.dev) on OpenShip's runner.
-# Needs secret CLOUDFLARE_API_TOKEN (Workers Scripts, Workers Routes, R2 edit on the account).
+# Needs secret CLOUDFLARE_API_TOKEN (Workers Scripts, Workers Routes, R2 edit on the
+# account); without it the job builds and skips the upload.
 on:
   push:
     branches: [main]
@@ -18,18 +19,17 @@ jobs:
   deploy:
     runs-on: [self-hosted, openship, linux, arm64]
     timeout-minutes: 15
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
-      - name: Skip without a Cloudflare token
-        if: env.CLOUDFLARE_API_TOKEN == ''
-        run: echo "::notice::CLOUDFLARE_API_TOKEN is not set; skipping deploy"
       - uses: actions/checkout@v4
-        if: env.CLOUDFLARE_API_TOKEN != ''
         with: { fetch-depth: 0 }
       - uses: ./.github/actions/setup-bun
-        if: env.CLOUDFLARE_API_TOKEN != ''
-      - if: env.CLOUDFLARE_API_TOKEN != ''
-        run: bun run build
-      - if: env.CLOUDFLARE_API_TOKEN != ''
-        run: bunx wrangler deploy --var "APP_VERSION:$(git describe --tags --always)"
+      - run: bun run build
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::notice::CLOUDFLARE_API_TOKEN is not set; skipping deploy"
+            exit 0
+          fi
+          bunx wrangler deploy --var "APP_VERSION:$(git describe --tags --always)"
