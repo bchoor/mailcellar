@@ -52,8 +52,14 @@ export async function runDied(env: Env, runId: string): Promise<boolean> {
 
 /** Staged Basin batches one run commits when Basin is behind; that run copies nothing new. */
 export const BASIN_COMMIT_KEYS = 2;
-/** What a full run may use, asked of the account's meters before it starts: about 6 DO rows a message (spike S4). */
-export const RUN_COST: QuotaUse = { do_rows_written: RUN_SIZE * 6 + 50, do_rows_read: RUN_SIZE * 4, r2_class_a: RUN_SIZE + 30, r2_class_b: 50 };
+/**
+ * What a full run may use, asked of the account's meters before it starts. Copying writes R2 and
+ * Basin, not the DO (a few bookkeeping rows), so the DO's daily limits never pause it: only the
+ * index build waits for them (INDEX_COST, runIndex).
+ */
+export const RUN_COST: QuotaUse = { workers_requests: 10, r2_class_a: RUN_SIZE + 30, r2_class_b: 50 };
+/** DO rows indexing a message takes (measured ~3.0 rows a message after the slim index, #49), with room to spare. */
+export const INDEX_ROWS = 4;
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
 /** The DO holding one Gmail account's index and sync state. */
@@ -384,8 +390,8 @@ export async function runBatch(
         r2a += 10 + commit.length;
         await env.ARCHIVE.delete(commit);
         state.basinQueue = state.basinQueue.slice(commit.length);
-        // New mail is indexed as soon as Basin has it.
-        if (queued.length) {
+        // New mail is indexed as soon as Basin has it, when the DO's daily limits have room.
+        if (queued.length && !(await quota.reserve({ do_rows_written: queued.length * INDEX_ROWS, do_rows_read: queued.length * 2 }))) {
           try {
             rowsWritten = (await mailbox.ingest(queued.map(indexedFromBasin))).rowsWritten;
           } catch (e) {
@@ -436,7 +442,7 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   let indexed = 0;
   for (let i = 0; i < INDEX_CHUNKS_A_RUN && at < rows.length; i++) {
     const chunk = rows.slice(at, at + INDEX_CHUNK);
-    const full = await quota.reserve({ do_rows_written: chunk.length * 4, do_rows_read: chunk.length * 2 });
+    const full = await quota.reserve({ do_rows_written: chunk.length * INDEX_ROWS, do_rows_read: chunk.length * 2 });
     if (full) {
       // The page shows indexing waiting until then; the next chunk clears it.
       await mailbox.indexWaiting(month, full.resumesAt, full.label);

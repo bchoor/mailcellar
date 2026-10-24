@@ -7,5 +7,19 @@
 
 :root[data-app="mailcellar"] { --primary: oklch(0.52 0.13 250); }
 
+/* The month map: copied is green, Copying blue, Indexing violet, Missing a muted tan hatch. */
+:root[data-app="mailcellar"] {
+  --cov-full: #16a34a; --cov-high: #6cc58d; --cov-low: #c6ead3;
+  --cov-run: #2563eb; --cov-run-soft: #c3d3f8;
+  --cov-index: #7c3aed; --cov-index-soft: #ddd0fb;
+  --gap: #d3c6b8; --gap-soft: #f3eee8;
+}
+:root[data-app="mailcellar"].dark, [data-app="mailcellar"] .dark {
+  --cov-full: #3fb950; --cov-high: #2e7d45; --cov-low: #1b3d27;
+  --cov-run: #4c8dff; --cov-run-soft: #1d3360;
+  --cov-index: #a78bfa; --cov-index-soft: #3a2b66;
+  --gap: #4d433a; --gap-soft: #29231e;
+}
+
 /* A mailbox section is headed by its address: keep it as typed, not in capitals. */
 .mailbox-nav [data-sidebar="group-label"] { text-transform: none; letter-spacing: normal; }
