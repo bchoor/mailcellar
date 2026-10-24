@@ -9,7 +9,6 @@ import {
   CalendarIcon,
   CloudIcon,
   CpuIcon,
-  DollarSignIcon,
   GaugeIcon,
   HashIcon,
   HourglassIcon,
@@ -19,7 +18,8 @@ import {
   TimerIcon,
 } from 'lucide-react';
 import { useState } from 'react';
-import { BACKFILL, RUNS, type Run, USAGE, type Usage } from './ops';
+import { FREE_DAILY, type UsageDay } from '@mailcellar/schema';
+import { BACKFILL, RUNS, type Run } from './ops';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 const done = BACKFILL.stages.find((s) => s.key === 'fetched')?.done ?? 0;
@@ -114,81 +114,121 @@ export function BackfillPage() {
   );
 }
 
-const USAGE_DOMAIN: ViewDomain<Usage> = {
-  id: 'cloudflare_usage',
+// Usage the mailbox measures itself (/api/usage). Account-wide figures for the other
+// services need Cloudflare's GraphQL Analytics API, which waits on an API token.
+interface UsageRow {
+  id: string;
+  day: string;
+  metric: string;
+  used: number;
+  allowance: number;
+  pct: number;
+}
+
+const METRICS: Record<keyof typeof FREE_DAILY, string> = {
+  do_rows_written: 'Durable Object rows written',
+  do_rows_read: 'Durable Object rows read',
+};
+
+function usageRows(days: UsageDay[]): UsageRow[] {
+  return days
+    .filter((d): d is UsageDay & { metric: keyof typeof FREE_DAILY } => d.metric in FREE_DAILY)
+    .map((d) => {
+      const allowance = FREE_DAILY[d.metric];
+      return {
+        id: `${d.day}:${d.metric}`,
+        day: d.day,
+        metric: METRICS[d.metric],
+        used: d.value,
+        allowance,
+        pct: Math.round((d.value / allowance) * 1000) / 10,
+      };
+    });
+}
+
+const USAGE_DOMAIN: ViewDomain<UsageRow> = {
+  id: 'mailbox_usage',
   rowKey: (r) => r.id,
-  text: (r) => [r.service, r.metric],
+  text: (r) => [r.metric],
   fields: [
-    { key: 'service', label: 'Service', icon: CloudIcon, value: (r) => r.service, format: 'text', filterable: true, groupable: true },
-    { key: 'metric', label: 'Metric', icon: ActivityIcon, value: (r) => r.metric, format: 'text' },
-    { key: 'period', label: 'Period', icon: CalendarIcon, value: (r) => r.period, format: 'text', filterable: true, groupable: true },
-    { key: 'used', label: 'Used', icon: HashIcon, value: (r) => r.used, format: 'compact' },
-    { key: 'allowance', label: 'Free allowance', icon: HashIcon, value: (r) => r.allowance, format: 'compact' },
-    { key: 'unit', label: 'Unit', icon: RowsIcon, value: (r) => r.unit, format: 'text' },
+    { key: 'day', label: 'Day', icon: CalendarIcon, value: (r) => r.day, format: 'text', groupable: true },
+    { key: 'metric', label: 'Metric', icon: ActivityIcon, value: (r) => r.metric, format: 'text', filterable: true, groupable: true },
+    { key: 'used', label: 'Used', icon: HashIcon, value: (r) => r.used, format: 'compact', aggregate: 'sum' },
+    { key: 'allowance', label: 'Free a day', icon: HashIcon, value: (r) => r.allowance, format: 'compact' },
     { key: 'pct', label: '% of free', icon: PercentIcon, value: (r) => r.pct, format: 'number', aggregate: 'max', filterable: true },
-    { key: 'cost', label: 'Cost this month', icon: DollarSignIcon, value: (r) => r.cost, format: 'price', aggregate: 'sum' },
   ],
-} as ViewDomain<Usage>;
+} as ViewDomain<UsageRow>;
 
 const USAGE_VIEW: CustomViewConfig = {
   name: 'Cloudflare usage',
   ...customViewConfigSchema.parse({
-    columns: ['service', 'metric', 'period', 'used', 'allowance', 'unit', 'pct', 'cost'],
-    sort: { key: 'pct', desc: true },
+    columns: ['day', 'metric', 'used', 'allowance', 'pct'],
+    sort: { key: 'day', desc: true },
   }),
 };
 
-function LimitsCard() {
-  const top = [...USAGE].sort((a, b) => b.pct - a.pct).slice(0, 6);
-  const bill = USAGE.reduce((s, r) => s + r.cost, 0);
-  const over = USAGE.filter((r) => r.pct > 100);
+function LimitsCard({ days }: { days: UsageDay[] }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = usageRows(days).filter((r) => r.day === today);
+  const indexed = days.find((d) => d.day === today && d.metric === 'messages_indexed')?.value ?? 0;
+  const written = rows.find((r) => r.id.endsWith('do_rows_written'));
+  const left = written ? Math.max(0, written.allowance - written.used) : FREE_DAILY.do_rows_written;
   return (
     <div className="flex flex-col gap-4">
       <TileRow>
-        <Tile label="Bill this month" value={`$${bill.toFixed(2)}`} caption="projected, Workers Free plan" />
-        <Tile label="Over the free tier" value={String(over.length)} caption={over.map((r) => `${r.service} ${r.metric.toLowerCase()}`).join(', ') || 'none'} />
-        <Tile label="Closest daily limit" value={`${top.find((r) => r.period === 'Today')?.pct ?? 0}%`} caption={top.find((r) => r.period === 'Today')?.metric} />
+        <Tile label="Messages indexed today" value={fmt(indexed)} />
+        <Tile label="Rows written left today" value={fmt(left)} caption="the backfill's limit on Free" />
+        <Tile label="Bill this month" value="$0.00" caption="Workers Free plan" />
       </TileRow>
       <div className="grid gap-3">
-        {top.map((r) => (
-          <div key={r.id} className="grid grid-cols-[minmax(0,14rem)_1fr_auto] items-center gap-3 text-sm">
-            <span className="truncate">
-              {r.service} · {r.metric}
-            </span>
-            <Progress
-              value={Math.min(r.pct, 100)}
-              className={r.pct > 100 ? 'h-2 [&>div]:bg-loss' : r.pct > 75 ? 'h-2 [&>div]:bg-amber-500' : 'h-2'}
-            />
-            <span className="tabular-nums text-muted-foreground">
-              {fmt(r.used)} / {fmt(r.allowance)} {r.unit} · {r.pct}%
-            </span>
-          </div>
-        ))}
+        {(Object.keys(FREE_DAILY) as (keyof typeof FREE_DAILY)[]).map((m) => {
+          const r = rows.find((x) => x.id.endsWith(m));
+          const pct = r?.pct ?? 0;
+          return (
+            <div key={m} className="grid grid-cols-[minmax(0,14rem)_1fr_auto] items-center gap-3 text-sm">
+              <span className="truncate">{METRICS[m]}</span>
+              <Progress
+                value={Math.min(pct, 100)}
+                className={pct > 100 ? 'h-2 [&>div]:bg-loss' : pct > 75 ? 'h-2 [&>div]:bg-amber-500' : 'h-2'}
+              />
+              <span className="tabular-nums text-muted-foreground">
+                {fmt(r?.used ?? 0)} / {fmt(FREE_DAILY[m])} · {pct}%
+              </span>
+            </div>
+          );
+        })}
       </div>
       <NoteLine
-        icon={AlertTriangleIcon}
-        title="R2 storage is past the free 10 GB"
-        note="Billed at $0.015 per GB-month. Skipping the raw-message copy would bring it under."
+        icon={CloudIcon}
+        title="Measured by your mailbox"
+        note="Workers, R2, Basin and the rest join this page once Cloudflare's Analytics API is connected."
       />
     </div>
   );
 }
 
 export function UsagePage() {
-  const query = useQuery({ queryKey: ['usage'], queryFn: async () => USAGE });
+  const query = useQuery({
+    queryKey: ['usage'],
+    queryFn: async (): Promise<UsageDay[]> => {
+      const res = await fetch('/api/usage');
+      if (!res.ok) throw new Error(`Couldn't load usage (${res.status})`);
+      return res.json();
+    },
+  });
   const load = useLumenLoad(query);
   const [config, setConfig] = useState(USAGE_VIEW);
   return (
     <LumenLayout
       crumbs={[{ label: 'Cloudflare usage' }]}
-      meta={<span className="text-xs text-muted-foreground">From Cloudflare's GraphQL Analytics API, refreshed hourly</span>}
-      lead={[{ id: 'limits', title: 'Against the free tier', icon: GaugeIcon, kind: 'widget', link: false, children: <LimitsCard /> }]}
+      meta={<span className="text-xs text-muted-foreground">Today and the last 30 days, UTC</span>}
+      lead={[{ id: 'limits', title: 'Against the free tier', icon: GaugeIcon, kind: 'widget', link: false, children: <LimitsCard days={query.data ?? []} /> }]}
       domain={USAGE_DOMAIN}
       config={config}
-      rows={query.data ?? []}
+      rows={usageRows(query.data ?? [])}
       load={load}
       onConfigChange={setConfig}
-      rowTitle={(r) => `${r.service} · ${r.metric}`}
+      rowTitle={(r) => `${r.day} · ${r.metric}`}
     />
   );
 }

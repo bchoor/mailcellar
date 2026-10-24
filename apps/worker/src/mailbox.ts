@@ -10,6 +10,11 @@ import {
   type ArchiveView,
   type IndexedMessage,
   type MailLabel,
+  checkScheduleChange,
+  DEFAULT_SCHEDULES,
+  type Schedule,
+  type UsageDay,
+  type UsageMetric,
 } from '@mailcellar/schema';
 import type { Env } from './env';
 
@@ -44,7 +49,15 @@ export const MIGRATIONS: readonly string[] = [
    CREATE TABLE labels (
      id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, n INTEGER NOT NULL, bytes INTEGER NOT NULL
    ) STRICT, WITHOUT ROWID;`,
+  // 3: the person's schedule settings (a JSON change over DEFAULT_SCHEDULES), and the
+  // usage the mailbox measures itself, per UTC day.
+  `CREATE TABLE schedules (id TEXT PRIMARY KEY, change TEXT NOT NULL) STRICT, WITHOUT ROWID;
+   CREATE TABLE usage_days (
+     day TEXT NOT NULL, metric TEXT NOT NULL, value INTEGER NOT NULL, PRIMARY KEY (day, metric)
+   ) STRICT, WITHOUT ROWID;`,
 ];
+
+const today = () => new Date().toISOString().slice(0, 10);
 
 /** What one ingest call wrote: rows written is what the Free plan's 100k a day counts. */
 export interface IngestResult {
@@ -173,8 +186,24 @@ export class MailboxDO extends DurableObject<Env> {
              n = n + excluded.n, bytes = bytes + excluded.bytes`,
           id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
         );
+      if (added) this.count({ messages_indexed: added, do_rows_written: rowsWritten });
       return { added, skipped: batch.length - added, rowsWritten };
     });
+  }
+
+  /**
+   * Add to today's usage. Rows written includes this call's own writes, one a metric,
+   * so the meter never under-reports what the free tier counts.
+   */
+  private count(usage: Partial<Record<UsageMetric, number>>) {
+    const others = Object.entries(usage).filter(([m, v]) => m !== 'do_rows_written' && v);
+    const written = (usage.do_rows_written ?? 0) + others.length + 1; // +1: the rows-written row itself
+    const day = today();
+    for (const [metric, value] of [...others, ['do_rows_written', written] as const])
+      this.ctx.storage.sql.exec(
+        `INSERT INTO usage_days VALUES (?, ?, ?) ON CONFLICT (day, metric) DO UPDATE SET value = value + excluded.value`,
+        day, metric, value,
+      );
   }
 
   /**
@@ -183,8 +212,12 @@ export class MailboxDO extends DurableObject<Env> {
    */
   async archive<V extends ArchiveView>(view: V, q = ''): Promise<ArchiveRows[V][]> {
     const sql = this.ctx.storage.sql;
-    const rows = (query: string, ...args: (string | number)[]) =>
-      sql.exec(query, ...args).toArray() as unknown as ArchiveRows[V][];
+    const rows = (query: string, ...args: (string | number)[]) => {
+      const cursor = sql.exec(query, ...args);
+      const out = cursor.toArray() as unknown as ArchiveRows[V][];
+      this.count({ do_rows_read: cursor.rowsRead });
+      return out;
+    };
     switch (view) {
       case 'months':
         return rows(`SELECT month, n, bytes FROM months ORDER BY month`);
@@ -229,6 +262,53 @@ export class MailboxDO extends DurableObject<Env> {
     for (let i = 0; i < mail.length; i += 100) await this.ingest(mail.slice(i, i + 100));
     await this.putLabels(SAMPLE_LABELS);
     sql.exec(`INSERT INTO meta (key, value) VALUES ('sample', ?)`, String(count));
+  }
+
+  /** The schedules with the person's changes applied. Nothing runs them until phase 2's sync. */
+  async schedules(): Promise<Schedule[]> {
+    const saved = new Map(
+      this.ctx.storage.sql
+        .exec<{ id: string; change: string }>(`SELECT id, change FROM schedules`)
+        .toArray()
+        .map((r) => [r.id, JSON.parse(r.change)]),
+    );
+    return DEFAULT_SCHEDULES.map((s) => ({
+      ...s,
+      ...saved.get(s.id),
+      waiting: s.id === 'gmail-sync' ? 'Waiting for a connected Gmail account' : null,
+    }));
+  }
+
+  /** Save a change to one schedule; an unknown schedule or a change it can't take is refused. */
+  async saveSchedule(id: string, change: unknown): Promise<{ ok: true; schedule: Schedule } | { ok: false; error: string }> {
+    const base = DEFAULT_SCHEDULES.find((s) => s.id === id);
+    if (!base) return { ok: false, error: 'unknown schedule' };
+    let checked;
+    try {
+      checked = checkScheduleChange(base, change);
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+    const sql = this.ctx.storage.sql;
+    const prev = sql.exec<{ change: string }>(`SELECT change FROM schedules WHERE id = ?`, id).toArray()[0];
+    const merged = { ...(prev ? JSON.parse(prev.change) : {}), ...checked };
+    const { rowsWritten } = sql.exec(
+      `INSERT INTO schedules VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET change = excluded.change`,
+      id, JSON.stringify(merged),
+    );
+    this.count({ do_rows_written: rowsWritten });
+    return { ok: true, schedule: (await this.schedules()).find((s) => s.id === id)! };
+  }
+
+  /** Usage for the last `days` UTC days, oldest first. */
+  async usage(days = 30): Promise<UsageDay[]> {
+    const since = new Date(Date.now() - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+    return this.ctx.storage.sql
+      .exec<{ day: string; metric: string; value: number }>(
+        `SELECT day, metric, value FROM usage_days WHERE day >= ? ORDER BY day, metric`,
+        since,
+      )
+      .toArray() as UsageDay[];
   }
 }
 
