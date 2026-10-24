@@ -1,4 +1,5 @@
-import { asUserId, ftsRowid, mailboxName, sampleMessages, SAMPLE_LABELS } from '@mailcellar/schema';
+import { asUserId, ftsRowid, mailboxName } from '@mailcellar/schema';
+import { sampleMessages, SAMPLE_LABELS } from './fixtures/sample';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';

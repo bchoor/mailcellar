@@ -19,22 +19,21 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { FREE_DAILY, type UsageDay } from '@mailcellar/schema';
-import { BACKFILL, RUNS, type Run } from './ops';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
-const done = BACKFILL.stages.find((s) => s.key === 'fetched')?.done ?? 0;
-const pct = Math.round((done / BACKFILL.total) * 100);
-const daysLeft = Math.ceil((BACKFILL.total - done) / BACKFILL.perDay);
 
-/** The status bar item every page shows while the backfill runs. */
-export function BackfillStatus() {
-  return (
-    <span className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span>Backfill {pct}%</span>
-      <Progress value={pct} className="h-1.5 w-20" />
-      <span>about {daysLeft} days left</span>
-    </span>
-  );
+/** One sync run, as phase 2's backfill Workflow will report it. */
+interface Run {
+  id: string;
+  date: string;
+  started: string;
+  minutes: number;
+  messages: number;
+  steps: number;
+  rows_written: number;
+  cpu_ms: number;
+  errors: number;
+  status: string;
 }
 
 const RUN_DOMAIN: ViewDomain<Run> = {
@@ -66,44 +65,28 @@ const RUN_VIEW: CustomViewConfig = {
   }),
 };
 
-function BackfillCard() {
-  return (
-    <div className="flex flex-col gap-4">
-      <TileRow>
-        <Tile label="Messages archived" value={fmt(done)} caption={`of ${fmt(BACKFILL.total)} in Gmail`} />
-        <Tile label="Progress" value={`${pct}%`} />
-        <Tile label="Pace" value={`${fmt(BACKFILL.perDay)}/day`} caption="limited by the free tier" />
-        <Tile label="Time left" value={`~${daysLeft} days`} caption="at today's pace" />
-      </TileRow>
-      <div className="grid gap-3">
-        {BACKFILL.stages.map((s) => {
-          const of = s.of ?? BACKFILL.total;
-          const p = Math.round((s.done / of) * 100);
-          return (
-            <div key={s.key} className="grid grid-cols-[minmax(0,12rem)_1fr_auto] items-center gap-3 text-sm">
-              <span className="truncate">{s.label}</span>
-              <Progress value={p} className="h-2" />
-              <span className="tabular-nums text-muted-foreground">
-                {fmt(s.done)} · {p}%
-              </span>
-            </div>
-          );
-        })}
-      </div>
-      <NoteLine icon={GaugeIcon} title="Bottleneck" note={BACKFILL.bottleneck} />
-    </div>
-  );
-}
-
+// No backfill has run: it arrives with phase 2's sync Workflow. The page says so rather
+// than showing made-up progress; runs fill the table once they exist.
 export function BackfillPage() {
-  const query = useQuery({ queryKey: ['runs'], queryFn: async () => RUNS });
+  const query = useQuery({ queryKey: ['runs'], queryFn: async (): Promise<Run[]> => [] });
   const load = useLumenLoad(query);
   const [config, setConfig] = useState(RUN_VIEW);
   return (
     <LumenLayout
       crumbs={[{ label: 'Backfill' }]}
-      meta={<Badge variant="secondary">Running</Badge>}
-      lead={[{ id: 'progress', title: 'Backfill progress', icon: HourglassIcon, kind: 'widget', link: false, children: <BackfillCard /> }]}
+      meta={<Badge variant="secondary">Not started</Badge>}
+      lead={[
+        {
+          id: 'progress', title: 'Backfill progress', icon: HourglassIcon, kind: 'widget', link: false,
+          children: (
+            <NoteLine
+              icon={HourglassIcon}
+              title="No backfill yet"
+              note="It starts once a Gmail account is connected and the sync is built. On the free tier it archives about 18,000 messages a day."
+            />
+          ),
+        },
+      ]}
       domain={RUN_DOMAIN}
       config={config}
       rows={query.data ?? []}

@@ -42,5 +42,4 @@ export interface Health {
 }
 
 export * from './mail';
-export * from './sample';
 export * from './ops';

@@ -4,7 +4,9 @@ import type { MailboxDO } from './mailbox';
 
 export { MailboxDO } from './mailbox';
 
-const SAMPLE_USER = asUserId('sample');
+// Until Google sign-in lands every visitor shares one mailbox, and it holds no mail.
+// (Its name is phase 1's, so the made-up sample it held is wiped when it next loads.)
+const SHARED_USER = asUserId('sample');
 
 // Static assets serve the app; only /api/* reaches this handler (run_worker_first).
 export default {
@@ -15,10 +17,8 @@ export default {
       return Response.json(body);
     }
     if (url.pathname.startsWith('/api/archive/') || url.pathname.startsWith('/api/schedules') || url.pathname === '/api/usage') {
-      // Phase 1: no sign-in yet, so every visitor sees the synthetic sample mailbox.
-      // PR 4 replaces this with the signed-in user's own mailbox, and sample mode ends.
-      const mailbox = env.MAILBOX.getByName(mailboxName(SAMPLE_USER));
-      await mailbox.ensureSample();
+      // Sign-in replaces this with the signed-in user's own mailbox.
+      const mailbox = env.MAILBOX.getByName(mailboxName(SHARED_USER));
       const res = await mailboxApi(request, url, mailbox);
       if (res) return res;
     }

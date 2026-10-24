@@ -4,8 +4,6 @@ import {
   domainOf,
   ftsRowid,
   monthOf,
-  sampleMessages,
-  SAMPLE_LABELS,
   type ArchiveRows,
   type ArchiveView,
   type IndexedMessage,
@@ -80,7 +78,24 @@ function tally(into: Tally, key: string, m: IndexedMessage, name = '') {
 export class MailboxDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    ctx.blockConcurrencyWhile(async () => this.migrate());
+    ctx.blockConcurrencyWhile(async () => {
+      this.migrate();
+      this.dropSample();
+    });
+  }
+
+  /**
+   * Phase 1 filled one shared mailbox with made-up sample mail. No fake data is kept, so a
+   * mailbox still flagged as sample has its index and rollups emptied the next time it loads.
+   */
+  private dropSample(): void {
+    const sql = this.ctx.storage.sql;
+    if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'sample'`).toArray().length) return;
+    this.ctx.storage.transactionSync(() => {
+      for (const table of ['messages', 'message_fts', 'senders', 'domains', 'months', 'labels'])
+        sql.exec(`DELETE FROM ${table}`);
+      sql.exec(`DELETE FROM meta WHERE key = 'sample'`);
+    });
   }
 
   private migrate(): void {
@@ -251,17 +266,6 @@ export class MailboxDO extends DurableObject<Env> {
       }
     }
     throw new Error('unknown view');
-  }
-
-  /** Phase 1 only: fill an empty mailbox with the synthetic sample. Never used on a real user's. */
-  async ensureSample(count = 2400): Promise<void> {
-    // A meta flag, not count(*): counting would read every row on every page view.
-    const sql = this.ctx.storage.sql;
-    if (sql.exec(`SELECT 1 FROM meta WHERE key = 'sample'`).toArray().length) return;
-    const mail = sampleMessages(count);
-    for (let i = 0; i < mail.length; i += 100) await this.ingest(mail.slice(i, i + 100));
-    await this.putLabels(SAMPLE_LABELS);
-    sql.exec(`INSERT INTO meta (key, value) VALUES ('sample', ?)`, String(count));
   }
 
   /** The schedules with the person's changes applied. Nothing runs them until phase 2's sync. */

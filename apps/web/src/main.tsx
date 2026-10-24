@@ -1,9 +1,7 @@
 import {
-  IntegrationRow,
   LumenShell,
   NavGroup,
   SchedulesSection,
-  TestBadge,
   type ScheduleItem,
   type ScheduleRun,
 } from '@columenlabs/lumen-ui';
@@ -28,11 +26,10 @@ import {
   UserIcon,
   UsersIcon,
 } from 'lucide-react';
-import { StrictMode, useState } from 'react';
+import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
-import { BackfillPage, BackfillStatus, UsagePage } from './ops-pages';
-import { RELEASES, RELEASES_API } from './releases';
+import { BackfillPage, UsagePage } from './ops-pages';
 import './index.css';
 
 // Schedules are saved in the mailbox. Nothing runs them until phase 2's sync,
@@ -66,31 +63,10 @@ function SchedulesSettings() {
   );
 }
 
-const ACCOUNTS = [
-  { email: 'you@example.com', meta: 'Gmail · 1,682 messages · synced 2 h ago' },
-  { email: 'work@example.org', meta: 'Gmail · 718 messages · synced 2 h ago' },
-];
-
+// Accounts connect with Google sign-in (next PR). Until then there are none, and the
+// app never shows made-up ones.
 function AccountsSettings() {
-  const [open, setOpen] = useState<string | null>(null);
-  return (
-    <div>
-      {ACCOUNTS.map((a) => (
-        <IntegrationRow
-          key={a.email}
-          name={a.email}
-          meta={a.meta}
-          badge={<TestBadge test={{ ok: true }} ok="Connected" />}
-          open={open === a.email}
-          onOpenChange={(o: boolean) => setOpen(o ? a.email : null)}
-        >
-          <p className="text-sm text-muted-foreground">
-            Read-only Gmail access. The archive keeps every message, even after you delete it from Gmail.
-          </p>
-        </IntegrationRow>
-      ))}
-    </div>
-  );
+  return <p className="text-sm text-muted-foreground">No Gmail account is connected yet. Google sign-in, which connects one, comes next.</p>;
 }
 
 const nav = (
@@ -123,9 +99,6 @@ function Frame() {
       appLabel="MailCellar"
       brand={<span className="px-2 font-semibold">MailCellar</span>}
       nav={<>{nav}{opsNav}</>}
-      status={<BackfillStatus />}
-      releases={RELEASES_API}
-      user={{ email: 'you@example.com', name: 'Sample user' }}
       settings={[
         { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts this archive keeps', content: <AccountsSettings /> },
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Work the archive runs on its own', content: <SchedulesSettings /> },
@@ -148,8 +121,6 @@ const router = createRouter({
   history: createMemoryHistory({ initialEntries: ['/'] }),
 });
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-// No releases API yet: seed What's new with the prototype's change log (Lumen's query key).
-queryClient.setQueryData(['edgeshell', 'releases', RELEASES_API], { pages: [RELEASES], pageParams: [null] });
 
 createRoot(document.getElementById('root') as HTMLElement).render(
   <StrictMode>

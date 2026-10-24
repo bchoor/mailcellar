@@ -1,6 +1,8 @@
 import { checkScheduleChange, DEFAULT_SCHEDULES, type Schedule, type UsageDay } from '@mailcellar/schema';
-import { exports } from 'cloudflare:workers';
+import { asUserId, mailboxName } from '@mailcellar/schema';
+import { env, exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { seedSample } from './fixtures/sample';
 
 const api = (path: string, init?: RequestInit) => exports.default.fetch(`https://mailcellar.icaruslab.dev${path}`, init);
 const put = (id: string, body: unknown) =>
@@ -46,7 +48,8 @@ describe('schedules', () => {
 
 describe('usage', () => {
   it("counts the mailbox's own rows written, read and messages indexed", async () => {
-    await api('/api/archive/senders'); // seeds the sample and reads a rollup
+    await seedSample(env.MAILBOX.getByName(mailboxName(asUserId('sample'))));
+    await api('/api/archive/senders'); // reads a rollup
     const usage = (await (await api('/api/usage')).json()) as UsageDay[];
     const today = new Date().toISOString().slice(0, 10);
     const v = (m: string) => usage.find((u) => u.day === today && u.metric === m)?.value ?? 0;
