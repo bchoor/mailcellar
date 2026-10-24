@@ -47,7 +47,7 @@ import {
   type MessagePage,
 } from '@mailcellar/schema';
 import type { Env } from './env';
-import { accountMailbox, accessToken, BasinNotReady, launchLanes, runDied, syncDeps } from './sync';
+import { accountMailbox, accessToken, BasinNotReady, INDEX_CHUNK, INDEX_ROWS, launchLanes, runDied, syncDeps } from './sync';
 import { BUCKET, FLIGHT, freshLane, readLane, saveLane } from './copy';
 import { GmailError } from './gmail';
 import { accountQuota } from './quota';
@@ -1464,11 +1464,15 @@ export class MailboxDO extends DurableObject<Env> {
             const v = await mailbox.statusView();
             const sync = syncSummary(await this.keepRunning(user, a.id, v.sync, paused));
             const census = (await this.keepCounting(user, a.id, v.census)) ?? v.census;
+            const index = await this.indexHeld(v.index, v.months);
+            // Held for the limit: every month queued for indexing waits with it.
+            if (index.status === 'waiting')
+              for (const m of v.months) if (m.indexState === 'queued' || m.indexState === 'indexing') Object.assign(m, { indexState: 'waiting', resumesAt: index.resumesAt });
             return {
               ...a,
               sync,
               copy: paused ? { status: 'paused', pausedBy: pausedBy! } : { status: sync.status === 'running' ? 'copying' : 'idle' },
-              index: v.index,
+              index,
               months: v.months,
               census: censusView(census),
               current: monthNow(),
@@ -1486,6 +1490,23 @@ export class MailboxDO extends DurableObject<Env> {
       : waits.length ? 'index_waiting'
       : 'idle';
     return { basin: !!this.env.BASIN_TOKEN, paused, pausedBy, state, resumesAt: state === 'index_waiting' ? waits[0] : null, accounts };
+  }
+
+  /** The daily limit indexing would wait for, asked of the quota at most every 5 minutes. */
+  private indexLimit: { at: number; full: { label: string; resumesAt: string } | null } | null = null;
+
+  /**
+   * Months queued for indexing while no index run reports (one asleep until the daily limit
+   * resets, started before it could say so): waiting, when the next chunk would pass the DO
+   * write limit. Asks the quota once per 5 minutes, and only then.
+   */
+  private async indexHeld(index: AccountStatus['index'], months: MonthCoverage[]): Promise<AccountStatus['index']> {
+    if (index.status !== 'idle' || !months.some((m) => m.indexState === 'queued')) return index;
+    const now = Date.now();
+    if (!this.indexLimit || now - this.indexLimit.at > 5 * 60_000)
+      this.indexLimit = { at: now, full: await accountQuota(this.env).reserve({ do_rows_written: INDEX_CHUNK * INDEX_ROWS }) };
+    const full = this.indexLimit.full;
+    return full && Date.parse(full.resumesAt) > now ? { status: 'waiting', pausedFor: full.label, resumesAt: full.resumesAt } : index;
   }
 
   /**
