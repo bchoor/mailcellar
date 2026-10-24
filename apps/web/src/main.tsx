@@ -8,7 +8,7 @@ import {
   type ScheduleItem,
   type ScheduleRun,
 } from '@columenlabs/lumen-ui';
-import { useSidebar } from '@columenlabs/lumen-ui/ui/sidebar';
+import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@columenlabs/lumen-ui/ui/sidebar';
 import { TooltipProvider } from '@columenlabs/lumen-ui/ui/tooltip';
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -19,6 +19,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  Link,
   Navigate,
   useLocation,
 } from '@tanstack/react-router';
@@ -89,6 +90,20 @@ function CloseMenuOnNavigate() {
   return null;
 }
 
+// The sidebar's top: the logo (the favicon's mark) and the name; collapsed, the logo alone.
+const brand = (
+  <SidebarMenu>
+    <SidebarMenuItem>
+      <SidebarMenuButton size="lg" tooltip="MailCellar" asChild>
+        <Link to="/">
+          <img src="/favicon.svg" alt="" className="size-8 shrink-0 rounded-lg" />
+          <span className="truncate font-semibold">MailCellar</span>
+        </Link>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  </SidebarMenu>
+);
+
 function Frame() {
   const me = useMe();
   if (me.isPending) return null;
@@ -97,7 +112,7 @@ function Frame() {
     <LumenShell
       app="mailcellar"
       appLabel="MailCellar"
-      brand={<span className="px-2 font-semibold">MailCellar</span>}
+      brand={brand}
       // One section per Gmail account, then the pages that cover all of them.
       nav={<><MailboxNav />{opsNav}</>}
       user={me.data ? { email: me.data.user.email, name: null } : null}
