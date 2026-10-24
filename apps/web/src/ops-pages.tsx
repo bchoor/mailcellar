@@ -106,7 +106,7 @@ export function UsagePage() {
     <LumenLayout
       crumbs={[{ label: 'Cloudflare usage' }]}
       meta={<span className="text-xs text-muted-foreground">Days run midnight to midnight UTC</span>}
-      lead={[{ id: 'limits', title: 'Against the free tier', icon: GaugeIcon, kind: 'widget', link: false, children: <LimitsCard days={query.data ?? []} /> }]}
+      lead={[{ id: 'limits', title: 'Account limits', icon: GaugeIcon, kind: 'widget', link: false, children: <LimitsCard days={query.data ?? []} /> }]}
       domain={USAGE_DOMAIN}
       config={config}
       rows={usageRows(query.data ?? [])}
