@@ -66,6 +66,17 @@ async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox
     if (!token) return Response.json({ error: 'not_found' }, { status: 404 });
     return Response.json({ ok: true, revoked: await revoke(token) }, { headers: noStore });
   }
+  const sync = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/sync$/);
+  if (sync && request.method === 'GET') {
+    const info = await mailbox.syncInfo(sync[1]);
+    return info ? Response.json(info, { headers: noStore }) : Response.json({ error: 'not_found' }, { status: 404 });
+  }
+  if (sync && request.method === 'POST') {
+    // Sync now: start a run unless one is going; answers with where the sync stands.
+    const r = await mailbox.syncAccount(sync[1], true);
+    if ('error' in r) return Response.json({ error: r.error }, { status: r.error === 'not_found' ? 404 : 409, headers: noStore });
+    return Response.json({ started: r.status === 'started', sync: await mailbox.syncInfo(sync[1]) }, { headers: noStore });
+  }
   const archive = url.pathname.match(/^\/api\/archive\/([a-z]+)$/);
   if (archive && request.method === 'GET' && ARCHIVE_VIEWS.includes(archive[1] as ArchiveView)) {
     const q = (url.searchParams.get('q') ?? '').slice(0, 200);

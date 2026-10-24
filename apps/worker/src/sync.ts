@@ -126,8 +126,11 @@ export interface RunOptions {
   basin?: (env: Env, user: UserId) => Promise<BasinTarget | null>;
 }
 
-/** Where Basin rows go by default. Tests swap in a local table. */
-export const syncDeps: { basin: (env: Env, user: UserId) => Promise<BasinTarget | null> } = { basin: catalogTarget };
+/** Where Basin rows go, and how a sync starts. Tests swap in a local table and a stand-in start. */
+export const syncDeps: {
+  basin: (env: Env, user: UserId) => Promise<BasinTarget | null>;
+  start: (env: Env, user: UserId, account: string) => Promise<string>;
+} = { basin: catalogTarget, start: (env, user, account) => startSync(env, user, account) };
 
 /** Staged Basin batches allowed to wait; past this, copying stops until Basin takes them. */
 export const BASIN_QUEUE_MAX = 20;

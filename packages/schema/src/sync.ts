@@ -42,3 +42,45 @@ export interface SyncParams {
   user: string;
   account: string;
 }
+
+/** Where an account's sync stands: a run is going, it's waiting to resume, it stopped on an error, or it can start. */
+export type SyncStatus = 'idle' | 'running' | 'waiting' | 'stopped';
+
+/** A run that hasn't saved for this long has died: a run's step times out at 15 minutes and retries once. */
+export const SYNC_STALE_MS = 45 * 60_000;
+
+export function syncStatus(s: SyncState | null, now = Date.now()): SyncStatus {
+  if (!s) return 'idle';
+  if (s.phase === 'error') return 'stopped';
+  if (s.resumesAt && Date.parse(s.resumesAt) > now) return 'waiting';
+  // Live with nothing left to copy means the last run finished.
+  const busy = s.phase !== 'live' || s.pending.length > 0 || s.basinQueue.length > 0;
+  return busy && now - Date.parse(s.updatedAt) < SYNC_STALE_MS ? 'running' : 'idle';
+}
+
+/** One account's sync as the app shows it. */
+export interface SyncSummary {
+  status: SyncStatus;
+  phase: SyncPhase | null;
+  total: number | null;
+  copied: number;
+  bytes: number;
+  startedAt: string | null;
+  updatedAt: string | null;
+  resumesAt: string | null;
+  error: string | null;
+}
+
+export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary {
+  return {
+    status: syncStatus(s, now),
+    phase: s?.phase ?? null,
+    total: s?.total ?? null,
+    copied: s?.copied ?? 0,
+    bytes: s?.bytes ?? 0,
+    startedAt: s?.startedAt ?? null,
+    updatedAt: s?.updatedAt ?? null,
+    resumesAt: s?.resumesAt ?? null,
+    error: s?.error ?? null,
+  };
+}
