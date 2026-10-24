@@ -1,4 +1,4 @@
-import { DEFAULT_SCHEDULES, nextRun, syncStatus, type Schedule, type SyncState, type SyncSummary } from '@mailcellar/schema';
+import { DEFAULT_SCHEDULES, nextRun, syncStatus, type Schedule, type SyncOverview, type SyncState, type SyncSummary } from '@mailcellar/schema';
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -64,6 +64,12 @@ const realStart = syncDeps.start;
 afterEach(() => void (syncDeps.start = realStart));
 
 describe('Sync now', () => {
+  it("lists every account's sync, and whether Basin can be written", async () => {
+    const { api, id } = await withAccount();
+    const all = (await (await api('/api/sync')).json()) as SyncOverview;
+    expect(all).toEqual({ basin: false, accounts: [{ id, email: 'me@example.com', sync: expect.objectContaining({ status: 'idle', phase: null }) }] });
+  });
+
   it("refuses to start until Basin can be written, and shows the account's sync", async () => {
     const { api, id } = await withAccount();
     const info = (await (await api(`/api/accounts/${id}/sync`)).json()) as SyncSummary;

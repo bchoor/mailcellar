@@ -18,28 +18,6 @@ import { EmptyState } from './archive';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 
-// No sync has run yet: the Workflow arrives in phase 2 and reports real runs here.
-// Until then the page says so, and the status bar shows nothing.
-export function BackfillPage() {
-  return (
-    <LumenLayout
-      crumbs={[{ label: 'Backfill' }]}
-      meta={<Badge variant="secondary">Not started</Badge>}
-      cards={[
-        {
-          id: 'progress', title: 'Backfill progress', icon: HourglassIcon, kind: 'widget', link: false, w: 6,
-          children: (
-            <EmptyState icon={HourglassIcon} title="No backfill yet">
-              Not built yet. Once it ships, it copies the existing mail in each connected Gmail account, about 18,000 messages a day
-              on the Workers Free plan. Progress and each run show here.
-            </EmptyState>
-          ),
-        },
-      ]}
-    />
-  );
-}
-
 // Usage the mailbox measures itself (/api/usage). Account-wide figures for the other
 // services are not counted yet (no Analytics API token, by decision).
 interface UsageRow {

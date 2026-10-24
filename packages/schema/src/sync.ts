@@ -84,3 +84,9 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
     error: s?.error ?? null,
   };
 }
+
+/** GET /api/sync: each account's sync, and whether Basin (the system of record) can be written yet. */
+export interface SyncOverview {
+  basin: boolean;
+  accounts: { id: string; email: string; sync: SyncSummary }[];
+}

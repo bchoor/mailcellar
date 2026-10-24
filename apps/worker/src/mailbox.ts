@@ -18,6 +18,7 @@ import {
   type UsageMetric,
   type SyncState,
   type SyncSummary,
+  type SyncOverview,
   type ScheduleRun,
   type UserId,
   asUserId,
@@ -393,6 +394,20 @@ export class MailboxDO extends DurableObject<Env> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return null;
     return syncSummary(await accountMailbox(this.env, user, account).syncState());
+  }
+
+  /** Every account's sync, for the Backfill page and the status bar, and whether Basin can be written. */
+  async syncAll(): Promise<SyncOverview> {
+    const user = this.userId();
+    const accounts = this.ctx.storage.sql
+      .exec<{ id: string; email: string }>(`SELECT id, email FROM accounts ORDER BY added_at`)
+      .toArray();
+    return {
+      basin: !!this.env.BASIN_TOKEN,
+      accounts: user
+        ? await Promise.all(accounts.map(async (a) => ({ ...a, sync: syncSummary(await accountMailbox(this.env, user, a.id).syncState()) })))
+        : [],
+    };
   }
 
   /**
