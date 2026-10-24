@@ -73,3 +73,18 @@ describe('schema helpers', () => {
     expect(() => r2Keys.attachment(asUserId('u'), 'nothex')).toThrow();
   });
 });
+
+describe("what's new", () => {
+  it('lists merged PRs newest first, in pages', async () => {
+    const page = async (q: string) =>
+      ((await (await exports.default.fetch(`https://mailcellar.icaruslab.dev/api/releases?${q}`)).json()) as {
+        releases: { tag: string; published_at: string }[];
+      }).releases;
+    const first = await page('limit=2');
+    expect(first).toHaveLength(2);
+    expect(first[0].tag).toMatch(/^#\d+ · [0-9a-f]{7}$/);
+    expect(first[0].published_at >= first[1].published_at).toBe(true);
+    const next = await page(`limit=2&before=${encodeURIComponent(first[1].published_at)}`);
+    expect(next[0].published_at < first[1].published_at).toBe(true);
+  });
+});

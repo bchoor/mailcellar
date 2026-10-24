@@ -12,6 +12,7 @@ export default {
       const body: Health = { ok: true, service: 'mailcellar', version: env.APP_VERSION };
       return Response.json(body);
     }
+    if (url.pathname === '/api/releases' && request.method === 'GET') return releases(request, env, url);
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     // A change must come from this app's own pages; this refuses other sites' requests outright.
     if (request.method !== 'GET' && request.headers.get('origin') !== url.origin)
@@ -29,6 +30,25 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 const noStore = { 'cache-control': 'no-store' };
+
+interface Release {
+  tag: string;
+  published_at: string;
+}
+
+/**
+ * GET /api/releases?limit=&before=: What's new in the status bar. The build writes
+ * releases.json from the PRs merged to main (scripts/changelog.mjs); this pages through it.
+ */
+async function releases(request: Request, env: Env, url: URL): Promise<Response> {
+  const res = await env.ASSETS.fetch(new Request(new URL('/releases.json', url), { headers: request.headers }));
+  if (!res.ok || !res.headers.get('content-type')?.includes('json')) return Response.json({ error: 'not_found' }, { status: 404 });
+  const all = ((await res.json()) as { releases: Release[] }).releases;
+  const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 20, 1), 100);
+  const before = url.searchParams.get('before');
+  const from = before ? all.findIndex((r) => r.published_at < before) : 0;
+  return Response.json({ releases: from < 0 ? [] : all.slice(from, from + limit) }, { headers: noStore });
+}
 
 /** The API a mailbox serves: who this is, accounts, archive pages, schedules and usage. Null: not one of these. */
 async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox }: Identity): Promise<Response | null> {
