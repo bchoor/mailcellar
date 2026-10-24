@@ -251,3 +251,89 @@ export function indexRow(m: RawMessage, raw: Uint8Array): IndexedMessage {
     labels: m.labelIds ?? [],
   };
 }
+
+/** Addresses in a To or Cc header, lower-cased. */
+export function parseAddresses(value: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let quoted = false;
+  let cur = '';
+  const push = () => {
+    const a = /<([^>]*)>/.exec(cur)?.[1] ?? cur.replace(/\(.*?\)/g, '').trim();
+    if (a.includes('@')) out.push(a.trim().toLowerCase());
+    cur = '';
+  };
+  for (const c of value) {
+    if (c === '"' && depth === 0) quoted = !quoted;
+    else if (!quoted && c === '<') depth++;
+    else if (!quoted && c === '>') depth = Math.max(0, depth - 1);
+    if (c === ',' && !quoted && depth === 0) push();
+    else cur += c;
+  }
+  push();
+  return out;
+}
+
+function decodeBody(body: string, encoding: string, charset: string): string {
+  let bytes: Uint8Array;
+  const enc = encoding.toLowerCase();
+  if (enc === 'base64') {
+    try {
+      bytes = Uint8Array.from(atob(body.replace(/[^A-Za-z0-9+/=]/g, '')), (c) => c.charCodeAt(0));
+    } catch {
+      return '';
+    }
+  } else if (enc === 'quoted-printable') {
+    const s = body.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+    bytes = Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff);
+  } else bytes = Uint8Array.from(body, (c) => c.charCodeAt(0) & 0xff);
+  try {
+    return new TextDecoder(charset || 'utf-8').decode(bytes);
+  } catch {
+    return new TextDecoder().decode(bytes);
+  }
+}
+
+const htmlToText = (html: string) =>
+  unescapeSnippet(
+    html
+      .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<br\s*\/?>|<\/(p|div|tr|li|h\d)>/gi, '\n')
+      .replace(/<[^>]+>/g, ' '),
+  )
+    .replace(/[ \t\f\v]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .trim();
+
+/**
+ * The readable text of a message, for full-text search in Basin: the first text/plain part,
+ * or the first text/html part with tags removed. Attachments are skipped, not decoded.
+ */
+export function bodyText(raw: Uint8Array, max = 32 * 1024): string {
+  type Found = { plain?: string; html?: string };
+  const found: Found = {};
+  const walk = (entity: string, depth: number) => {
+    if (depth > 8 || (found.plain !== undefined && found.html !== undefined)) return;
+    const split = entity.search(/\r?\n\r?\n/);
+    const head = (split < 0 ? entity : entity.slice(0, split)).replace(/\r?\n[ \t]+/g, ' ');
+    const body = split < 0 ? '' : entity.slice(split).replace(/^\r?\n\r?\n/, '');
+    const h = (name: string) => new RegExp(`^${name}:[ \\t]*(.*)$`, 'im').exec(head)?.[1] ?? '';
+    const type = h('content-type').toLowerCase() || 'text/plain';
+    if (/^attachment/i.test(h('content-disposition'))) return;
+    if (type.startsWith('multipart/')) {
+      const boundary = /boundary="?([^";]+)"?/i.exec(h('content-type'))?.[1];
+      if (!boundary) return;
+      const parts = body.split(`--${boundary}`);
+      for (const part of parts.slice(1)) {
+        if (part.startsWith('--')) break;
+        walk(part.replace(/^[ \t]*\r?\n/, ''), depth + 1);
+      }
+      return;
+    }
+    const charset = /charset="?([^";\s]+)"?/i.exec(h('content-type'))?.[1] ?? 'utf-8';
+    if (type.startsWith('text/plain') && found.plain === undefined) found.plain = decodeBody(body, h('content-transfer-encoding'), charset);
+    else if (type.startsWith('text/html') && found.html === undefined) found.html = htmlToText(decodeBody(body, h('content-transfer-encoding'), charset));
+  };
+  walk(binary(raw), 0);
+  return (found.plain ?? found.html ?? '').trim().slice(0, max);
+}

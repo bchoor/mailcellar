@@ -28,6 +28,10 @@ export interface SyncState {
   historyId: string | null;
   startedAt: string;
   updatedAt: string;
+  /** Batches copied but not yet committed to Basin (R2 keys of staged rows), oldest first. */
+  basinQueue: string[];
+  /** The user's Basin table exists. */
+  basinReady: boolean;
   /** When a paused sync resumes. */
   resumesAt: string | null;
   error: string | null;
