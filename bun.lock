@@ -46,6 +46,9 @@
     },
     "packages/schema": {
       "name": "@mailcellar/schema",
+      "devDependencies": {
+        "typescript": "5.9.3",
+      },
     },
   },
   "packages": {
