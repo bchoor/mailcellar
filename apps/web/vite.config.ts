@@ -8,5 +8,6 @@ const single = process.env.SINGLEFILE === '1';
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), ...(single ? [viteSingleFile()] : [])],
+  define: { __SINGLE_FILE__: JSON.stringify(single) },
   build: single ? { assetsInlineLimit: 100_000_000, cssCodeSplit: false, chunkSizeWarningLimit: 100_000 } : {},
 });

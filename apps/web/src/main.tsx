@@ -5,15 +5,18 @@ import {
   type ScheduleItem,
   type ScheduleRun,
 } from '@columenlabs/lumen-ui';
+import { useSidebar } from '@columenlabs/lumen-ui/ui/sidebar';
 import { TooltipProvider } from '@columenlabs/lumen-ui/ui/tooltip';
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Outlet,
   RouterProvider,
+  createBrowserHistory,
   createMemoryHistory,
   createRootRoute,
   createRoute,
   createRouter,
+  useLocation,
 } from '@tanstack/react-router';
 import {
   CalendarClockIcon,
@@ -26,7 +29,7 @@ import {
   UserIcon,
   UsersIcon,
 } from 'lucide-react';
-import { StrictMode } from 'react';
+import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
 import { BackfillPage, UsagePage } from './ops-pages';
@@ -92,6 +95,14 @@ const opsNav = (
   />
 );
 
+// On a phone the menu is a sheet over the page: picking a page closes it.
+function CloseMenuOnNavigate() {
+  const path = useLocation({ select: (l) => l.pathname });
+  const { setOpenMobile } = useSidebar();
+  useEffect(() => setOpenMobile(false), [path, setOpenMobile]);
+  return null;
+}
+
 function Frame() {
   return (
     <LumenShell
@@ -104,10 +115,14 @@ function Frame() {
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Work the archive runs on its own', content: <SchedulesSettings /> },
       ]}
     >
+      <CloseMenuOnNavigate />
       <Outlet />
     </LumenShell>
   );
 }
+
+/** Set by vite.config.ts: true in the one-file prototype build. */
+declare const __SINGLE_FILE__: boolean;
 
 const root = createRootRoute({ component: Frame });
 const PAGES = { '/': OverviewPage, '/messages': MessagesPage, '/senders': SendersPage, '/domains': DomainsPage, '/labels': LabelsPage, '/time': TimePage };
@@ -118,7 +133,8 @@ const opsRoutes = [
 ];
 const router = createRouter({
   routeTree: root.addChildren([...routes, ...opsRoutes]),
-  history: createMemoryHistory({ initialEntries: ['/'] }),
+  // Real URLs, so refresh, Back and links work. The one-file prototype has no server to answer them.
+  history: __SINGLE_FILE__ ? createMemoryHistory({ initialEntries: ['/'] }) : createBrowserHistory(),
 });
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
 
