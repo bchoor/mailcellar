@@ -62,7 +62,8 @@ async function withAccount() {
 
 const realStart = syncDeps.start;
 const realCensus = syncDeps.census;
-afterEach(() => void Object.assign(syncDeps, { start: realStart, census: realCensus }));
+const realStatus = syncDeps.runStatus;
+afterEach(() => void Object.assign(syncDeps, { start: realStart, census: realCensus, runStatus: realStatus }));
 
 describe('Sync now', () => {
   it("lists every account's sync, and whether Basin can be written", async () => {
@@ -109,6 +110,46 @@ describe('Sync now', () => {
     expect(await mailbox.syncAccount(id, false)).toEqual({ status: 'stopped' });
     expect(await mailbox.syncAccount(id, true)).toEqual({ status: 'started' });
     expect((await api(`/api/accounts/a${'x'.repeat(22)}/sync`, { method: 'POST' })).status).toBe(404);
+  });
+});
+
+describe('Healing a dead run', () => {
+  it('AC-HEAL1 a run Cloudflare stopped is started afresh when the page or the schedule looks, not after 45 minutes', async () => {
+    const { mailbox, id, user, api } = await withAccount();
+    const now = new Date().toISOString();
+    await accountMailbox(env, user, id).saveSync({
+      phase: 'backfill', runId: 'dead-run', total: 1623, copied: 0, bytes: 0, pending: ['m1'], pageToken: '', historyId: '1',
+      basinQueue: [], basinReady: true, startedAt: now, updatedAt: now, resumesAt: null, error: null,
+    });
+    const asked: string[] = [];
+    syncDeps.runStatus = async (_e, runId) => (asked.push(runId), runId === 'dead-run' ? 'errored' : 'running');
+    const started: string[] = [];
+    syncDeps.start = async (e, u, account) => {
+      started.push(account);
+      const s = (await accountMailbox(e, u, account).syncState())!;
+      await accountMailbox(e, u, account).saveSync({ ...s, runId: 'fresh-run', updatedAt: new Date().toISOString() });
+      return 'fresh-run';
+    };
+    const all = (await (await api('/api/sync')).json()) as SyncOverview;
+    expect(started).toEqual([id]);
+    expect(all.accounts[0].sync.status).toBe('running');
+    // The fresh run is alive: neither the page nor the schedule starts another.
+    await api('/api/sync');
+    expect(await mailbox.syncAccount(id, false)).toEqual({ status: 'running' });
+    expect(started).toEqual([id]);
+    expect(asked).toEqual(['dead-run', 'fresh-run', 'fresh-run']);
+  });
+
+  it('AC-HEAL2 the schedule restarts a dead run too', async () => {
+    const { mailbox, id, user } = await withAccount();
+    const now = new Date().toISOString();
+    await accountMailbox(env, user, id).saveSync({
+      phase: 'backfill', runId: 'dead-run', total: 5, copied: 0, bytes: 0, pending: ['m1'], pageToken: '', historyId: '1',
+      basinQueue: [], basinReady: true, startedAt: now, updatedAt: now, resumesAt: null, error: null,
+    });
+    syncDeps.runStatus = async () => 'errored';
+    syncDeps.start = async () => 'fresh-run';
+    expect(await mailbox.syncAccount(id, false)).toEqual({ status: 'started' });
   });
 });
 
