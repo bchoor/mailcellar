@@ -65,7 +65,7 @@ export function AccountsSettings() {
     <div className="flex flex-col gap-3">
       <ErrorLine error={problem ?? me.error} />
       {accounts.length === 0 && !me.isPending && (
-        <p className="text-sm text-muted-foreground">No Gmail account is connected. Add one to start archiving.</p>
+        <p className="text-sm text-muted-foreground">No Gmail accounts yet. Add one so MailCellar can start copying its mail.</p>
       )}
       <div>
         {accounts.map((a) => (
@@ -92,7 +92,7 @@ export function AccountsSettings() {
               <div>
                 <LumenConfirm
                   title={`Remove ${a.email}?`}
-                  description="MailCellar stops syncing it and gives up its Gmail access. Mail already archived stays here."
+                  description="MailCellar stops copying mail from this account and gives up its access to it. Mail already copied stays in MailCellar."
                   action="Remove"
                   busyAction="Removing…"
                   onConfirm={async () => {

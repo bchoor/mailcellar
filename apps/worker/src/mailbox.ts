@@ -292,7 +292,7 @@ export class MailboxDO extends DurableObject<Env> {
     return DEFAULT_SCHEDULES.map((s) => ({
       ...s,
       ...saved.get(s.id),
-      waiting: s.id !== 'gmail-sync' ? null : hasAccount ? 'Sync arrives with the backfill, in the next phase' : 'Waiting for a connected Gmail account',
+      waiting: s.id !== 'gmail-sync' ? null : hasAccount ? 'Not built yet: syncing starts when the backfill ships' : 'Add a Gmail account in Settings ▸ Accounts first',
     }));
   }
 

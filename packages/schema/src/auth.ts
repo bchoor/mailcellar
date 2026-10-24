@@ -33,9 +33,9 @@ export interface Me {
 /** Codes the connect redirect puts in `?auth_error=`, and what Settings ▸ Accounts says for each. */
 export const AUTH_ERRORS = {
   denied: 'Adding the account was cancelled at Google.',
-  state: 'That link expired. Try adding the account again.',
+  state: 'Adding the account was interrupted or took too long. Try again.',
   gmail_scope: 'MailCellar needs access to Gmail. Tick the Gmail box on Google’s consent screen.',
-  no_refresh: 'Google didn’t grant offline access. Try adding the account again.',
+  no_refresh: 'Google didn’t give MailCellar lasting access to this account. Try adding it again.',
   google: 'Google didn’t finish adding the account. Try again in a minute.',
 } as const;
 export type AuthError = keyof typeof AUTH_ERRORS;

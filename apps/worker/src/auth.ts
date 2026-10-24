@@ -218,11 +218,11 @@ export async function testAccount(env: Env, mailbox: DurableObjectStub<MailboxDO
     });
     const token = (await res.json()) as { access_token?: string; error?: string };
     if (!token.access_token) {
-      result = { error: token.error === 'invalid_grant' ? 'Google no longer accepts this connection (revoked or expired). Remove the account and add it again.' : `Google refused the token (${res.status}).` };
+      result = { error: token.error === 'invalid_grant' ? 'Google no longer accepts this connection (revoked or expired). Remove the account and add it again.' : `Google rejected the connection (HTTP ${res.status}). Try again; if it keeps failing, remove the account and add it again.` };
     } else {
       const info = await fetch(`${TOKENINFO_URL}?access_token=${encodeURIComponent(token.access_token)}`);
       const body = (await info.json()) as { scope?: string };
-      result = info.ok ? { scopes: (body.scope ?? '').split(' ') } : { error: `Google couldn't describe the token (${info.status}).` };
+      result = info.ok ? { scopes: (body.scope ?? '').split(' ') } : { error: `Google couldn’t confirm this account’s access (HTTP ${info.status}). Try again.` };
     }
   } catch {
     result = { error: 'Couldn’t reach Google. Try again.' };

@@ -30,8 +30,8 @@ export function BackfillPage() {
           id: 'progress', title: 'Backfill progress', icon: HourglassIcon, kind: 'widget', link: false, w: 6,
           children: (
             <EmptyState icon={HourglassIcon} title="No backfill yet">
-              It starts once you add a Gmail account in Settings ▸ Accounts and the sync is built. On the free tier it archives about
-              18,000 messages a day. Progress and each sync run show here.
+              Not built yet. Once it ships, it copies the existing mail in each connected Gmail account, about 18,000 messages a day
+              on the Workers Free plan. Progress and each run show here.
             </EmptyState>
           ),
         },
@@ -41,7 +41,7 @@ export function BackfillPage() {
 }
 
 // Usage the mailbox measures itself (/api/usage). Account-wide figures for the other
-// services need Cloudflare's GraphQL Analytics API, which waits on an API token.
+// services are not counted yet (no Analytics API token, by decision).
 interface UsageRow {
   id: string;
   day: string;
@@ -104,8 +104,8 @@ function LimitsCard({ days }: { days: UsageDay[] }) {
     <div className="flex flex-col gap-4">
       <TileRow>
         <Tile className="lg:flex-1" label="Messages indexed today" value={fmt(indexed)} />
-        <Tile className="lg:flex-1" label="Rows written left today" value={fmt(left)} caption="the backfill's limit on Free" />
-        <Tile className="lg:flex-1" label="Bill this month" value="$0.00" caption="Workers Free plan" />
+        <Tile className="lg:flex-1" label="Rows written left today" value={fmt(left)} caption="the daily cap that limits the backfill" />
+        <Tile className="lg:flex-1" label="Plan" value="Workers Free" caption="usage past the caps is refused, not billed" />
       </TileRow>
       <div className="grid gap-3">
         {(Object.keys(FREE_DAILY) as (keyof typeof FREE_DAILY)[]).map((m) => {
@@ -127,8 +127,8 @@ function LimitsCard({ days }: { days: UsageDay[] }) {
       </div>
       <NoteLine
         icon={CloudIcon}
-        title="Measured by your mailbox"
-        note="Workers, R2, Basin and the rest join this page once Cloudflare's Analytics API is connected."
+        title="Counted by MailCellar itself"
+        note="Only its own database reads and writes. Worker requests and R2 storage aren’t counted here yet."
       />
     </div>
   );

@@ -61,7 +61,7 @@ function SchedulesSettings() {
       onRun={async (): Promise<ScheduleRun> => ({
         at: new Date().toISOString(),
         ok: false,
-        detail: 'Sync arrives with the backfill, in the next phase',
+        detail: 'Not built yet: syncing starts when the backfill ships',
       })}
     />
   );
@@ -112,8 +112,8 @@ function Frame() {
       // Signing out is Cloudflare Access's: it ends the Access session for this site.
       signOutUrl="/cdn-cgi/access/logout"
       settings={[
-        { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts this archive keeps', content: <AccountsSettings /> },
-        { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Work the archive runs on its own', content: <SchedulesSettings /> },
+        { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts MailCellar copies', content: <AccountsSettings /> },
+        { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },
       ]}
     >
       <CloseMenuOnNavigate />
