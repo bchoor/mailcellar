@@ -1,27 +1,55 @@
-import { asUserId, mailboxName } from '@mailcellar/schema';
+import { mailboxName } from '@mailcellar/schema';
 import { env, exports } from 'cloudflare:workers';
+import { vi } from 'vitest';
+import { userIdFor } from '../src/auth';
 import { seedSample } from './fixtures/sample';
 
 export const ORIGIN = 'https://mailcellar.icaruslab.dev';
+const TEAM = 'https://test.cloudflareaccess.com';
+const KID = `test-${crypto.randomUUID()}`;
 
-const hex = async (text: string) =>
-  [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))]
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+const b64url = (bytes: ArrayBuffer | Uint8Array) =>
+  btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+const part = (o: unknown) => b64url(new TextEncoder().encode(JSON.stringify(o)));
 
-/** A signed-in user, without going through Google: a session and, if asked, the sample mailbox. */
-export async function signIn(name: string, opts: { sample?: boolean } = {}) {
-  const user = asUserId(name);
+/** A stand-in for Cloudflare Access's signing key; the Worker fetches its public half from the certs URL. */
+const keys = (await crypto.subtle.generateKey(
+  { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+  true,
+  ['sign', 'verify'],
+)) as CryptoKeyPair;
+const jwk = { ...((await crypto.subtle.exportKey('jwk', keys.publicKey)) as JsonWebKey), kid: KID, alg: 'RS256' };
+
+/** A token as Access would sign it for this app; claims override the defaults. */
+export async function accessToken(claims: Record<string, unknown>, header: Record<string, unknown> = {}) {
+  const head = part({ alg: 'RS256', kid: KID, ...header });
+  const body = part({ aud: [env.ACCESS_AUD], iss: TEAM, exp: Math.floor(Date.now() / 1000) + 600, ...claims });
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', keys.privateKey, new TextEncoder().encode(`${head}.${body}`));
+  return `${head}.${body}.${b64url(sig)}`;
+}
+
+/** Answer the Worker's fetch of Access's certs, and hand anything else to `rest`. */
+export function mockFetch(rest: (url: string, init?: RequestInit) => Promise<Response> | Response = (url) => {
+  throw new Error(`unexpected fetch ${url}`);
+}) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url === `${TEAM}/cdn-cgi/access/certs`) return Response.json({ keys: [jwk] });
+    return rest(url, init);
+  });
+}
+
+/** A person signed in through Access, and if asked, the sample mailbox (test fixture only). */
+export async function signIn(email: string, opts: { sample?: boolean } = {}) {
+  const user = await userIdFor(email);
   const mailbox = env.MAILBOX.getByName(mailboxName(user));
-  const secret = `secret-${name}-${crypto.randomUUID()}`;
-  await mailbox.startSession(await hex(secret));
   if (opts.sample) await seedSample(mailbox);
-  const cookie = `mc_session=${user}.${secret}`;
+  const token = await accessToken({ email });
   const api = (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
-    headers.set('cookie', cookie);
+    headers.set('cf-access-jwt-assertion', token);
     if (init.method && init.method !== 'GET') headers.set('origin', ORIGIN);
-    return exports.default.fetch(`${ORIGIN}${path}`, { ...init, headers });
+    return exports.default.fetch(`${ORIGIN}${path}`, { redirect: 'manual', ...init, headers });
   };
-  return { user, mailbox, cookie, api };
+  return { user, email, mailbox, token, api };
 }

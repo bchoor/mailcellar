@@ -3,7 +3,7 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import { signIn } from './helpers';
 
-const sampler = signIn('sampler', { sample: true });
+const sampler = signIn('sampler@example.com', { sample: true });
 const get = async <T>(path: string) => {
   const res = await (await sampler).api(path);
   expect(res.status).toBe(200);

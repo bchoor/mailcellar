@@ -13,7 +13,7 @@ describe('api', () => {
   });
 
   it('returns JSON 404 for unknown API routes', async () => {
-    const res = await (await signIn('nope')).api('/api/nope');
+    const res = await (await signIn('nope@example.com')).api('/api/nope');
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'not_found' });
   });
@@ -21,7 +21,7 @@ describe('api', () => {
 
 describe('no made-up data', () => {
   it('serves a new user an empty archive until real mail arrives', async () => {
-    const { api } = await signIn('newcomer');
+    const { api } = await signIn('newcomer@example.com');
     for (const view of ['months', 'labels', 'domains', 'senders', 'messages']) {
       const res = await api(`/api/archive/${view}`);
       expect(await res.json(), view).toEqual([]);

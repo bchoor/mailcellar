@@ -1,7 +1,7 @@
 import { GMAIL_SCOPES, type Me } from '@mailcellar/schema';
 import { env, exports } from 'cloudflare:workers';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ORIGIN, signIn } from './helpers';
+import { describe, expect, it, vi } from 'vitest';
+import { accessToken, mockFetch, ORIGIN, signIn } from './helpers';
 
 const CLIENT = 'test-client.apps.googleusercontent.com';
 const b64url = (o: unknown) => btoa(JSON.stringify(o)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
@@ -11,8 +11,7 @@ const idToken = (claims: Record<string, unknown>) =>
 /** Google's token and revoke endpoints, as the test wants them to answer. */
 function google(token: Record<string, unknown>) {
   const calls: { url: string; body: string }[] = [];
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = String(input instanceof Request ? input.url : input);
+  mockFetch((url, init) => {
     calls.push({ url, body: String(init?.body ?? '') });
     if (url.startsWith('https://oauth2.googleapis.com/token')) return Response.json(token);
     if (url.startsWith('https://oauth2.googleapis.com/revoke')) return new Response('', { status: 200 });
@@ -20,122 +19,89 @@ function google(token: Record<string, unknown>) {
   });
   return calls;
 }
-afterEach(() => vi.restoreAllMocks());
 
-const get = (path: string, cookie = '') =>
-  exports.default.fetch(`${ORIGIN}${path}`, { headers: cookie ? { cookie } : {}, redirect: 'manual' });
-const setCookies = (res: Response) => res.headers.getSetCookie();
-const value = (res: Response, name: string) =>
-  setCookies(res).find((c) => c.startsWith(`${name}=`))!.split(';')[0];
+const flowCookie = (res: Response) => res.headers.getSetCookie().find((c) => c.startsWith('mc_oauth='))!;
 
-/** Start a sign-in and return Google's URL and the flow cookie. */
-async function start(path = '/api/auth/login', cookie = '') {
-  const res = await get(path, cookie);
+/** Start connecting a Gmail account; returns Google's URL and the flow cookie to send back. */
+async function start(api: Awaited<ReturnType<typeof signIn>>['api']) {
+  const res = await api('/api/accounts/connect');
   expect(res.status).toBe(302);
-  const to = new URL(res.headers.get('location')!);
-  return { to, flow: value(res, 'mc_oauth') };
+  return { to: new URL(res.headers.get('location')!), set: flowCookie(res), flow: flowCookie(res).split(';')[0] };
 }
 
-describe('sign-in', () => {
-  it('sends the person to Google with state, PKCE and offline access', async () => {
-    const { to, flow } = await start();
+/** Come back from Google with a code for the flow just started. */
+const finish = (api: Awaited<ReturnType<typeof signIn>>['api'], flow: string, query: string) =>
+  api(`/api/auth/callback?${query}`, { headers: { cookie: flow } });
+
+describe('identity (Cloudflare Access)', () => {
+  it('serves each Access user their own mailbox, with no login of its own', async () => {
+    const { api, email } = await signIn('ada@example.com');
+    const me = (await (await api('/api/me')).json()) as Me;
+    expect(me).toEqual({ user: { email }, accounts: [] });
+    expect(await (await api('/api/archive/messages')).json()).toEqual([]);
+  });
+
+  it('answers 401 without a valid Access token', async () => {
+    const call = (token?: string) =>
+      exports.default.fetch(`${ORIGIN}/api/me`, { headers: token ? { 'cf-access-jwt-assertion': token } : {} });
+    expect((await call()).status).toBe(401);
+    expect((await call('not.a.jwt')).status).toBe(401);
+    expect((await call(await accessToken({ email: 'x@example.com', aud: ['other-app'] }))).status).toBe(401);
+    expect((await call(await accessToken({ email: 'x@example.com', iss: 'https://evil.cloudflareaccess.com' }))).status).toBe(401);
+    expect((await call(await accessToken({ email: 'x@example.com', exp: Math.floor(Date.now() / 1000) - 5 }))).status).toBe(401);
+    expect((await call(await accessToken({ email: 'x@example.com' }, { kid: 'unknown' }))).status).toBe(401);
+    const good = await accessToken({ email: 'x@example.com' });
+    const [h, b] = good.split('.');
+    expect((await call(`${h}.${b}.${good.split('.')[2].slice(0, -4)}AAAA`)).status).toBe(401);
+    expect((await call(good)).status).toBe(200);
+  });
+
+  it('keeps the health check open', async () => {
+    expect((await exports.default.fetch(`${ORIGIN}/api/health`)).status).toBe(200);
+  });
+});
+
+describe('connecting Gmail accounts', () => {
+  it('sends the person to Google with state, PKCE, offline access and consent', async () => {
+    const { api } = await signIn('starter@example.com');
+    const { to, set } = await start(api);
     expect(to.origin + to.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
     const p = to.searchParams;
     expect(p.get('client_id')).toBe(CLIENT);
     expect(p.get('redirect_uri')).toBe(`${ORIGIN}/api/auth/callback`);
-    expect(p.get('scope')).toContain(GMAIL_SCOPES.modify);
+    expect(p.get('scope')).toBe(`openid email ${GMAIL_SCOPES.modify}`);
     expect(p.get('access_type')).toBe('offline');
+    expect(p.get('prompt')).toBe('select_account consent');
     expect(p.get('code_challenge_method')).toBe('S256');
     expect(p.get('state')).toMatch(/^[\w-]{40,}$/);
-    expect(flow).toMatch(/^mc_oauth=/);
+    // The cookie must reach the callback's path.
+    expect(set).toMatch(/Path=\/api\/auth; .*HttpOnly; Secure; SameSite=Lax/);
   });
 
-  it('signs in, connects the account, and serves only that user', async () => {
-    const { to, flow } = await start();
-    const calls = google({
-      refresh_token: 'rt-ada',
-      scope: `openid email ${GMAIL_SCOPES.modify}`,
-      id_token: idToken({ sub: '1001', email: 'ada@example.com', name: 'Ada Lovelace' }),
-    });
-    const res = await get(`/api/auth/callback?code=c1&state=${to.searchParams.get('state')}`, flow);
-    expect(res.status).toBe(302);
-    expect(res.headers.get('location')).toBe('/');
-    const session = value(res, 'mc_session');
-    expect(setCookies(res).find((c) => c.startsWith('mc_session='))).toMatch(/HttpOnly; Secure; SameSite=Lax/);
-    expect(calls[0].body).toContain('code_verifier=');
-
-    const me = (await (await get('/api/me', session)).json()) as Me;
-    expect(me.user).toEqual({ email: 'ada@example.com', name: 'Ada Lovelace' });
-    expect(me.accounts).toEqual([expect.objectContaining({ email: 'ada@example.com', read: true, modify: true })]);
-    expect(me.accounts[0].test).toMatchObject({ ok: true, detail: 'Read ✓ · Modify ✓' });
-    expect(JSON.stringify(me)).not.toContain('rt-ada');
-    // A new user's archive is their own, and empty: no sample mail.
-    expect(await (await get('/api/archive/messages', session)).json()).toEqual([]);
-  });
-
-  it('refuses a callback whose state does not match', async () => {
-    const { flow } = await start();
-    google({});
-    const res = await get('/api/auth/callback?code=c1&state=forged', flow);
-    expect(res.headers.get('location')).toBe('/?auth_error=state');
-    expect(setCookies(res).some((c) => c.startsWith('mc_session='))).toBe(false);
-  });
-
-  it('refuses a grant without Gmail, or an ID token for another app', async () => {
-    for (const [token, error] of [
-      [{ refresh_token: 'x', scope: 'openid email', id_token: idToken({ sub: '1', email: 'a@example.com' }) }, 'gmail_scope'],
-      [{ refresh_token: 'x', scope: GMAIL_SCOPES.modify, id_token: idToken({ sub: '1', email: 'a@example.com', aud: 'other' }) }, 'google'],
-    ] as const) {
-      const { to, flow } = await start();
-      google(token);
-      const res = await get(`/api/auth/callback?code=c&state=${to.searchParams.get('state')}`, flow);
-      expect(res.headers.get('location')).toBe(`/?auth_error=${error}`);
+  it('adds any number of accounts, tests each, and removes one with its token revoked', async () => {
+    const { api } = await signIn('owner@example.com');
+    for (const [sub, email, scope, rt] of [
+      ['1001', 'home@gmail.com', `openid email ${GMAIL_SCOPES.modify}`, 'rt-home'],
+      ['3003', 'work@example.org', GMAIL_SCOPES.readonly, 'rt-work'],
+    ]) {
+      const { to, flow } = await start(api);
+      const calls = google({ refresh_token: rt, scope, id_token: idToken({ sub, email }) });
+      const res = await finish(api, flow, `code=c&state=${to.searchParams.get('state')}`);
+      expect(res.headers.get('location')).toBe('/?settings=accounts');
+      expect(calls[0].body).toContain('code_verifier=');
       vi.restoreAllMocks();
     }
-  });
-
-  it('asks again with consent when Google sends no refresh token for a new account', async () => {
-    const { to, flow } = await start();
-    google({ scope: GMAIL_SCOPES.modify, id_token: idToken({ sub: '2002', email: 'new@example.com' }) });
-    const res = await get(`/api/auth/callback?code=c&state=${to.searchParams.get('state')}`, flow);
-    expect(res.headers.get('location')).toMatch(/^\/api\/auth\/login\?consent=1&hint=new%40example.com$/);
-    const again = await start(res.headers.get('location')!);
-    expect(again.to.searchParams.get('prompt')).toBe('select_account consent');
-  });
-
-  it('answers 401 without a session, and signs out', async () => {
-    expect((await get('/api/me')).status).toBe(401);
-    expect((await get('/api/archive/months', 'mc_session=u_x.bogus')).status).toBe(401);
-    const { cookie } = await signIn('leaver');
-    expect((await get('/api/me', cookie)).status).toBe(200);
-    const out = await get('/api/auth/logout', cookie);
-    expect(out.headers.get('location')).toBe('/');
-    expect((await get('/api/me', cookie)).status).toBe(401);
-  });
-});
-
-describe('accounts', () => {
-  it('adds a second account to the signed-in user, then removes it and revokes its token', async () => {
-    const { cookie, api } = await signIn('owner');
-    const { to, flow } = await start('/api/auth/login?add=1', cookie);
-    expect(to.searchParams.get('prompt')).toBe('select_account consent');
-    google({
-      refresh_token: 'rt-work',
-      scope: GMAIL_SCOPES.readonly,
-      id_token: idToken({ sub: '3003', email: 'work@example.org' }),
-    });
-    const res = await get(`/api/auth/callback?code=c&state=${to.searchParams.get('state')}`, `${cookie}; ${flow}`);
-    expect(res.headers.get('location')).toBe('/?settings=accounts');
-    vi.restoreAllMocks();
 
     const me = (await (await api('/api/me')).json()) as Me;
-    const work = me.accounts.find((a) => a.email === 'work@example.org')!;
+    expect(me.accounts.map((a) => a.email)).toEqual(['home@gmail.com', 'work@example.org']);
+    expect(me.accounts[0].test).toMatchObject({ ok: true, detail: 'Read ✓ · Modify ✓' });
+    const work = me.accounts[1];
     expect([work.read, work.modify, work.test.ok]).toEqual([true, false, false]);
     expect(work.test.error).toMatch(/modify/i);
+    expect(JSON.stringify(me)).not.toMatch(/rt-home|rt-work/);
 
     // The connection test asks Google which scopes the token carries now.
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      const url = String(input instanceof Request ? input.url : input);
+    mockFetch((url) => {
       if (url.startsWith('https://oauth2.googleapis.com/tokeninfo?access_token=at-work'))
         return Response.json({ scope: `${GMAIL_SCOPES.modify} openid` });
       if (url === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: 'at-work' });
@@ -145,7 +111,7 @@ describe('accounts', () => {
     expect(tested.test).toMatchObject({ ok: true, detail: 'Read ✓ · Modify ✓', error: null });
     vi.restoreAllMocks();
 
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({ error: 'invalid_grant' }, { status: 400 }));
+    mockFetch(() => Response.json({ error: 'invalid_grant' }, { status: 400 }));
     const revoked = (await (await api(`/api/accounts/${work.id}/test`, { method: 'POST' })).json()) as Me['accounts'][number];
     expect(revoked.test.ok).toBe(false);
     expect(revoked.test.error).toMatch(/no longer accepts/);
@@ -155,28 +121,69 @@ describe('accounts', () => {
     const del = await api(`/api/accounts/${work.id}`, { method: 'DELETE' });
     expect(await del.json()).toEqual({ ok: true, revoked: true });
     expect(calls).toEqual([{ url: 'https://oauth2.googleapis.com/revoke', body: 'token=rt-work' }]);
-    expect(((await (await api('/api/me')).json()) as Me).accounts).toEqual([]);
+    expect(((await (await api('/api/me')).json()) as Me).accounts.map((a) => a.email)).toEqual(['home@gmail.com']);
     expect((await api(`/api/accounts/${work.id}`, { method: 'DELETE' })).status).toBe(404);
   });
 
-  it('will not add an account without a session', async () => {
-    const res = await get('/api/auth/login?add=1');
-    expect(res.headers.get('location')).toBe('/?auth_error=signed_out');
+  it('puts an account in the mailbox of whoever is signed in, not anyone else', async () => {
+    const a = await signIn('alice@example.com');
+    const b = await signIn('bob@example.com');
+    const { to, flow } = await start(a.api);
+    google({ refresh_token: 'rt', scope: GMAIL_SCOPES.modify, id_token: idToken({ sub: '77', email: 'shared@gmail.com' }) });
+    await finish(a.api, flow, `code=c&state=${to.searchParams.get('state')}`);
+    expect(((await (await a.api('/api/me')).json()) as Me).accounts).toHaveLength(1);
+    expect(((await (await b.api('/api/me')).json()) as Me).accounts).toHaveLength(0);
+  });
+
+  it('refuses a callback whose state does not match, or with no flow cookie', async () => {
+    const { api } = await signIn('forger@example.com');
+    const { flow } = await start(api);
+    google({});
+    expect((await finish(api, flow, 'code=c1&state=forged')).headers.get('location')).toBe('/?settings=accounts&auth_error=state');
+    expect((await api('/api/auth/callback?code=c1&state=x')).headers.get('location')).toBe('/?settings=accounts&auth_error=state');
+  });
+
+  it('refuses a grant without Gmail, an ID token for another app, or no refresh token', async () => {
+    const { api } = await signIn('picky@example.com');
+    for (const [token, error] of [
+      [{ refresh_token: 'x', scope: 'openid email', id_token: idToken({ sub: '1', email: 'a@example.com' }) }, 'gmail_scope'],
+      [{ refresh_token: 'x', scope: GMAIL_SCOPES.modify, id_token: idToken({ sub: '1', email: 'a@example.com', aud: 'other' }) }, 'google'],
+      [{ scope: GMAIL_SCOPES.modify, id_token: idToken({ sub: '2', email: 'b@example.com' }) }, 'no_refresh'],
+    ] as const) {
+      const { to, flow } = await start(api);
+      google(token);
+      const res = await finish(api, flow, `code=c&state=${to.searchParams.get('state')}`);
+      expect(res.headers.get('location')).toBe(`/?settings=accounts&auth_error=${error}`);
+      vi.restoreAllMocks();
+    }
+    expect(((await (await api('/api/me')).json()) as Me).accounts).toEqual([]);
+  });
+
+  it('reports a cancel at Google', async () => {
+    const { api } = await signIn('canceller@example.com');
+    const { to, flow } = await start(api);
+    const res = await finish(api, flow, `error=access_denied&state=${to.searchParams.get('state')}`);
+    expect(res.headers.get('location')).toBe('/?settings=accounts&auth_error=denied');
+  });
+
+  it('will not start a connection without an Access identity', async () => {
+    const res = await exports.default.fetch(`${ORIGIN}/api/accounts/connect`, { redirect: 'manual' });
+    expect(res.status).toBe(401);
   });
 
   it('refuses a change from another site', async () => {
-    const { cookie } = await signIn('csrf');
+    const { token } = await signIn('csrf@example.com');
     const res = await exports.default.fetch(`${ORIGIN}/api/accounts/a0000000000000000000000`, {
       method: 'DELETE',
-      headers: { cookie, origin: 'https://evil.example' },
+      headers: { 'cf-access-jwt-assertion': token, origin: 'https://evil.example' },
     });
     expect(res.status).toBe(403);
   });
 
   it('keeps refresh tokens out of every API answer', async () => {
-    const { mailbox } = await signIn('tokens');
+    const { mailbox, email } = await signIn('tokens@example.com');
     await mailbox.connectAccount({ id: 'aAAAAAAAAAAAAAAAAAAAAAA', email: 't@example.com', refreshToken: 'rt-secret', scopes: [] });
-    expect(JSON.stringify(await mailbox.me())).not.toContain('rt-secret');
+    expect(JSON.stringify(await mailbox.me(email))).not.toContain('rt-secret');
     expect(env.GOOGLE_CLIENT_SECRET).toBe('test-secret');
   });
 });

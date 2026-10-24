@@ -2,7 +2,7 @@ import { checkScheduleChange, DEFAULT_SCHEDULES, type Schedule, type UsageDay } 
 import { describe, expect, it } from 'vitest';
 import { signIn } from './helpers';
 
-const owner = signIn('ops-owner', { sample: true });
+const owner = signIn('ops-owner@example.com', { sample: true });
 const api = async (path: string, init?: RequestInit) => (await owner).api(path, init);
 const put = (id: string, body: unknown) =>
   api(`/api/schedules/${id}`, { method: 'PUT', body: typeof body === 'string' ? body : JSON.stringify(body) });

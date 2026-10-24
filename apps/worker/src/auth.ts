@@ -1,16 +1,10 @@
-// Google sign-in and the session cookie. The flow follows msgvault's: a random state and a
-// PKCE verifier per attempt, offline access for a refresh token, the granted scopes checked
-// before anything is saved, and the token revoked at Google when an account is removed.
-import {
-  asUserId,
-  GMAIL_SCOPES,
-  mailboxName,
-  SESSION_COOKIE,
-  SESSION_DAYS,
-  SIGN_IN_SCOPES,
-  type AuthError,
-  type UserId,
-} from '@mailcellar/schema';
+// Who is using the app, and the Gmail accounts they connect. Cloudflare Access signs the
+// person in and tells the Worker their email; there is no login screen of our own. Gmail
+// accounts are separate: Settings ▸ Accounts connects any number of them through Google.
+// The connect flow follows msgvault's: a random state and a PKCE verifier per attempt,
+// offline access for a refresh token, the granted scopes checked before anything is saved,
+// and the token revoked at Google when an account is removed.
+import { asUserId, CONNECT_SCOPES, GMAIL_SCOPES, mailboxName, type AuthError, type UserId } from '@mailcellar/schema';
 import type { Env } from './env';
 import type { MailboxDO } from './mailbox';
 
@@ -19,34 +13,85 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 const TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo';
 const FLOW_COOKIE = 'mc_oauth';
+const FLOW_PATH = '/api/auth';
 const FLOW_MINUTES = 10;
 
-/** What a sign-in attempt remembers between leaving for Google and coming back. */
+/** What a connect attempt remembers between leaving for Google and coming back. */
 interface Flow {
   state: string;
   verifier: string;
-  /** login: sign in (and connect that account). add: connect another account to the signed-in user. */
-  mode: 'login' | 'add';
-  /** Google was asked for consent, so a missing refresh token is final. */
-  consent: boolean;
 }
 
-/** A signed-in request: whose it is, and that user's mailbox. */
-export interface Session {
+/** The person behind a request, as Cloudflare Access names them, and their mailbox. */
+export interface Identity {
   user: UserId;
-  hash: string;
+  email: string;
   mailbox: DurableObjectStub<MailboxDO>;
 }
 
 const b64url = (bytes: ArrayBuffer | Uint8Array) =>
   btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+const fromB64url = (text: string) => Uint8Array.from(atob(text.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0));
 const random = (n = 32) => b64url(crypto.getRandomValues(new Uint8Array(n)));
 const sha256 = async (text: string) => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
-const hex = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+const json = <T>(bytes: Uint8Array): T => JSON.parse(new TextDecoder().decode(bytes));
 
-/** Opaque, stable IDs from Google's subject ID: never the email, which can change. */
-export const userIdFor = async (sub: string) => asUserId(`u${b64url(await sha256(`google:${sub}`)).slice(0, 22)}`);
+/** Opaque, stable IDs: the user's from their Access email, an account's from Google's subject ID. */
+export const userIdFor = async (email: string) => asUserId(`u${b64url(await sha256(`access:${email.toLowerCase()}`)).slice(0, 22)}`);
 export const accountIdFor = async (sub: string) => `a${b64url(await sha256(`account:${sub}`)).slice(0, 22)}`;
+
+/** Access signing keys by key ID, refreshed hourly or when a token names a key not seen yet. */
+let accessKeys: { at: number; keys: Map<string, CryptoKey> } | null = null;
+export const resetAccessKeys = () => (accessKeys = null);
+
+async function accessKey(env: Env, kid: string): Promise<CryptoKey | null> {
+  if (!accessKeys || Date.now() - accessKeys.at > 3_600_000 || !accessKeys.keys.has(kid)) {
+    const res = await fetch(`${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`);
+    if (!res.ok) return null;
+    const { keys } = (await res.json()) as { keys: (JsonWebKey & { kid: string })[] };
+    const map = new Map<string, CryptoKey>();
+    for (const jwk of keys)
+      map.set(jwk.kid, await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']));
+    accessKeys = { at: Date.now(), keys: map };
+  }
+  return accessKeys.keys.get(kid) ?? null;
+}
+
+/** The email in a valid Cloudflare Access token for this app, or null. */
+async function verifyAccess(token: string, env: Env): Promise<string | null> {
+  try {
+    const [head, body, sig] = token.split('.');
+    const header = json<{ alg?: string; kid?: string }>(fromB64url(head));
+    if (header.alg !== 'RS256' || !header.kid) return null;
+    const key = await accessKey(env, header.kid);
+    if (!key) return null;
+    const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, fromB64url(sig), new TextEncoder().encode(`${head}.${body}`));
+    if (!ok) return null;
+    const claims = json<{ aud?: string | string[]; iss?: string; exp?: number; email?: string }>(fromB64url(body));
+    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    if (!aud.includes(env.ACCESS_AUD) || claims.iss !== env.ACCESS_TEAM_DOMAIN) return null;
+    if ((claims.exp ?? 0) * 1000 < Date.now() || !claims.email) return null;
+    return claims.email;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Who is making this request. In production that is the email in Cloudflare Access's signed
+ * token; Access sits in front of the whole site, and the Worker checks the token itself.
+ * `wrangler dev` has no Access, so there DEV_USER_EMAIL stands in (set only in .dev.vars).
+ */
+export async function identity(request: Request, env: Env): Promise<Identity | null> {
+  let email: string | null = null;
+  if (env.ACCESS_AUD) {
+    const token = request.headers.get('cf-access-jwt-assertion');
+    email = token ? await verifyAccess(token, env) : null;
+  } else if (env.DEV_USER_EMAIL) email = env.DEV_USER_EMAIL;
+  if (!email) return null;
+  const user = await userIdFor(email);
+  return { user, email, mailbox: env.MAILBOX.getByName(mailboxName(user)) };
+}
 
 function cookies(request: Request): Map<string, string> {
   const out = new Map<string, string>();
@@ -57,56 +102,33 @@ function cookies(request: Request): Map<string, string> {
   return out;
 }
 
-const cookie = (name: string, value: string, maxAge: number, path = '/') =>
-  `${name}=${value}; Path=${path}; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+const cookie = (value: string, maxAge: number) =>
+  `${FLOW_COOKIE}=${value}; Path=${FLOW_PATH}; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 
-const redirect = (to: string, ...setCookies: string[]) => {
+const redirect = (to: string, setCookie?: string) => {
   const headers = new Headers({ location: to, 'cache-control': 'no-store' });
-  for (const c of setCookies) headers.append('set-cookie', c);
+  if (setCookie) headers.append('set-cookie', setCookie);
   return new Response(null, { status: 302, headers });
 };
-const fail = (code: AuthError) => redirect(`/?auth_error=${code}`, cookie(FLOW_COOKIE, '', 0, '/api/auth'));
+const back = (error?: AuthError) => redirect(`/?settings=accounts${error ? `&auth_error=${error}` : ''}`, cookie('', 0));
 
-/** The signed-in user for this request, or null. Costs one read in the user's mailbox. */
-export async function session(request: Request, env: Env): Promise<Session | null> {
-  const raw = cookies(request).get(SESSION_COOKIE);
-  const dot = raw?.indexOf('.') ?? -1;
-  if (!raw || dot < 1) return null;
-  let user: UserId;
-  try {
-    user = asUserId(raw.slice(0, dot));
-  } catch {
-    return null;
-  }
-  const hash = hex(await sha256(raw.slice(dot + 1)));
-  const mailbox = env.MAILBOX.getByName(mailboxName(user));
-  return (await mailbox.hasSession(hash)) ? { user, hash, mailbox } : null;
-}
-
-/** GET /api/auth/login[?add=1]: off to Google's consent screen. */
-export async function login(request: Request, env: Env, url: URL): Promise<Response> {
-  const mode: Flow['mode'] = url.searchParams.get('add') ? 'add' : 'login';
-  if (mode === 'add' && !(await session(request, env))) return fail('signed_out');
-  const consent = mode === 'add' || url.searchParams.has('consent');
-  const flow: Flow = { state: random(), verifier: random(), mode, consent };
-  const challenge = b64url(await sha256(flow.verifier));
+/** GET /api/accounts/connect: off to Google to pick a Gmail account and allow access to it. */
+export async function connect(url: URL, env: Env): Promise<Response> {
+  const flow: Flow = { state: random(), verifier: random() };
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
     redirect_uri: `${url.origin}/api/auth/callback`,
     response_type: 'code',
-    scope: SIGN_IN_SCOPES.join(' '),
+    scope: CONNECT_SCOPES.join(' '),
     access_type: 'offline',
     include_granted_scopes: 'true',
-    // Adding an account always asks for consent so Google issues a refresh token. Signing in
-    // only picks the account; the callback comes back here with consent if no token is held.
-    prompt: consent ? 'select_account consent' : 'select_account',
+    // Consent every time, so Google always issues a refresh token, even for an account seen before.
+    prompt: 'select_account consent',
     state: flow.state,
-    code_challenge: challenge,
+    code_challenge: b64url(await sha256(flow.verifier)),
     code_challenge_method: 'S256',
   });
-  const hint = url.searchParams.get('hint');
-  if (hint && hint.length < 320) params.set('login_hint', hint);
-  return redirect(`${AUTH_URL}?${params}`, cookie(FLOW_COOKIE, b64url(new TextEncoder().encode(JSON.stringify(flow))), FLOW_MINUTES * 60, '/api/auth'));
+  return redirect(`${AUTH_URL}?${params}`, cookie(b64url(new TextEncoder().encode(JSON.stringify(flow))), FLOW_MINUTES * 60));
 }
 
 interface TokenResponse {
@@ -121,22 +143,20 @@ interface IdClaims {
   sub?: string;
   email?: string;
   email_verified?: boolean;
-  name?: string;
   exp?: number;
 }
 
-/** GET /api/auth/callback: Google sends the person back here with a code. */
-export async function callback(request: Request, env: Env, url: URL): Promise<Response> {
+/** GET /api/auth/callback: Google sends the person back here; the account joins their mailbox. */
+export async function callback(request: Request, env: Env, url: URL, who: Identity): Promise<Response> {
   let flow: Flow;
   try {
-    const raw = cookies(request).get(FLOW_COOKIE) ?? '';
-    flow = JSON.parse(atob(raw.replaceAll('-', '+').replaceAll('_', '/')));
+    flow = json(fromB64url(cookies(request).get(FLOW_COOKIE) ?? ''));
   } catch {
-    return fail('state');
+    return back('state');
   }
-  if (url.searchParams.get('error')) return fail('denied');
+  if (url.searchParams.get('error')) return back('denied');
   const code = url.searchParams.get('code');
-  if (!code || !flow.state || url.searchParams.get('state') !== flow.state) return fail('state');
+  if (!code || !flow.state || url.searchParams.get('state') !== flow.state) return back('state');
 
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
@@ -150,58 +170,31 @@ export async function callback(request: Request, env: Env, url: URL): Promise<Re
       code_verifier: flow.verifier,
     }),
   });
-  if (!res.ok) return fail('google');
+  if (!res.ok) return back('google');
   const token = (await res.json()) as TokenResponse;
   // The ID token came straight from Google's token endpoint over TLS, so its claims are
   // trusted without checking the signature (OpenID Connect Core 3.1.3.7); iss, aud and exp still are.
-  const claims = idClaims(token.id_token);
+  let claims: IdClaims | null = null;
+  try {
+    claims = json(fromB64url(token.id_token!.split('.')[1]));
+  } catch {}
   if (
     !claims?.sub || !claims.email || claims.email_verified === false ||
     claims.aud !== env.GOOGLE_CLIENT_ID ||
     !['accounts.google.com', 'https://accounts.google.com'].includes(claims.iss ?? '') ||
     (claims.exp ?? 0) * 1000 < Date.now()
   )
-    return fail('google');
+    return back('google');
   const scopes = (token.scope ?? '').split(' ');
-  if (!scopes.includes(GMAIL_SCOPES.modify) && !scopes.includes(GMAIL_SCOPES.readonly)) return fail('gmail_scope');
+  if (!scopes.includes(GMAIL_SCOPES.modify) && !scopes.includes(GMAIL_SCOPES.readonly)) return back('gmail_scope');
 
-  const account = { id: await accountIdFor(claims.sub), email: claims.email, refreshToken: token.refresh_token ?? null, scopes };
-  const clear = cookie(FLOW_COOKIE, '', 0, '/api/auth');
-  if (flow.mode === 'add') {
-    const current = await session(request, env);
-    if (!current) return fail('signed_out');
-    const saved = await current.mailbox.connectAccount(account);
-    if (!saved.ok) return fail('no_refresh');
-    return redirect('/?settings=accounts', clear);
-  }
-
-  const user = await userIdFor(claims.sub);
-  const mailbox = env.MAILBOX.getByName(mailboxName(user));
-  const saved = await mailbox.connectAccount(account, { email: claims.email, name: claims.name ?? null });
-  // First sign-in without a refresh token (Google skips it once consent is on file): ask again, with consent.
-  if (!saved.ok)
-    return !flow.consent
-      ? redirect(`/api/auth/login?consent=1&hint=${encodeURIComponent(claims.email)}`, clear)
-      : fail('no_refresh');
-  const secret = random();
-  await mailbox.startSession(hex(await sha256(secret)));
-  return redirect('/', clear, cookie(SESSION_COOKIE, `${user}.${secret}`, SESSION_DAYS * 86_400));
-}
-
-function idClaims(jwt: string | undefined): IdClaims | null {
-  try {
-    const body = jwt!.split('.')[1].replaceAll('-', '+').replaceAll('_', '/');
-    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(body), (c) => c.charCodeAt(0))));
-  } catch {
-    return null;
-  }
-}
-
-/** GET /api/auth/logout: end this session and go back to the sign-in page. */
-export async function logout(request: Request, env: Env): Promise<Response> {
-  const current = await session(request, env);
-  if (current) await current.mailbox.endSession(current.hash);
-  return redirect('/', cookie(SESSION_COOKIE, '', 0));
+  const saved = await who.mailbox.connectAccount({
+    id: await accountIdFor(claims.sub),
+    email: claims.email,
+    refreshToken: token.refresh_token ?? null,
+    scopes,
+  });
+  return back(saved.ok ? undefined : 'no_refresh');
 }
 
 /**
@@ -225,7 +218,7 @@ export async function testAccount(env: Env, mailbox: DurableObjectStub<MailboxDO
     });
     const token = (await res.json()) as { access_token?: string; error?: string };
     if (!token.access_token) {
-      result = { error: token.error === 'invalid_grant' ? 'Google no longer accepts this sign-in (revoked or expired). Remove the account and add it again.' : `Google refused the token (${res.status}).` };
+      result = { error: token.error === 'invalid_grant' ? 'Google no longer accepts this connection (revoked or expired). Remove the account and add it again.' : `Google refused the token (${res.status}).` };
     } else {
       const info = await fetch(`${TOKENINFO_URL}?access_token=${encodeURIComponent(token.access_token)}`);
       const body = (await info.json()) as { scope?: string };

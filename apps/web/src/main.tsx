@@ -31,7 +31,7 @@ import {
 } from 'lucide-react';
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { AccountsSettings, SignInPage, useMe } from './auth';
+import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
 import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
 import { BackfillPage, UsagePage } from './ops-pages';
 import './index.css';
@@ -101,21 +101,23 @@ function CloseMenuOnNavigate() {
 function Frame() {
   const me = useMe();
   if (me.isPending) return null;
-  if (me.data === null) return <SignInPage />;
+  if (me.data === null) return <NoIdentity />;
   return (
     <LumenShell
       app="mailcellar"
       appLabel="MailCellar"
       brand={<span className="px-2 font-semibold">MailCellar</span>}
       nav={<>{nav}{opsNav}</>}
-      user={me.data?.user ?? null}
-      signOutUrl="/api/auth/logout"
+      user={me.data ? { email: me.data.user.email, name: null } : null}
+      // Signing out is Cloudflare Access's: it ends the Access session for this site.
+      signOutUrl="/cdn-cgi/access/logout"
       settings={[
         { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts this archive keeps', content: <AccountsSettings /> },
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Work the archive runs on its own', content: <SchedulesSettings /> },
       ]}
     >
       <CloseMenuOnNavigate />
+      <SettingsFromUrl />
       <Outlet />
     </LumenShell>
   );

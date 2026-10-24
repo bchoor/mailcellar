@@ -14,7 +14,12 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
-  "vars": { "APP_VERSION": "dev" },
+  "vars": {
+    "APP_VERSION": "dev",
+    // Cloudflare Access app "icaruslab.dev apps (wildcard)", which covers this domain.
+    "ACCESS_TEAM_DOMAIN": "https://bchoor.cloudflareaccess.com",
+    "ACCESS_AUD": "3b94450e06686e3e57c6a9bf1f017485bb9750730246009dddd9739955009fb0"
+  },
   "durable_objects": {
     "bindings": [{ "name": "MAILBOX", "class_name": "MailboxDO" }]
   },

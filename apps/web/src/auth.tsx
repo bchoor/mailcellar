@@ -1,12 +1,13 @@
-// Signing in with Google, and Settings ▸ Accounts: the Gmail accounts the archive keeps.
-import { ErrorLine, IntegrationRow, KeyTestLine, LumenAuthHeading, LumenAuthProblem, LumenAuthStage, LumenConfirm, TestBadge } from '@columenlabs/lumen-ui';
+// Settings ▸ Accounts: the Gmail accounts the archive keeps. Signing in to the app is
+// Cloudflare Access's job; the Worker reads the email Access vouches for.
+import { ErrorLine, IntegrationRow, KeyTestLine, LumenConfirm, TestBadge, useShell } from '@columenlabs/lumen-ui';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { AUTH_ERRORS, type AuthError, type Me } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArchiveIcon, LockIcon, MailIcon, PlusIcon } from 'lucide-react';
-import { useState } from 'react';
+import { PlusIcon } from 'lucide-react';
+import { useEffect, useState } from 'react';
 
-/** Who is signed in: null when nobody is (the API answers 401). */
+/** The Access user and their Gmail accounts: null when Access sent no identity (the API answers 401). */
 export function useMe() {
   return useQuery({
     queryKey: ['me'],
@@ -19,35 +20,33 @@ export function useMe() {
   });
 }
 
-/** The error Google's redirect left in the address, once; it is cleared from the bar. */
-function takeAuthError(): string | null {
+/** One query parameter from the address, read once and then cleared from the bar. */
+function takeParam(name: string): string | null {
   const url = new URL(window.location.href);
-  const code = url.searchParams.get('auth_error');
-  if (!code) return null;
-  url.searchParams.delete('auth_error');
+  const value = url.searchParams.get(name);
+  if (value === null) return null;
+  url.searchParams.delete(name);
   window.history.replaceState(null, '', url);
-  return AUTH_ERRORS[code as AuthError] ?? AUTH_ERRORS.google;
+  return value;
 }
 
-export function SignInPage() {
-  const [problem] = useState(takeAuthError);
+/** Coming back from Google lands on `/?settings=accounts`: open Settings there. */
+export function SettingsFromUrl() {
+  const { openSettings } = useShell();
+  useEffect(() => {
+    const section = takeParam('settings');
+    if (section) openSettings(section);
+  }, [openSettings]);
+  return null;
+}
+
+/** Shown only if Cloudflare Access let a request through without its signed identity. */
+export function NoIdentity() {
   return (
-    <LumenAuthStage
-      brand={<span className="font-semibold">MailCellar</span>}
-      pitch={{ title: 'Your Gmail, kept for good', body: 'MailCellar archives every message on your own Cloudflare account.' }}
-      points={[
-        { icon: ArchiveIcon, title: 'Keeps everything', body: 'Mail stays here even after you delete it from Gmail.' },
-        { icon: LockIcon, title: 'Only you', body: 'Your mail is read only through your own session.' },
-      ]}
-    >
-      <LumenAuthHeading title="Sign in" sub="With the Google account whose mail you want to keep." />
-      <LumenAuthProblem>{problem}</LumenAuthProblem>
-      <Button asChild className="w-full">
-        <a href="/api/auth/login">
-          <MailIcon /> Sign in with Google
-        </a>
-      </Button>
-    </LumenAuthStage>
+    <div className="mx-auto max-w-md p-8 text-sm text-muted-foreground">
+      Cloudflare Access didn’t pass your sign-in to MailCellar. Reload the page; if it keeps happening, sign out of Access at{' '}
+      <a className="underline" href="/cdn-cgi/access/logout">/cdn-cgi/access/logout</a> and back in.
+    </div>
   );
 }
 
@@ -57,10 +56,14 @@ export function AccountsSettings() {
   const me = useMe();
   const client = useQueryClient();
   const [open, setOpen] = useState<string | null>(null);
+  const [problem] = useState(() => {
+    const code = takeParam('auth_error');
+    return code ? new Error(AUTH_ERRORS[code as AuthError] ?? AUTH_ERRORS.google) : null;
+  });
   const accounts = me.data?.accounts ?? [];
   return (
     <div className="flex flex-col gap-3">
-      <ErrorLine error={me.error} />
+      <ErrorLine error={problem ?? me.error} />
       {accounts.length === 0 && !me.isPending && (
         <p className="text-sm text-muted-foreground">No Gmail account is connected. Add one to start archiving.</p>
       )}
@@ -109,7 +112,7 @@ export function AccountsSettings() {
       </div>
       <div>
         <Button asChild variant="outline" size="sm">
-          <a href="/api/auth/login?add=1">
+          <a href="/api/accounts/connect">
             <PlusIcon /> Add Gmail account
           </a>
         </Button>
