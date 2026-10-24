@@ -1,5 +1,16 @@
 import { DurableObject } from 'cloudflare:workers';
-import { domainOf, ftsRowid, monthOf, type IndexedMessage, type MailLabel } from '@mailcellar/schema';
+import {
+  ARCHIVE_LIMIT,
+  domainOf,
+  ftsRowid,
+  monthOf,
+  sampleMessages,
+  SAMPLE_LABELS,
+  type ArchiveRows,
+  type ArchiveView,
+  type IndexedMessage,
+  type MailLabel,
+} from '@mailcellar/schema';
 import type { Env } from './env';
 
 /**
@@ -165,4 +176,68 @@ export class MailboxDO extends DurableObject<Env> {
       return { added, skipped: batch.length - added, rowsWritten };
     });
   }
+
+  /**
+   * One archive page's rows, read from the rollups so no page scans every message.
+   * `q` searches subject, sender, snippet and labels; each word must match.
+   */
+  async archive<V extends ArchiveView>(view: V, q = ''): Promise<ArchiveRows[V][]> {
+    const sql = this.ctx.storage.sql;
+    const rows = (query: string, ...args: (string | number)[]) =>
+      sql.exec(query, ...args).toArray() as unknown as ArchiveRows[V][];
+    switch (view) {
+      case 'months':
+        return rows(`SELECT month, n, bytes FROM months ORDER BY month`);
+      case 'labels':
+        return rows(`SELECT id, name, type, n, bytes FROM labels WHERE n > 0 ORDER BY n DESC`);
+      case 'domains':
+        return rows(`SELECT domain, n, bytes FROM domains ORDER BY n DESC LIMIT ?`, ARCHIVE_LIMIT);
+      case 'senders':
+        return rows(
+          `SELECT addr, name, n, bytes, first_ts AS firstTs, last_ts AS lastTs
+           FROM senders ORDER BY n DESC LIMIT ?`,
+          ARCHIVE_LIMIT,
+        );
+      case 'messages': {
+        const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
+          subject, snippet, size, attachments, labels`;
+        const match = ftsQuery(q);
+        const found = match
+          ? rows(
+              // FTS rowids are Gmail IDs as signed 64-bit integers; %x prints them back as hex.
+              `SELECT ${cols} FROM messages WHERE id IN (
+                 SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?
+               ) ORDER BY ts DESC LIMIT ?`,
+              match,
+              ARCHIVE_LIMIT,
+            )
+          : rows(`SELECT ${cols} FROM messages ORDER BY ts DESC LIMIT ?`, ARCHIVE_LIMIT);
+        for (const m of found as unknown as { labels: string | string[] }[])
+          m.labels = String(m.labels).split(' ').filter(Boolean);
+        return found;
+      }
+    }
+    throw new Error('unknown view');
+  }
+
+  /** Phase 1 only: fill an empty mailbox with the synthetic sample. Never used on a real user's. */
+  async ensureSample(count = 2400): Promise<void> {
+    // A meta flag, not count(*): counting would read every row on every page view.
+    const sql = this.ctx.storage.sql;
+    if (sql.exec(`SELECT 1 FROM meta WHERE key = 'sample'`).toArray().length) return;
+    const mail = sampleMessages(count);
+    for (let i = 0; i < mail.length; i += 100) await this.ingest(mail.slice(i, i + 100));
+    await this.putLabels(SAMPLE_LABELS);
+    sql.exec(`INSERT INTO meta (key, value) VALUES ('sample', ?)`, String(count));
+  }
+}
+
+/** A search box's words as an FTS5 query: each word quoted, so FTS syntax in it is literal. */
+export function ftsQuery(q: string): string {
+  return q
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((w) => `"${w.replaceAll('"', '""')}"`)
+    .join(' ');
 }

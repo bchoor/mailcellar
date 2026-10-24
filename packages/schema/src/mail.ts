@@ -86,3 +86,22 @@ export const BASIN_TABLES = {
     ],
   },
 } as const;
+
+/** The archive pages and the rows each one reads, newest or biggest first. */
+export interface MonthRow { month: string; n: number; bytes: number }
+export interface LabelRow { id: string; name: string; type: 'system' | 'user'; n: number; bytes: number }
+export interface DomainRow { domain: string; n: number; bytes: number }
+export interface SenderRow { addr: string; name: string; n: number; bytes: number; firstTs: number; lastTs: number }
+export type MessageRow = IndexedMessage;
+export interface ArchiveRows {
+  months: MonthRow;
+  labels: LabelRow;
+  domains: DomainRow;
+  senders: SenderRow;
+  messages: MessageRow;
+}
+export type ArchiveView = keyof ArchiveRows;
+export const ARCHIVE_VIEWS: readonly ArchiveView[] = ['months', 'labels', 'domains', 'senders', 'messages'];
+
+/** At most this many rows a page: the rest is reached by search, not by scrolling. */
+export const ARCHIVE_LIMIT = 1000;
