@@ -20,6 +20,8 @@ import {
   type SyncSummary,
   type SyncOverview,
   type AccountCoverage,
+  type AccountStatus,
+  type BackfillStatus,
   type BackfillJob,
   type CensusState,
   type MonthCoverage,
@@ -128,6 +130,8 @@ export const MIGRATIONS: readonly string[] = [
      content = '', columnsize = 0, tokenize = 'unicode61 remove_diacritics 1'
    );
    INSERT INTO meta (key, value) VALUES ('fts_refill', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
+  // 11: the status row (2026-10-24) keeps each month's latest backfill state, found by month.
+  `CREATE INDEX job_months_month ON job_months (month, job);`,
 ];
 
 
@@ -152,30 +156,123 @@ function tally(into: Tally, key: string, m: IndexedMessage, name = '') {
   into.set(key, t);
 }
 
+/**
+ * A mailbox's backfill status, kept as one meta row ('status') and in memory: every month's
+ * counts and states, the latest jobs, the census and the index's progress. It is the only thing
+ * the status reads (coverage, jobs, sync, Messages totals) look at, so a poll reads at most this
+ * one row and never a table. Each writer that changes a month or job updates its entries from
+ * the tables (a few keyed rows) in the same transaction and saves the row.
+ */
+interface StatusBook {
+  v: number;
+  months: Record<string, MonthCoverage>;
+  jobs: BackfillJob[];
+  census: CensusState | null;
+  /** Months whose index is being built from Basin now. */
+  indexing: string[];
+  /** Indexing waits for the account's daily DO write limit. */
+  indexWait: { resumesAt: string; label: string } | null;
+}
+/** Bump to rebuild every mailbox's status row from its tables once (the shape changed). */
+const STATUS_V = 1;
+/** Backfill jobs the status keeps, newest first. */
+const JOBS_KEPT = 20;
+
 /** One per user and mailbox (see mailboxName). Holds that user's index, rollups, sync state and schedule. */
-/** Tables kept answers read (MailboxDO.keep). */
-type KeptTable = 'gmail_months' | 'months' | 'basin_months' | 'job_months';
-
 export class MailboxDO extends DurableObject<Env> {
-  /**
-   * Answers the Backfill and Messages pages poll (coverage, jobs, totals), kept in memory with
-   * the tables each reads. A write drops only what reads the table it wrote (`drop`), so an index
-   * chunk re-reads the month counts (a row a month), not every backfill job's months. Lanes'
-   * progress is laid over coverage from memory, so their saves drop nothing.
-   */
-  private kept = new Map<string, { tables: readonly KeptTable[]; value: unknown }>();
+  private book: StatusBook | null = null;
 
-  private keep<T>(key: string, tables: readonly KeptTable[], read: () => T): T {
-    const got = this.kept.get(key);
-    if (got) return got.value as T;
-    const value = read();
-    this.kept.set(key, { tables, value });
-    return value;
+  /** The status: in memory, else its row (one row read), else built from the tables once. */
+  private status(): StatusBook {
+    if (this.book) return this.book;
+    const saved = this.meta<StatusBook>('status');
+    if (saved?.v === STATUS_V) return (this.book = saved);
+    this.book = { v: STATUS_V, months: {}, jobs: [], census: this.censusRow(), indexing: [], indexWait: null };
+    const all = this.ctx.storage.sql.exec<{ month: string }>(
+      `SELECT month FROM gmail_months UNION SELECT month FROM months UNION SELECT month FROM basin_months UNION SELECT month FROM job_months`,
+    );
+    this.refreshMonths(all.toArray().map((r) => r.month));
+    const jobs = this.ctx.storage.sql.exec<{ id: number }>(`SELECT id FROM jobs ORDER BY id DESC LIMIT ?`, JOBS_KEPT);
+    this.refreshJobs(jobs.toArray().map((j) => j.id));
+    console.log(JSON.stringify({ statusBuilt: { months: Object.keys(this.book.months).length, jobs: this.book.jobs.length } }));
+    this.count({ do_rows_read: all.rowsRead + jobs.rowsRead, do_rows_written: this.saveStatus() });
+    return this.book;
   }
 
-  /** Drop kept answers that read any of these tables: they changed. */
-  private drop(...tables: KeptTable[]): void {
-    for (const [key, k] of this.kept) if (k.tables.some((t) => tables.includes(t))) this.kept.delete(key);
+  /** Save the status row. Returns rows written. */
+  private saveStatus(): number {
+    return this.putMeta('status', this.status());
+  }
+
+  /** Read these months' entries again from the tables: a keyed row from each of four, a month. */
+  private refreshMonths(months: Iterable<string>): void {
+    const book = this.status();
+    const sql = this.ctx.storage.sql;
+    const one = <T,>(query: string, month: string) => sql.exec<T & Record<string, SqlStorageValue>>(query, month).toArray()[0] as T | undefined;
+    for (const month of new Set(months)) {
+      const gmail = one<{ n: number }>(`SELECT n FROM gmail_months WHERE month = ?`, month);
+      const index = one<{ n: number }>(`SELECT n FROM months WHERE month = ?`, month);
+      const basin = one<{ copied: number; landed_at: string | null; indexed_at: string | null }>(`SELECT copied, landed_at, indexed_at FROM basin_months WHERE month = ?`, month);
+      // The latest job to touch a month decides its state.
+      const job = one<{ state: PartState; error: string | null; finished_at: string | null }>(
+        `SELECT state, error, finished_at FROM job_months WHERE month = ? ORDER BY job DESC LIMIT 1`, month,
+      );
+      if (!gmail && !index && !basin && !job) {
+        delete book.months[month];
+        continue;
+      }
+      const indexed = index?.n ?? 0;
+      const state = job?.state ?? null;
+      book.months[month] = {
+        month,
+        gmail: gmail?.n ?? null,
+        indexed,
+        state,
+        error: job?.error ?? null,
+        finishedAt: job?.finished_at ?? null,
+        // Months copied before Basin came first went to Basin and the index together.
+        ...(basin
+          ? {
+              copied: Math.max(indexed, basin.copied),
+              inBasin: basin.copied,
+              landed: basin.landed_at !== null,
+              indexState: basin.landed_at === null ? null : basin.indexed_at !== null ? 'done' : 'queued',
+            }
+          : { copied: indexed, inBasin: indexed, landed: indexed > 0 && state === 'done', indexState: null }),
+      };
+    }
+  }
+
+  /** Read these jobs again from the tables (a job's months, by its key) and keep the latest JOBS_KEPT. */
+  private refreshJobs(ids: Iterable<number>): void {
+    const book = this.status();
+    const sql = this.ctx.storage.sql;
+    for (const id of new Set(ids)) {
+      book.jobs = book.jobs.filter((j) => j.id !== id);
+      const j = sql.exec<{ id: number; created_at: string; label: string }>(`SELECT id, created_at, label FROM jobs WHERE id = ?`, id).toArray()[0];
+      if (!j) continue;
+      const months: Record<PartState, number> = { queued: 0, running: 0, done: 0, failed: 0, canceled: 0 };
+      let from = '';
+      let to = '';
+      for (const r of sql.exec<{ state: PartState; n: number; first: string; last: string }>(
+        `SELECT state, count(*) AS n, min(month) AS first, max(month) AS last FROM job_months WHERE job = ? GROUP BY state`,
+        id,
+      )) {
+        months[r.state] = r.n;
+        if (!from || r.first < from) from = r.first;
+        if (r.last > to) to = r.last;
+      }
+      book.jobs.push({ id: j.id, createdAt: j.created_at, label: j.label, status: jobStatus(months), months, from, to });
+    }
+    book.jobs.sort((a, b) => b.id - a.id);
+    book.jobs.length = Math.min(book.jobs.length, JOBS_KEPT);
+  }
+
+  /** Months and jobs changed: update their entries and save the status row. Returns rows written. */
+  private changed(months: Iterable<string>, jobs: Iterable<number> = []): number {
+    this.refreshMonths(months);
+    this.refreshJobs(jobs);
+    return this.saveStatus();
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -403,10 +500,10 @@ export class MailboxDO extends DurableObject<Env> {
     this.laneAccount = account;
     const sql = this.ctx.storage.sql;
     // A lane whose month was stopped while nothing ran to notice (its run had died) comes off now.
-    const stopped = [...this.lanes()].filter(
-      ([month, job]) => sql.exec<{ state: PartState }>(`SELECT state FROM job_months WHERE job = ? AND month = ?`, job, month).toArray()[0]?.state === 'canceled',
-    );
-    if (stopped.length) await this.stopLanes(stopped.map(([month]) => month));
+    // From the status row: no row read per lane per poll.
+    const book = this.status();
+    const stopped = [...this.lanes().keys()].filter((month) => book.months[month]?.state === 'canceled');
+    if (stopped.length) await this.stopLanes(stopped);
     const now = Date.now();
     const id = (month: string) => `${account}-${month}-${now.toString(36)}`;
     const lanes = this.lanes();
@@ -434,8 +531,8 @@ export class MailboxDO extends DurableObject<Env> {
         if (parts.every((p) => busy.has(p.month))) this.noneQueued = true;
         if (fresh.length) {
           this.active = null;
-          this.drop('job_months');
           written += this.setLanes();
+          written += this.changed(fresh.map((f) => f.part.month), fresh.map((f) => f.part.job));
         }
         if (written) this.count({ do_rows_written: written });
       });
@@ -504,11 +601,10 @@ export class MailboxDO extends DurableObject<Env> {
     return this.active;
   }
 
-  /** Drop what's kept about job months: something changed them. */
+  /** Job months changed: what's kept about the active ones is read again when next asked. */
   private changedMonths(): void {
     this.active = null;
     this.noneQueued = false;
-    this.drop('job_months');
   }
 
   /** Take Gmail units from the bucket; the answer is how long to wait first. */
@@ -599,7 +695,7 @@ export class MailboxDO extends DurableObject<Env> {
       if (main && added.copied) written += this.putMeta('sync', { ...main, copied: main.copied + added.copied, bytes: main.bytes + added.bytes, updatedAt: new Date().toISOString() });
       this.live.delete(part.month);
       this.changedMonths();
-      this.drop('basin_months');
+      written += this.changed([part.month], [part.job]);
       this.count({ do_rows_written: written });
     });
   }
@@ -654,9 +750,13 @@ export class MailboxDO extends DurableObject<Env> {
     return { rowsRead: cursor.rowsRead, rowsWritten: written };
   }
 
-  /** Messages in the index, from the month counts (a row a month read, not a row a message). */
+  /** Messages in the index, from the status row. */
   async indexedCount(): Promise<number> {
-    return this.monthCounts().reduce((t, r) => t + r.n, 0);
+    return this.indexedTotal();
+  }
+
+  private indexedTotal(): number {
+    return Object.values(this.status().months).reduce((t, m) => t + m.indexed, 0);
   }
 
   /** Take a month out of the index, to build it again from Basin. Rollups follow at the next rebuildRollups. */
@@ -679,7 +779,9 @@ export class MailboxDO extends DurableObject<Env> {
       written += sql.exec(`DELETE FROM messages WHERE ts >= ? AND ts < ?`, after, before).rowsWritten;
       written += sql.exec(`DELETE FROM months WHERE month = ?`, month).rowsWritten;
       written += sql.exec(`UPDATE basin_months SET indexed_at = NULL WHERE month = ?`, month).rowsWritten;
-      this.drop('months', 'basin_months');
+      const book = this.status();
+      if (!book.indexing.includes(month)) book.indexing.push(month);
+      written += this.changed([month]);
       this.count({ do_rows_written: written });
       return { removed: rows.length, rowsWritten: written };
     });
@@ -691,11 +793,27 @@ export class MailboxDO extends DurableObject<Env> {
    * Basin's own count replaces it: the month is done, not left Indexing for a message it has.
    */
   async markIndexed(month: string, inBasin: number): Promise<void> {
-    const { rowsWritten } = this.ctx.storage.sql.exec(
-      `UPDATE basin_months SET indexed_at = ?, copied = ? WHERE month = ?`, new Date().toISOString(), inBasin, month,
-    );
-    this.drop('basin_months');
-    this.count({ do_rows_written: rowsWritten });
+    this.ctx.storage.transactionSync(() => {
+      let written = this.ctx.storage.sql.exec(
+        `UPDATE basin_months SET indexed_at = ?, copied = ? WHERE month = ?`, new Date().toISOString(), inBasin, month,
+      ).rowsWritten;
+      const book = this.status();
+      book.indexing = book.indexing.filter((m) => m !== month);
+      if (!book.indexing.length) book.indexWait = null;
+      written += this.changed([month]);
+      this.count({ do_rows_written: written });
+    });
+  }
+
+  /**
+   * Indexing `month` waits for the account's daily DO write limit (`label`) until `resumesAt`.
+   * Copying goes on; the page shows indexing as waiting. The next index chunk clears it.
+   */
+  async indexWaiting(month: string, resumesAt: string, label: string): Promise<void> {
+    const book = this.status();
+    if (!book.indexing.includes(month)) book.indexing.push(month);
+    book.indexWait = { resumesAt, label };
+    this.count({ do_rows_written: this.saveStatus() });
   }
 
   /**
@@ -766,7 +884,7 @@ export class MailboxDO extends DurableObject<Env> {
     const { rowsWritten } = sql.exec(`UPDATE job_months SET state = 'running' WHERE job = ? AND month = ? AND state = 'queued'`, row.job, row.month);
     if (rowsWritten) {
       this.changedMonths();
-      this.count({ do_rows_written: rowsWritten });
+      this.count({ do_rows_written: rowsWritten + this.changed([row.month], [row.job]) });
     }
     return { job: row.job, month: row.month };
   }
@@ -779,25 +897,25 @@ export class MailboxDO extends DurableObject<Env> {
     );
     if (rowsWritten) {
       this.changedMonths();
-      this.count({ do_rows_written: rowsWritten });
+      this.count({ do_rows_written: rowsWritten + this.changed([part.month], [part.job]) });
     }
   }
 
-  /** The census's progress, or null before the first. */
+  /** The census's progress, or null before the first (from the status row). */
   async censusState(): Promise<CensusState | null> {
-    const row = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'census'`).toArray()[0];
-    return row ? (JSON.parse(row.value) as CensusState) : null;
+    return structuredClone(this.status().census);
   }
 
   /** Save census progress; with `onlyIf`, only while that run owns it. Returns whether it saved. */
   async saveCensus(state: CensusState, onlyIf?: string): Promise<boolean> {
     return this.ctx.storage.transactionSync(() => {
-      if (onlyIf !== undefined && (this.censusRow()?.runId ?? null) !== onlyIf) return false;
+      if (onlyIf !== undefined && (this.status().census?.runId ?? null) !== onlyIf) return false;
       this.ctx.storage.sql.exec(
         `INSERT INTO meta (key, value) VALUES ('census', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
         JSON.stringify(state),
       );
-      this.count({ do_rows_written: 1 });
+      this.status().census = structuredClone(state);
+      this.count({ do_rows_written: 1 + this.saveStatus() });
       return true;
     });
   }
@@ -821,20 +939,57 @@ export class MailboxDO extends DurableObject<Env> {
       `INSERT INTO gmail_months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
       month, n, new Date().toISOString(),
     );
-    this.drop('gmail_months');
-    this.count({ do_rows_written: rowsWritten });
+    this.count({ do_rows_written: rowsWritten + this.changed([month]) });
   }
 
-  /** Each month's Gmail count, copied count and latest backfill state, oldest first. */
+  /**
+   * Each month's Gmail count, copied count, copy and index state, oldest first. From the status
+   * row and the lanes' reports in memory: reads no table.
+   */
   async coverageMonths(): Promise<MonthCoverage[]> {
-    const months = structuredClone(this.readCoverage());
+    const book = this.status();
     await this.liveFromFiles();
-    // Lanes report what they've copied from memory; a month shows it until it lands.
-    for (const m of months) {
-      const l = this.live.get(m.month);
-      if (l) m.copied = Math.max(m.copied, m.inBasin + l.copied);
-    }
-    return months;
+    const wait = book.indexWait && Date.parse(book.indexWait.resumesAt) > Date.now() ? book.indexWait : null;
+    return Object.values(book.months)
+      .sort((a, b) => a.month.localeCompare(b.month))
+      .map((s) => {
+        const m: MonthCoverage = { ...s };
+        // Lanes report what they've copied from memory; a month shows it until it lands.
+        const l = this.live.get(m.month);
+        if (l) m.copied = Math.max(m.copied, m.inBasin + l.copied);
+        m.copyState = m.state === 'running' ? 'copying' : m.state === 'canceled' ? 'stopped' : m.state;
+        if (m.indexState === 'queued' && book.indexing.includes(m.month)) {
+          m.indexState = wait ? 'waiting' : 'indexing';
+          if (wait) m.resumesAt = wait.resumesAt;
+        }
+        return m;
+      });
+  }
+
+  /**
+   * Everything the Backfill page shows for this mailbox, from the status row and memory: its
+   * sync, census, months, jobs and index state. Reads no table.
+   */
+  async statusView(): Promise<{
+    sync: SyncState | null;
+    census: CensusState | null;
+    months: MonthCoverage[];
+    jobs: BackfillJob[];
+    indexed: number;
+    index: { status: 'indexing' | 'waiting' | 'idle'; pausedFor?: string; resumesAt?: string };
+  }> {
+    const book = this.status();
+    const wait = book.indexWait && Date.parse(book.indexWait.resumesAt) > Date.now() ? book.indexWait : null;
+    return {
+      sync: await this.syncView(),
+      census: structuredClone(book.census),
+      months: await this.coverageMonths(),
+      jobs: structuredClone(book.jobs),
+      indexed: this.indexedTotal(),
+      index: wait
+        ? { status: 'waiting', pausedFor: wait.label, resumesAt: wait.resumesAt }
+        : { status: book.indexing.length ? 'indexing' : 'idle' },
+    };
   }
 
   /** A lane not heard from since this object started (its run died, or the object restarted): its progress from its R2 file. */
@@ -864,57 +1019,11 @@ export class MailboxDO extends DurableObject<Env> {
           `INSERT INTO basin_months (month, copied) VALUES (?, ?) ON CONFLICT (month) DO UPDATE SET copied = copied + excluded.copied`,
           month, copied,
         );
-        this.count({ do_rows_written: rowsWritten });
+        this.count({ do_rows_written: rowsWritten + this.changed([month]) });
       }
       await this.endLane(month);
       if (user) await this.env.ARCHIVE.delete(r2Keys.lane(user, this.laneAccount!, month));
     }
-    this.drop('basin_months');
-  }
-
-  /** One table's rows for coverage, kept until a write to that table drops them. */
-  private part<T>(table: KeptTable, query: string): T[] {
-    return this.keep(`cov:${table}`, [table], () => {
-      const cursor = this.ctx.storage.sql.exec<T & Record<string, SqlStorageValue>>(query);
-      const rows = cursor.toArray();
-      this.count({ do_rows_read: cursor.rowsRead });
-      return rows;
-    });
-  }
-
-  private readCoverage(): MonthCoverage[] {
-    const by = new Map<string, MonthCoverage>();
-    const at = (month: string) =>
-      by.get(month) ?? by.set(month, { month, gmail: null, copied: 0, inBasin: 0, landed: false, indexed: 0, state: null, error: null, finishedAt: null }).get(month)!;
-    for (const r of this.part<{ month: string; n: number }>('gmail_months', `SELECT month, n FROM gmail_months`)) at(r.month).gmail = r.n;
-    for (const r of this.monthCounts()) Object.assign(at(r.month), { copied: r.n, indexed: r.n });
-    const basin = new Set<string>();
-    for (const r of this.basinMonths()) {
-      const m = at(r.month);
-      basin.add(r.month);
-      Object.assign(m, { inBasin: r.copied, landed: r.landed_at !== null, copied: Math.max(m.copied, r.copied) });
-    }
-    // The latest job to touch a month decides its state, in one pass over job_months.
-    for (const r of this.part<{ month: string; state: PartState; error: string | null; finished_at: string | null }>(
-      'job_months',
-      `SELECT month, state, error, finished_at FROM (
-         SELECT month, state, error, finished_at, row_number() OVER (PARTITION BY month ORDER BY job DESC) AS latest FROM job_months
-       ) WHERE latest = 1`,
-    )) Object.assign(at(r.month), { state: r.state, error: r.error, finishedAt: r.finished_at });
-    // Months copied before Basin came first went to Basin and the index together.
-    for (const m of by.values()) if (!basin.has(m.month)) Object.assign(m, { inBasin: m.indexed, landed: m.indexed > 0 && m.state === 'done' });
-    return [...by.values()].sort((a, b) => a.month.localeCompare(b.month));
-  }
-
-  /** Indexed messages a month (the `months` rollup). */
-  private monthCounts() {
-    return this.part<{ month: string; n: number }>('months', `SELECT month, n FROM months`);
-  }
-
-  private basinMonths() {
-    return this.part<{ month: string; copied: number; landed_at: string | null; indexed_at: string | null }>(
-      'basin_months', `SELECT month, copied, landed_at, indexed_at FROM basin_months`,
-    );
   }
 
   /**
@@ -934,35 +1043,14 @@ export class MailboxDO extends DurableObject<Env> {
         .toArray()[0].id;
       for (const m of fresh) sql.exec(`INSERT INTO job_months (job, month, state) VALUES (?, ?, 'queued')`, job, m);
       this.changedMonths();
-      this.count({ do_rows_written: fresh.length + 1 });
+      this.count({ do_rows_written: fresh.length + 1 + this.changed(fresh, [job]) });
       return job;
     });
   }
 
-  /** The latest backfill jobs, newest first. */
-  async jobList(limit = 20): Promise<BackfillJob[]> {
-    return structuredClone(this.keep(`jobs:${limit}`, ['job_months'], () => this.readJobs(limit)));
-  }
-
-  private readJobs(limit: number): BackfillJob[] {
-    const sql = this.ctx.storage.sql;
-    const jobs = sql
-      .exec<{ id: number; created_at: string; label: string }>(`SELECT id, created_at, label FROM jobs ORDER BY id DESC LIMIT ?`, limit)
-      .toArray();
-    return jobs.map((j) => {
-      const months: Record<PartState, number> = { queued: 0, running: 0, done: 0, failed: 0, canceled: 0 };
-      let from = '';
-      let to = '';
-      for (const r of sql.exec<{ state: PartState; n: number; first: string; last: string }>(
-        `SELECT state, count(*) AS n, min(month) AS first, max(month) AS last FROM job_months WHERE job = ? GROUP BY state`,
-        j.id,
-      )) {
-        months[r.state] = r.n;
-        if (!from || r.first < from) from = r.first;
-        if (r.last > to) to = r.last;
-      }
-      return { id: j.id, createdAt: j.created_at, label: j.label, status: jobStatus(months), months, from, to };
-    });
+  /** The latest backfill jobs, newest first (from the status row). */
+  async jobList(limit = JOBS_KEPT): Promise<BackfillJob[]> {
+    return structuredClone(this.status().jobs.slice(0, limit));
   }
 
   /** Cancel a job's months still waiting or being copied; Retry its failed or canceled months. Returns months changed, or null: no such job. */
@@ -981,7 +1069,7 @@ export class MailboxDO extends DurableObject<Env> {
     const changed = rows.length;
     if (changed) {
       this.changedMonths();
-      this.count({ do_rows_written: cursor.rowsWritten });
+      this.count({ do_rows_written: cursor.rowsWritten + this.changed(rows.map((r) => r.month), [job]) });
       if (action === 'cancel') await this.stopLanes(rows.map((r) => r.month));
     }
     return changed;
@@ -991,13 +1079,13 @@ export class MailboxDO extends DurableObject<Env> {
   async unqueueMonths(months: string[] | null): Promise<number> {
     const sql = this.ctx.storage.sql;
     const cursor = months
-      ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') AND month IN (SELECT value FROM json_each(?)) RETURNING month`, JSON.stringify(months))
-      : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') RETURNING month`);
-    const rows = cursor.toArray() as { month: string }[];
+      ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') AND month IN (SELECT value FROM json_each(?)) RETURNING job, month`, JSON.stringify(months))
+      : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') RETURNING job, month`);
+    const rows = cursor.toArray() as { job: number; month: string }[];
     const changed = rows.length;
     if (changed) {
       this.changedMonths();
-      this.count({ do_rows_written: cursor.rowsWritten });
+      this.count({ do_rows_written: cursor.rowsWritten + this.changed(rows.map((r) => r.month), rows.map((r) => r.job)) });
       await this.stopLanes(rows.map((r) => r.month));
     }
     return changed;
@@ -1071,8 +1159,15 @@ export class MailboxDO extends DurableObject<Env> {
           id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
         );
       const added = addedIds.length;
-      if (added) {
-        this.drop('months');
+      // Built from Basin (no rollups): the batch's months are indexing, and no longer waiting.
+      const touched = new Set(batch.map((m) => monthOf(m.ts)));
+      if (added || (!rollups && batch.length)) {
+        const book = this.status();
+        if (!rollups) {
+          for (const m of touched) if (!book.indexing.includes(m)) book.indexing.push(m);
+          book.indexWait = null;
+        }
+        rowsWritten += this.changed(added ? touched : []);
         this.count({ messages_indexed: added, do_rows_written: rowsWritten });
       }
       return { added, skipped: batch.length - added, rowsWritten, addedIds };
@@ -1212,9 +1307,9 @@ export class MailboxDO extends DurableObject<Env> {
     const full = rows.length > size;
     if (full) rows.length = size;
     const end = full ? rows[rows.length - 1] : more ? last : null;
-    // Totals from the kept month rows: no read unless a write changed them.
-    const total = filters.length ? null : this.monthCounts().reduce((t, r) => t + r.n, 0);
-    const unindexed = this.basinMonths().filter((r) => r.copied > 0 && r.indexed_at === null).length;
+    // Totals from the status row: no table read.
+    const total = filters.length ? null : this.indexedTotal();
+    const unindexed = Object.values(this.status().months).filter((m) => m.inBasin > 0 && m.indexState !== null && m.indexState !== 'done').length;
     this.count({ do_rows_read: read });
     return {
       rows,
@@ -1316,9 +1411,6 @@ export class MailboxDO extends DurableObject<Env> {
   /** Every account's sync, for the Backfill page and the status bar, and whether Basin can be written. */
   async syncAll(): Promise<SyncOverview> {
     const user = this.userId();
-    const accounts = this.ctx.storage.sql
-      .exec<{ id: string; email: string }>(`SELECT id, email FROM accounts ORDER BY added_at`)
-      .toArray();
     const pausedBy = this.pausedBy();
     const paused = pausedBy !== null;
     return {
@@ -1327,26 +1419,87 @@ export class MailboxDO extends DurableObject<Env> {
       pausedBy,
       accounts: user
         ? await Promise.all(
-            accounts.map(async (a) => {
-              const mailbox = accountMailbox(this.env, user, a.id);
-              let state = await mailbox.syncView();
-              // A run Cloudflare stopped never saves again: start it afresh, so the page never shows a dead run as running.
-              // Lanes are checked on their own: a lane that stopped saving starts again where it stood.
-              const ownWork = state && (state.phase !== 'live' || state.pending.length > 0 || state.basinQueue.length > 0);
-              if (!paused && state?.lanes?.length) await launchLanes(this.env, user, a.id);
-              if (!paused && state && ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) {
-                try {
-                  await syncDeps.start(this.env, user, a.id);
-                  state = await mailbox.syncView();
-                } catch (e) {
-                  if (!(e instanceof BasinNotReady)) throw e;
-                }
-              }
+            this.accountList().map(async (a) => {
+              const state = await this.keepRunning(user, a.id, await accountMailbox(this.env, user, a.id).syncView(), paused);
               return { ...a, sync: syncSummary(state) };
             }),
           )
         : [],
     };
+  }
+
+  /**
+   * A run Cloudflare stopped never saves again: start it afresh, so the page never shows a dead
+   * run as running. Lanes are checked on their own: a lane that stopped saving starts again where
+   * it stood. Returns the sync as it is now.
+   */
+  private async keepRunning(user: UserId, account: string, state: SyncState | null, paused: boolean): Promise<SyncState | null> {
+    if (paused || !state) return state;
+    const ownWork = state.phase !== 'live' || state.pending.length > 0 || state.basinQueue.length > 0;
+    if (state.lanes?.length) await launchLanes(this.env, user, account);
+    if (ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) {
+      try {
+        await syncDeps.start(this.env, user, account);
+        return await accountMailbox(this.env, user, account).syncView();
+      } catch (e) {
+        if (!(e instanceof BasinNotReady)) throw e;
+      }
+    }
+    return state;
+  }
+
+  /**
+   * GET /api/backfill/status: every mailbox's sync, coverage, copy and index state and latest
+   * backfills, in one answer. Each mailbox answers from its status row (statusView), so a poll
+   * reads no table: this user's accounts and pause are kept in memory too.
+   */
+  async backfillStatus(): Promise<BackfillStatus> {
+    const user = this.userId();
+    const pausedBy = this.pausedBy();
+    const paused = pausedBy !== null;
+    const accounts: AccountStatus[] = user
+      ? await Promise.all(
+          this.accountList().map(async (a) => {
+            const mailbox = accountMailbox(this.env, user, a.id);
+            const v = await mailbox.statusView();
+            const sync = syncSummary(await this.keepRunning(user, a.id, v.sync, paused));
+            const census = (await this.keepCounting(user, a.id, v.census)) ?? v.census;
+            return {
+              ...a,
+              sync,
+              copy: paused ? { status: 'paused', pausedBy: pausedBy! } : { status: sync.status === 'running' ? 'copying' : 'idle' },
+              index: v.index,
+              months: v.months,
+              census: censusView(census),
+              current: monthNow(),
+              jobs: v.jobs,
+              totals: { indexed: v.indexed },
+            } satisfies AccountStatus;
+          }),
+        )
+      : [];
+    const waits = accounts.flatMap((a) => (a.index.status === 'waiting' && a.index.resumesAt ? [a.index.resumesAt] : [])).sort();
+    const state: BackfillStatus['state'] =
+      pausedBy === 'budget' ? 'budget'
+      : paused ? 'paused'
+      : accounts.some((a) => a.copy.status === 'copying' || a.index.status === 'indexing') ? 'running'
+      : waits.length ? 'index_waiting'
+      : 'idle';
+    return { basin: !!this.env.BASIN_TOKEN, paused, pausedBy, state, resumesAt: state === 'index_waiting' ? waits[0] : null, accounts };
+  }
+
+  /**
+   * Opening the map starts the census when there is none, resumes one that stopped, and
+   * recounts recent months every 6 hours. Returns the census once started, else null.
+   */
+  private async keepCounting(user: UserId, account: string, c: CensusState | null): Promise<CensusState | null> {
+    const now = Date.now();
+    const stale = c && now - Date.parse(c.updatedAt) >= SYNC_STALE_MS;
+    const held = !!c?.resumesAt && Date.parse(c.resumesAt) > now;
+    const mode = held ? null : !c ? 'full' : c.month !== null && (c.error || stale) ? 'resume' : c.finishedAt && now - Date.parse(c.finishedAt) >= 6 * 3_600_000 ? 'refresh' : null;
+    if (!mode) return null;
+    await syncDeps.census(this.env, user, account, mode === 'refresh' ? 'refresh' : 'full');
+    return accountMailbox(this.env, user, account).censusState();
   }
 
   /**
@@ -1379,26 +1532,9 @@ export class MailboxDO extends DurableObject<Env> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return null;
     const mailbox = accountMailbox(this.env, user, account);
-    let c = await mailbox.censusState();
-    const now = Date.now();
-    const stale = c && now - Date.parse(c.updatedAt) >= SYNC_STALE_MS;
-    const held = !!c?.resumesAt && Date.parse(c.resumesAt) > now;
-    const mode = held ? null : !c ? 'full' : c.month !== null && (c.error || stale) ? 'resume' : c.finishedAt && now - Date.parse(c.finishedAt) >= 6 * 3_600_000 ? 'refresh' : null;
-    if (mode) {
-      await syncDeps.census(this.env, user, account, mode === 'refresh' ? 'refresh' : 'full');
-      c = await mailbox.censusState();
-    }
-    const counting = !!c && c.month !== null && !c.error;
-    return {
-      months: await mailbox.coverageMonths(),
-      census: {
-        status: !c ? 'not_started' : c.error ? 'stopped' : counting ? 'counting' : 'done',
-        month: c?.month ?? null,
-        finishedAt: c?.finishedAt ?? null,
-        error: c?.error ?? null,
-      },
-      current: monthNow(),
-    };
+    const v = await mailbox.statusView();
+    const c = (await this.keepCounting(user, account, v.census)) ?? v.census;
+    return { months: v.months, census: censusView(c), current: monthNow() };
   }
 
   /** Queue months to copy for an account, and start its sync if none is going. */
@@ -1484,7 +1620,14 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   private hasAccount(id: string): boolean {
-    return this.ctx.storage.sql.exec(`SELECT 1 FROM accounts WHERE id = ?`, id).toArray().length > 0;
+    return this.accountList().some((a) => a.id === id);
+  }
+
+  /** The person's accounts (id, email), kept in memory once read: connect and disconnect are the only writers. */
+  private accountsKept: { id: string; email: string }[] | null = null;
+  private accountList(): { id: string; email: string }[] {
+    this.accountsKept ??= this.ctx.storage.sql.exec<{ id: string; email: string }>(`SELECT id, email FROM accounts ORDER BY added_at`).toArray();
+    return this.accountsKept;
   }
 
   /** Save a change to one schedule; an unknown schedule or a change it can't take is refused. */
@@ -1523,6 +1666,7 @@ export class MailboxDO extends DurableObject<Env> {
            tested_at = excluded.tested_at, test_error = NULL`,
         account.id, account.email, token, account.scopes.join(' '), new Date().toISOString(), new Date().toISOString(),
     );
+    this.accountsKept = null;
     this.count({ do_rows_written: rowsWritten });
     await this.armSync();
     return { ok: true };
@@ -1549,6 +1693,7 @@ export class MailboxDO extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const row = sql.exec<{ refresh_token: string }>(`DELETE FROM accounts WHERE id = ? RETURNING refresh_token`, id).toArray()[0];
     if (row) {
+      this.accountsKept = null;
       this.count({ do_rows_written: 1 });
       await this.armSync();
     }
@@ -1596,6 +1741,17 @@ export class MailboxDO extends DurableObject<Env> {
       )
       .toArray() as UsageDay[];
   }
+}
+
+/** The census as the map shows it. */
+function censusView(c: CensusState | null): AccountCoverage['census'] {
+  const counting = !!c && c.month !== null && !c.error;
+  return {
+    status: !c ? 'not_started' : c.error ? 'stopped' : counting ? 'counting' : 'done',
+    month: c?.month ?? null,
+    finishedAt: c?.finishedAt ?? null,
+    error: c?.error ?? null,
+  };
 }
 
 /** Rows read at most for one Messages page, and how many a read takes. */

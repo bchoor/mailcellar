@@ -65,7 +65,7 @@ function SchedulesSettings() {
           id === 'gmail-sync' && ids.length
             ? await syncAllNow(ids)
             : { at: new Date().toISOString(), ok: false, detail: id === 'gmail-sync' ? 'Add a Gmail account first' : 'Not built yet' };
-        await client.invalidateQueries({ queryKey: ['sync'] });
+        await client.invalidateQueries({ queryKey: ['backfill'] });
         return run;
       }}
     />

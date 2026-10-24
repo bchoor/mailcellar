@@ -264,7 +264,16 @@ export interface MonthCoverage {
   error: string | null;
   /** When that backfill finished the month (done or failed); null while it runs, or for months finished before this was kept. */
   finishedAt: string | null;
+  /** The month's copy as the Backfill page names it: `state`, with running as copying and canceled as stopped. */
+  copyState?: 'queued' | 'copying' | 'done' | 'failed' | 'stopped' | null;
+  /** The month's search index, once it has landed in Basin; null before (or for mail indexed before Basin came first). */
+  indexState?: IndexState | null;
+  /** Indexing waits for the daily DO write limit until this time. */
+  resumesAt?: string | null;
 }
+
+/** A landed month's search index: queued, being built from Basin, waiting for the daily DO write limit, or done. */
+export type IndexState = 'queued' | 'indexing' | 'waiting' | 'done';
 
 /** GET /api/accounts/:id/coverage. */
 export interface AccountCoverage {
@@ -272,6 +281,31 @@ export interface AccountCoverage {
   census: { status: 'counting' | 'done' | 'stopped' | 'not_started'; month: string | null; finishedAt: string | null; error: string | null };
   /** The month still running (YYYY-MM): its count can still grow. */
   current: string;
+}
+
+/** One mailbox on GET /api/backfill/status: its sync, coverage, copy and index state, and latest backfills. */
+export interface AccountStatus extends AccountCoverage {
+  id: string;
+  email: string;
+  sync: SyncSummary;
+  /** Copying is never paused by the DO write limit, only by the person or the spend guard. */
+  copy: { status: 'copying' | 'paused' | 'idle'; pausedBy?: 'person' | 'budget' };
+  /** Indexing waits for the daily DO write limit (`pausedFor` names it) until `resumesAt`. */
+  index: { status: 'indexing' | 'waiting' | 'idle'; pausedFor?: string; resumesAt?: string };
+  jobs: BackfillJob[];
+  /** Messages in this mailbox's search index. */
+  totals: { indexed: number };
+}
+
+/**
+ * GET /api/backfill/status: the one read the Backfill page and status bar poll. Every mailbox
+ * answers from one kept status row, so a poll reads no table.
+ */
+export interface BackfillStatus extends SyncOverview {
+  /** running, paused by the person, indexing waiting for the daily limit (until resumesAt), paused by the spend guard, or idle. */
+  state: 'running' | 'paused' | 'index_waiting' | 'budget' | 'idle';
+  resumesAt: string | null;
+  accounts: AccountStatus[];
 }
 
 /** A backfill: months queued together, copied newest first. */

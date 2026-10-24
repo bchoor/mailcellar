@@ -437,13 +437,20 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   for (let i = 0; i < INDEX_CHUNKS_A_RUN && at < rows.length; i++) {
     const chunk = rows.slice(at, at + INDEX_CHUNK);
     const full = await quota.reserve({ do_rows_written: chunk.length * 4, do_rows_read: chunk.length * 2 });
-    if (full) return { indexed, next: at, resumesAt: full.resumesAt };
+    if (full) {
+      // The page shows indexing waiting until then; the next chunk clears it.
+      await mailbox.indexWaiting(month, full.resumesAt, full.label);
+      return { indexed, next: at, resumesAt: full.resumesAt };
+    }
     let r;
     try {
       r = await mailbox.ingest(chunk.map(indexedFromBasin), false);
     } catch (e) {
       if (!isDailyLimit(e)) throw e;
-      return { indexed, next: at, resumesAt: nextReset().toISOString() };
+      const resumesAt = nextReset().toISOString();
+      // Past the daily limit this write fails too; the page then shows the month indexing.
+      await mailbox.indexWaiting(month, resumesAt, 'DO rows written').catch(() => {});
+      return { indexed, next: at, resumesAt };
     }
     await quota.add({ do_rows_written: r.rowsWritten, do_rows_read: chunk.length * 2 });
     indexed += r.added;
