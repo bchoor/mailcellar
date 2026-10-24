@@ -1302,6 +1302,23 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
+   * Queue every past month Gmail has more mail in than MailCellar copied, as one job, and resume
+   * backfill (the spend cap still pauses it). The months to copy come from the census.
+   */
+  async backfillMissing(account: string): Promise<{ months: string[]; job?: number | null; error?: string }> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return { months: [], error: 'not_found' };
+    const now = monthNow();
+    const months = (await accountMailbox(this.env, user, account).coverageMonths())
+      .filter((m) => m.month < now && m.gmail !== null && m.gmail > m.copied)
+      .map((m) => m.month);
+    if (!months.length) return { months };
+    if (!(await this.setBackfillPaused(false))) return { months, error: 'over_budget' };
+    const r = await this.backfill(account, months, 'All missing months');
+    return 'error' in r ? { months, error: r.error } : { months, job: r.job };
+  }
+
+  /**
    * Copy one month as a test of the copy engine: queue it (unless it is already) and resume
    * backfill, but only when no other month of any account is waiting or being copied.
    */
