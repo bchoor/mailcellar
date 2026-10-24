@@ -116,6 +116,15 @@ export const MIGRATIONS: readonly string[] = [
    CREATE INDEX domains_n ON domains (n);`,
   // 9: when each backfill month finished (done or failed), for the Backfills list's Done today.
   `ALTER TABLE job_months ADD COLUMN finished_at TEXT;`,
+  // 10: the slim index (2026-10-24). Search keeps no per-message size row (columnsize = 0) and
+  // so no contentless delete: a message is taken out with FTS5's 'delete' command and its text
+  // from messages. That was one DO row written a message. The constructor fills it again.
+  `DROP TABLE message_fts;
+   CREATE VIRTUAL TABLE message_fts USING fts5 (
+     subject, from_addr, from_name, snippet, labels,
+     content = '', columnsize = 0, tokenize = 'unicode61 remove_diacritics 1'
+   );
+   INSERT INTO meta (key, value) VALUES ('fts_refill', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
 ];
 
 
@@ -162,6 +171,7 @@ export class MailboxDO extends DurableObject<Env> {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
+      this.refillSearch();
       this.dropSample();
     });
   }
@@ -174,9 +184,28 @@ export class MailboxDO extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'sample'`).toArray().length) return;
     this.ctx.storage.transactionSync(() => {
-      for (const table of ['messages', 'message_fts', 'senders', 'domains', 'months', 'labels'])
-        sql.exec(`DELETE FROM ${table}`);
+      for (const table of ['messages', 'senders', 'domains', 'months', 'labels']) sql.exec(`DELETE FROM ${table}`);
+      sql.exec(`INSERT INTO message_fts (message_fts) VALUES ('delete-all')`);
       sql.exec(`DELETE FROM meta WHERE key = 'sample'`);
+    });
+  }
+
+  /** After migration 10: put every indexed message back in search. */
+  private refillSearch(): void {
+    const sql = this.ctx.storage.sql;
+    if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'fts_refill'`).toArray().length) return;
+    this.ctx.storage.transactionSync(() => {
+      let written = 0;
+      for (const m of sql.exec<{ id: string; subject: string; from_addr: string; from_name: string; snippet: string; labels: string }>(
+        `SELECT id, subject, from_addr, from_name, snippet, labels FROM messages`,
+      ))
+        written += sql.exec(
+          `INSERT INTO message_fts (rowid, subject, from_addr, from_name, snippet, labels) VALUES (CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
+          ftsRowid(m.id), m.subject, m.from_addr, m.from_name, m.snippet, m.labels,
+        ).rowsWritten;
+      written += sql.exec(`DELETE FROM meta WHERE key = 'fts_refill'`).rowsWritten;
+      console.log(JSON.stringify({ refillSearch: { rowsWritten: written } }));
+      this.count({ do_rows_written: written });
     });
   }
 
@@ -563,6 +592,87 @@ export class MailboxDO extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Count senders, domains and labels again from every indexed message, writing only the rows
+   * that changed: after the index is built from Basin, which leaves them out (ingest).
+   */
+  async rebuildRollups(): Promise<{ rowsRead: number; rowsWritten: number }> {
+    const sql = this.ctx.storage.sql;
+    const senders: Tally = new Map();
+    const domains: Tally = new Map();
+    const labels: Tally = new Map();
+    const cursor = sql.exec<{ from_addr: string; from_name: string; ts: number; size: number; labels: string }>(
+      `SELECT from_addr, from_name, ts, size, labels FROM messages`,
+    );
+    for (const r of cursor) {
+      const m = { ts: r.ts, size: r.size } as IndexedMessage;
+      const addr = r.from_addr.toLowerCase();
+      const before = senders.get(addr);
+      tally(senders, addr, m, r.from_name);
+      if (before && r.ts >= before.last) senders.get(addr)!.name = r.from_name;
+      tally(domains, domainOf(r.from_addr), m);
+      for (const l of r.labels.split(' ').filter(Boolean)) tally(labels, l, m);
+    }
+    let written = 0;
+    this.ctx.storage.transactionSync(() => {
+      const run = (query: string, ...args: (string | number)[]) => {
+        written += sql.exec(query, ...args).rowsWritten;
+      };
+      for (const [addr, t] of senders)
+        run(
+          `INSERT INTO senders VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (addr) DO UPDATE SET
+             name = excluded.name, n = excluded.n, bytes = excluded.bytes, first_ts = excluded.first_ts, last_ts = excluded.last_ts
+           WHERE n != excluded.n OR bytes != excluded.bytes OR name != excluded.name`,
+          addr, t.name, t.n, t.bytes, t.first, t.last,
+        );
+      for (const [domain, t] of domains)
+        run(
+          `INSERT INTO domains VALUES (?, ?, ?) ON CONFLICT (domain) DO UPDATE SET n = excluded.n, bytes = excluded.bytes
+           WHERE n != excluded.n OR bytes != excluded.bytes`,
+          domain, t.n, t.bytes,
+        );
+      for (const [id, t] of labels)
+        run(
+          `INSERT INTO labels VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET n = excluded.n, bytes = excluded.bytes
+           WHERE n != excluded.n OR bytes != excluded.bytes`,
+          id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
+        );
+    });
+    this.count({ do_rows_read: cursor.rowsRead, do_rows_written: written });
+    return { rowsRead: cursor.rowsRead, rowsWritten: written };
+  }
+
+  /** Messages in the index, from the month counts (a row a month read, not a row a message). */
+  async indexedCount(): Promise<number> {
+    return this.ctx.storage.sql.exec<{ n: number }>(`SELECT coalesce(sum(n), 0) AS n FROM months`).toArray()[0].n;
+  }
+
+  /** Take a month out of the index, to build it again from Basin. Rollups follow at the next rebuildRollups. */
+  async unindexMonth(month: string): Promise<{ removed: number; rowsWritten: number }> {
+    const sql = this.ctx.storage.sql;
+    const after = Date.parse(`${month}-01T00:00:00Z`);
+    const before = Date.parse(`${addMonths(month, 1)}-01T00:00:00Z`);
+    return this.ctx.storage.transactionSync(() => {
+      let written = 0;
+      const rows = sql
+        .exec<{ id: string; subject: string; from_addr: string; from_name: string; snippet: string; labels: string }>(
+          `SELECT id, subject, from_addr, from_name, snippet, labels FROM messages WHERE ts >= ? AND ts < ?`, after, before,
+        )
+        .toArray();
+      for (const m of rows)
+        written += sql.exec(
+          `INSERT INTO message_fts (message_fts, rowid, subject, from_addr, from_name, snippet, labels) VALUES ('delete', CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
+          ftsRowid(m.id), m.subject, m.from_addr, m.from_name, m.snippet, m.labels,
+        ).rowsWritten;
+      written += sql.exec(`DELETE FROM messages WHERE ts >= ? AND ts < ?`, after, before).rowsWritten;
+      written += sql.exec(`DELETE FROM months WHERE month = ?`, month).rowsWritten;
+      written += sql.exec(`UPDATE basin_months SET indexed_at = NULL WHERE month = ?`, month).rowsWritten;
+      this.kept.clear();
+      this.count({ do_rows_written: written });
+      return { removed: rows.length, rowsWritten: written };
+    });
+  }
+
   /** The month's search index has been built from Basin. */
   async markIndexed(month: string): Promise<void> {
     const { rowsWritten } = this.ctx.storage.sql.exec(`UPDATE basin_months SET indexed_at = ? WHERE month = ?`, new Date().toISOString(), month);
@@ -866,9 +976,11 @@ export class MailboxDO extends DurableObject<Env> {
   /**
    * Index a batch of messages in one transaction. Messages already indexed are skipped,
    * so a retried batch never double-counts. Rollups are written once a batch, not once a
-   * message, which S4 measured at a third of the write budget.
+   * message, which S4 measured at a third of the write budget. Without `rollups` (the index
+   * built from Basin) only the month count is kept up; rebuildRollups adds the rest once,
+   * when backfill is done, since a sender in every month would be written once a month.
    */
-  async ingest(batch: IndexedMessage[]): Promise<IngestResult> {
+  async ingest(batch: IndexedMessage[], rollups = true): Promise<IngestResult> {
     const sql = this.ctx.storage.sql;
     return this.ctx.storage.transactionSync(() => {
       let rowsWritten = 0;
@@ -895,9 +1007,10 @@ export class MailboxDO extends DurableObject<Env> {
            VALUES (CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
           ftsRowid(m.id), m.subject, m.fromAddr, m.fromName, m.snippet, labelText,
         );
+        tally(months, monthOf(m.ts), m);
+        if (!rollups) continue;
         tally(senders, m.fromAddr.toLowerCase(), m, m.fromName);
         tally(domains, domainOf(m.fromAddr), m);
-        tally(months, monthOf(m.ts), m);
         for (const l of m.labels) tally(labels, l, m);
       }
       for (const [addr, t] of senders)

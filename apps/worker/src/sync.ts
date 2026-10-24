@@ -416,10 +416,10 @@ export async function runBatch(
   return { copied: added.copied, phase: next.phase, more, resumesAt: next.resumesAt };
 }
 
-/** Index rows written a call when building a month's index; each costs about 8 Durable Object rows. */
-export const INDEX_CHUNK = 250;
+/** Index rows written a call when building a month's index (fewer calls, fewer search segments). */
+export const INDEX_CHUNK = 500;
 /** Chunks one index run writes before handing over to a fresh run. */
-export const INDEX_CHUNKS_A_RUN = 8;
+export const INDEX_CHUNKS_A_RUN = 4;
 
 /**
  * Build a landed month's search index from Basin: read the month back, and index what the
@@ -436,11 +436,11 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   let indexed = 0;
   for (let i = 0; i < INDEX_CHUNKS_A_RUN && at < rows.length; i++) {
     const chunk = rows.slice(at, at + INDEX_CHUNK);
-    const full = await quota.reserve({ do_rows_written: chunk.length * 8, do_rows_read: chunk.length * 2 });
+    const full = await quota.reserve({ do_rows_written: chunk.length * 3, do_rows_read: chunk.length * 2 });
     if (full) return { indexed, next: at, resumesAt: full.resumesAt };
     let r;
     try {
-      r = await mailbox.ingest(chunk.map(indexedFromBasin));
+      r = await mailbox.ingest(chunk.map(indexedFromBasin), false);
     } catch (e) {
       if (!isDailyLimit(e)) throw e;
       return { indexed, next: at, resumesAt: nextReset().toISOString() };
@@ -451,6 +451,17 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   }
   if (at < rows.length) return { indexed, next: at, resumesAt: null };
   await mailbox.markIndexed(month);
+  // Senders, domains and labels once backfill is done, not once a month.
+  // (Senders, domains and labels left with no mail after unindexMonth keep their rows until mail returns.)
+  if (!(await mailbox.hasQueued())) {
+    const n = await mailbox.indexedCount();
+    const full = await quota.reserve({ do_rows_read: n, do_rows_written: Math.ceil(n / 4) });
+    if (!full) {
+      const r = await mailbox.rebuildRollups();
+      await quota.add({ do_rows_read: r.rowsRead, do_rows_written: r.rowsWritten });
+      console.log(JSON.stringify({ rollups: r }));
+    }
+  }
   return { indexed, next: null, resumesAt: null };
 }
 
@@ -566,6 +577,8 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     if (event.payload.index) {
       const index = event.payload.index;
       const from = event.payload.from ?? 0;
+      if (event.payload.reindex && !from)
+        console.log(JSON.stringify({ unindex: await step.do('unindex', () => accountMailbox(this.env, user, account).unindexMonth(index)) }));
       const r = await step.do('index', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runIndex(this.env, user, account, index, from));
       if (r.next === null) return r.indexed;
       if (r.resumesAt) await step.sleepUntil('wait for the daily limit', new Date(r.resumesAt));
