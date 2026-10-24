@@ -70,9 +70,10 @@ describe('sync', () => {
   it('copies RUN_SIZE messages a run, then asks for another run', async () => {
     fakeGmail(fakeMessages(RUN_SIZE + 20));
     const { user, account, mailbox } = await setup('run-1', { pageToken: '', historyId: '100', total: RUN_SIZE + 20 }, []);
-    expect(await runBatch(env, user, account, 'run-1')).toMatchObject({ copied: RUN_SIZE, phase: 'backfill', more: true });
+    const roomy = { calls: RUN_CALLS, batchBytes: BATCH_BYTES, cpuMs: 1e9 };
+    expect(await runBatch(env, user, account, 'run-1', roomy)).toMatchObject({ copied: RUN_SIZE, phase: 'backfill', more: true });
     expect((await mailbox.syncState())!.pageToken).toBe(String(RUN_SIZE));
-    expect(await runBatch(env, user, account, 'run-1')).toMatchObject({ copied: 20, phase: 'live', more: false });
+    expect(await runBatch(env, user, account, 'run-1', roomy)).toMatchObject({ copied: 20, phase: 'live', more: false });
   }, 30_000);
 
   it('picks up new mail once live', async () => {

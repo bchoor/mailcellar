@@ -233,7 +233,7 @@ function AccountCoverageMap({ id, email, basin }: { id: string; email: string; b
         rows={{ title: 'Year' }}
         layout="months"
         unit="messages"
-        summary={['complete', 'rows']}
+        summary={['complete', 'counts']}
         select={basin ? 'backfill' : undefined}
         selectable={(_row, month) => {
           const m = data?.months.find((x) => x.month === month);

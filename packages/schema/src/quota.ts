@@ -84,6 +84,31 @@ export interface QuotaMeter {
   hard: boolean;
   /** Dollars past the allowance this period, for billed meters; 0 within it. */
   cost: number | null;
+  /** When this period ends and the meter starts again from 0. */
+  resetsAt: string;
+  /** Who used it, most first: Worker scripts, Durable Object namespaces, D1 databases or R2 buckets. Empty until Cloudflare's figures are read. */
+  parts: QuotaPart[];
+}
+
+/** One project's share of a meter. */
+export interface QuotaPart {
+  /** The script, namespace, database or bucket; `Other` sums the rest. */
+  name: string;
+  value: number;
+  /** MailCellar's own (its Worker, Durable Objects or bucket). */
+  mine: boolean;
+}
+
+/** Parts a meter shows before the rest are summed as Other. */
+export const QUOTA_PARTS = 5;
+
+/** Whether a script, namespace or bucket is MailCellar's own. */
+export const isMailCellar = (name: string) => /^mailcellar(?:$|[ _-])/.test(name);
+
+/** The account's billing period, read from its subscriptions. Monthly meters count within it. */
+export interface BillingPeriod {
+  start: string;
+  end: string;
 }
 
 /** GET /api/quota: the account's meters now, and whether backfills are paused for a limit. */
@@ -99,15 +124,28 @@ export interface QuotaOverview {
   readError: string | null;
   /** The UTC day the daily meters count. */
   day: string;
+  /** The billing period monthly meters count in; null when it can't be read (then the calendar month). */
+  billing: BillingPeriod | null;
   meters: QuotaMeter[];
   paused: { metric: QuotaMetric; label: string; resumesAt: string } | null;
 }
 
-/** When a limit's period resets: 00:05 UTC tomorrow, or 00:05 UTC on the 1st. */
-export function quotaReset(period: 'day' | 'month', now = new Date()): Date {
-  return period === 'day'
-    ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 5))
-    : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 5));
+/** The billing period, if it is known and still running at `now`. */
+const current = (billing: BillingPeriod | null | undefined, now: Date) =>
+  billing && Date.parse(billing.start) <= now.getTime() && now.getTime() < Date.parse(billing.end) ? billing : null;
+
+/** The UTC day a limit's period started: today, or the billing period's first day (else the 1st). */
+export function quotaStart(period: 'day' | 'month', now = new Date(), billing?: BillingPeriod | null): string {
+  const day = now.toISOString().slice(0, 10);
+  if (period === 'day') return day;
+  return current(billing, now)?.start.slice(0, 10) ?? `${day.slice(0, 8)}01`;
+}
+
+/** When a limit's period resets: 00:05 UTC tomorrow, or when the billing period ends (else 00:05 UTC on the 1st). */
+export function quotaReset(period: 'day' | 'month', now = new Date(), billing?: BillingPeriod | null): Date {
+  if (period === 'day') return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 5));
+  const b = current(billing, now);
+  return b ? new Date(b.end) : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 5));
 }
 
 /** Dollars past the allowance for a billed meter. */

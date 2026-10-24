@@ -27,13 +27,14 @@ export const GZIP_MAX = 256 * 1024;
  */
 export const RUN_CPU_MS = 500;
 /**
- * Estimated CPU to copy one message, from spike S3: decoding and reading it (0.01 ms a KB),
- * gzip (0.03 ms a KB, small mail only), its Basin row (body text up to 32 KB staged, read back
- * and written as Parquet: 0.05 ms a KB) and a fixed 0.5 ms for the index row and calls.
+ * Estimated CPU to copy one message: twice what a local benchmark measured on 2026-10-24
+ * (20 KB 3 ms, 100 KB 5 ms, 6.8 MB 9 ms), since the first estimate ran about 5x low in
+ * production. A fixed 5 ms, the body read up to 256 KB (0.05 ms a KB) and the raw bytes
+ * decoded and stored (0.001 ms a KB).
  */
 export function messageCpuMs(size: number): number {
   const kb = size / 1024;
-  return 0.5 + kb * 0.01 + (size <= GZIP_MAX ? kb * 0.03 : 0) + Math.min(kb, 32) * 0.05;
+  return 5 + Math.min(kb, 256) * 0.05 + kb * 0.001;
 }
 /**
  * Whether the run that owns a sync has died: its Workflow errored (Cloudflare stopped it, say
@@ -470,8 +471,10 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
 }
 
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
-  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult | Awaited<ReturnType<typeof basinCheck>> | Awaited<ReturnType<typeof runCensus>>> {
+  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult | number | Awaited<ReturnType<typeof basinCheck>> | Awaited<ReturnType<typeof runCensus>>> {
     if (event.payload.check) return step.do('basin check', { retries: { limit: 0, delay: '1 second' } }, () => basinCheck(this.env));
+    const { names } = event.payload;
+    if (names) return step.do('names', () => accountQuota(this.env).setNames(names));
     const user = asUserId(event.payload.user);
     const { account } = event.payload;
     const runId = event.instanceId;
