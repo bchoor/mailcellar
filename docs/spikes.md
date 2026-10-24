@@ -88,6 +88,10 @@ write to R2.
 - Gzip is about 80% of the CPU.
 - The documented 10 ms per step was **not enforced**. One invocation used 1.9 s of CPU and
   finished `ok`. Cloudflare allows short bursts; we don't build on it.
+- In production (2026-10-24 18:00 UTC) a run that copied 500 messages and committed them to
+  Basin was stopped at 2,050 ms of CPU (`exceededCpu`), and its retry at 50 ms. So each run
+  now has a CPU budget of 500 ms, estimated from message sizes (`messageCpuMs`, Workers can't
+  read their own CPU time), and a run with staged Basin rows only commits them.
 - Locally (Node): MIME parsing with postal-mime costs about half of gzip. A Parquet row
   (hyparquet-writer) costs 0.1 to 0.8 ms.
 

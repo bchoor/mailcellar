@@ -1,7 +1,8 @@
 import { asUserId, mailboxName, QUOTA_METRICS, type QuotaMetric, type QuotaOverview } from '@mailcellar/schema';
+import { introspectWorkflowInstance } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { accountQuota, quotaDeps, readCloudflare, readPlan } from '../src/quota';
+import { accountQuota, quotaDeps, readCloudflare, readPlan, topParts } from '../src/quota';
 import { accountMailbox, BATCH_BYTES, RUN_CALLS, runBatch, runCensus } from '../src/sync';
 import { fakeGmail, fakeMessages } from './fixtures/gmail';
 import { mockFetch, signIn } from './helpers';
@@ -52,10 +53,10 @@ describe('Account limits', () => {
           dos: [{ sum: { rowsRead: 6117, rowsWritten: 15929 } }],
           d1: [{ sum: { rowsRead: 27604, rowsWritten: 3690 } }],
           r2: [
-            { dimensions: { actionType: 'PutObject' }, sum: { requests: 800 } },
-            { dimensions: { actionType: 'UploadPart' }, sum: { requests: 200 } },
-            { dimensions: { actionType: 'GetObject' }, sum: { requests: 5000 } },
-            { dimensions: { actionType: 'DeleteObject' }, sum: { requests: 99 } },
+            { dimensions: { actionType: 'PutObject', bucketName: 'mailcellar' }, sum: { requests: 800 } },
+            { dimensions: { actionType: 'UploadPart', bucketName: 'other' }, sum: { requests: 200 } },
+            { dimensions: { actionType: 'GetObject', bucketName: 'other' }, sum: { requests: 5000 } },
+            { dimensions: { actionType: 'DeleteObject', bucketName: 'mailcellar' }, sum: { requests: 99 } },
           ],
         }] } },
         errors: null,
@@ -66,12 +67,25 @@ describe('Account limits', () => {
     expect(cf).toEqual({
       workers_requests: 1958, do_rows_written: 15929, do_rows_read: 6117, d1_rows_written: 3690, d1_rows_read: 27604,
       r2_class_a: 1000, r2_class_b: 5000,
+      // Who used each meter, most first, so the page shows which project drives it.
+      parts: {
+        workers_requests: [{ name: 'Unnamed', value: 1958, mine: false }],
+        do_rows_written: [{ name: 'Unnamed', value: 15929, mine: false }],
+        do_rows_read: [{ name: 'Unnamed', value: 6117, mine: false }],
+        d1_rows_written: [{ name: 'Unnamed', value: 3690, mine: false }],
+        d1_rows_read: [{ name: 'Unnamed', value: 27604, mine: false }],
+        r2_class_a: [{ name: 'mailcellar', value: 800, mine: true }, { name: 'other', value: 200, mine: false }],
+        r2_class_b: [{ name: 'other', value: 5000, mine: false }],
+      },
     });
     // On Free, Workers, DO and D1 count today; R2 counts the month.
     expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-24T00:00:00Z', to: now.toISOString(), dos: '2026-10-24', d1: '2026-10-24', r2: '2026-10-01' });
     // On Paid, everything counts the month.
     await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, 'paid', now);
     expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-01T00:00:00Z', to: now.toISOString(), dos: '2026-10-01', d1: '2026-10-01', r2: '2026-10-01' });
+    // With a billing period, monthly meters count from its first day.
+    await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, 'free', now, { start: '2026-10-09T00:00:00.000Z', end: '2026-11-09T00:00:00.000Z' });
+    expect(sent!.variables).toMatchObject({ dos: '2026-10-24', r2: '2026-10-09' });
   });
 
   it('AC-Q3 a backfill pauses before a hard daily limit, says which, and resumes after the reset', async () => {
@@ -128,7 +142,7 @@ describe('Account limits', () => {
   });
 
   it('AC-Q7 on Workers Paid, limits are monthly allowances that bill past them, so nothing pauses', async () => {
-    quotaDeps.readPlan = async () => 'paid';
+    quotaDeps.readPlan = async () => ({ plan: 'paid', billing: null });
     cloudflare({ do_rows_written: 60_000_000, workers_requests: 9_000_000 });
     const quota = accountQuota(env);
     expect(await quota.reserve({ do_rows_written: 100_000 })).toBeNull();
@@ -155,9 +169,58 @@ describe('Account limits', () => {
       return Response.json({ success: true, result: subs });
     });
     const e = { ...env, CF_BILLING_TOKEN: 'bill-token', CF_ACCOUNT_ID: 'acct-1' };
-    subs = [{ state: 'Paid', rate_plan: { id: 'r2_paid', public_name: 'R2 Paid' } }];
-    expect(await readPlan(e)).toBe('free');
+    const now = new Date('2026-10-24T18:00:00Z');
+    subs = [{ state: 'Paid', rate_plan: { id: 'r2_paid', public_name: 'R2 Paid' }, current_period_start: '2026-10-09T00:00:00Z', current_period_end: '2026-11-09T00:00:00Z' }];
+    expect(await readPlan(e, now)).toEqual({ plan: 'free', billing: { start: '2026-10-09T00:00:00.000Z', end: '2026-11-09T00:00:00.000Z' } });
     subs.push({ state: 'Paid', rate_plan: { id: 'workers_paid', public_name: 'Workers Paid' } });
-    expect(await readPlan(e)).toBe('paid');
+    expect((await readPlan(e, now)).plan).toBe('paid');
+    subs = [];
+    expect(await readPlan(e, now)).toEqual({ plan: 'free', billing: null });
+  });
+
+  it('AC-Q9 monthly meters reset when the billing period ends, and R2 shows by bucket', async () => {
+    const end = new Date(Date.now() + 9 * 86_400_000).toISOString();
+    const start = new Date(Date.now() - 20 * 86_400_000).toISOString();
+    quotaDeps.readPlan = async () => ({ plan: 'free', billing: { start, end } });
+    let from: unknown;
+    quotaDeps.readCloudflare = async (_e, _p, _now, billing) => {
+      from = billing;
+      return { ...zero, r2_class_a: 1_500_000, parts: { r2_class_a: [{ name: 'market-data', value: 1_499_000, mine: false }, { name: 'mailcellar', value: 1000, mine: true }] } };
+    };
+    const q = await accountQuota(env).overview();
+    expect(from).toEqual({ start, end });
+    expect(q.billing).toEqual({ start, end });
+    expect(q.meters.find((m) => m.metric === 'r2_class_a')!.resetsAt).toBe(end);
+    expect(Date.parse(q.meters.find((m) => m.metric === 'do_rows_written')!.resetsAt)).toBeLessThan(Date.parse(end));
+    expect(q.meters.find((m) => m.metric === 'r2_class_a')!.parts.map((p) => p.name)).toEqual(['market-data', 'mailcellar']);
+  });
+
+  it('AC-Q10 each meter splits by project: top five, Other, and MailCellar always shown, with its count since the read', async () => {
+    const usage = Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((x, i) => [x, 1000 - i * 100]));
+    const names = new Map([...Object.entries(usage), ['mailcellar', 10]]);
+    quotaDeps.readCloudflare = async () => ({ ...zero, workers_requests: 4910, parts: { workers_requests: topParts(names) } });
+    const quota = accountQuota(env);
+    await quota.overview();
+    await quota.add({ workers_requests: 5 });
+    const w = (await quota.overview()).meters.find((m) => m.metric === 'workers_requests')!;
+    expect(w.parts).toEqual([
+      { name: 'a', value: 1000, mine: false }, { name: 'b', value: 900, mine: false }, { name: 'c', value: 800, mine: false },
+      { name: 'd', value: 700, mine: false }, { name: 'e', value: 600, mine: false },
+      { name: 'mailcellar', value: 15, mine: true }, { name: 'Other', value: 900, mine: false },
+    ]);
+  });
+
+  it('AC-Q11 names for namespace and database IDs, kept through the Workflows API', async () => {
+    let known: Record<string, string> = {};
+    quotaDeps.readCloudflare = async (_e, _p, _n, _b, k) => ((known = k ?? {}), { ...zero });
+    const instance = await introspectWorkflowInstance(env.SYNC, 'names-1');
+    try {
+      await env.SYNC.create({ id: 'names-1', params: { user: 'names', account: 'names', names: { ec5dad1c: 'mailcellar MailboxDO' } } });
+      await instance.waitForStatus('complete');
+    } finally {
+      await instance.dispose();
+    }
+    await accountQuota(env).overview();
+    expect(known).toEqual({ ec5dad1c: 'mailcellar MailboxDO' });
   });
 });

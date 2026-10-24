@@ -20,6 +20,35 @@ export const RUN_CALLS = 45;
 export const BATCH_BYTES = 8 * 1024 * 1024;
 /** Messages up to this size are gzipped; larger ones are mostly already-compressed attachments. */
 export const GZIP_MAX = 256 * 1024;
+/**
+ * CPU a run may spend copying, in ms. Workers Free stopped a run at about 2 s of CPU on
+ * 2026-10-24 (the spike's 1.9 s had passed), so a run stays at a quarter of that and the
+ * next run copies the rest. Workers can't read their own CPU time, so it is estimated.
+ */
+export const RUN_CPU_MS = 500;
+/**
+ * Estimated CPU to copy one message: twice what a local benchmark measured on 2026-10-24
+ * (20 KB 3 ms, 100 KB 5 ms, 6.8 MB 9 ms), since the first estimate ran about 5x low in
+ * production. A fixed 5 ms, the body read up to 256 KB (0.05 ms a KB) and the raw bytes
+ * decoded and stored (0.001 ms a KB).
+ */
+export function messageCpuMs(size: number): number {
+  const kb = size / 1024;
+  return 5 + Math.min(kb, 256) * 0.05 + kb * 0.001;
+}
+/**
+ * Whether the run that owns a sync has died: its Workflow errored (Cloudflare stopped it, say
+ * for CPU), was terminated, or ended without handing over. Then nothing will save the sync
+ * again, so it is started afresh instead of waiting SYNC_STALE_MS. Copied mail is skipped.
+ */
+export async function runDied(env: Env, runId: string): Promise<boolean> {
+  if (!runId) return false;
+  const status = await syncDeps.runStatus(env, runId);
+  return status === 'errored' || status === 'terminated' || status === 'complete';
+}
+
+/** Staged Basin batches one run commits when Basin is behind; that run copies nothing new. */
+export const BASIN_COMMIT_KEYS = 2;
 /** What a full run may use, asked of the account's meters before it starts: about 6 DO rows a message (spike S4). */
 export const RUN_COST: QuotaUse = { do_rows_written: RUN_SIZE * 6 + 50, do_rows_read: RUN_SIZE * 4, r2_class_a: RUN_SIZE + 30, r2_class_b: 50 };
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -129,23 +158,30 @@ const retryable = (e: unknown) => (e instanceof GmailError && (e.status === 429 
 export interface RunOptions {
   calls: number;
   batchBytes: number;
+  /** CPU budget, in estimated ms; RUN_CPU_MS unless a test sets another. */
+  cpuMs?: number;
   /** Where Basin rows go; the R2 Data Catalog unless a test supplies another. */
   basin?: (env: Env, user: UserId) => Promise<BasinTarget | null>;
 }
 
-/** Where Basin rows go, and how a sync starts. Tests swap in a local table and a stand-in start. */
+/** Where Basin rows go, how a sync starts, and how a run's Workflow stands. Tests swap in stand-ins. */
 export const syncDeps: {
+  runStatus: (env: Env, runId: string) => Promise<string | null>;
   basin: (env: Env, user: UserId) => Promise<BasinTarget | null>;
   start: (env: Env, user: UserId, account: string) => Promise<string>;
   census: (env: Env, user: UserId, account: string, mode: CensusState['mode']) => Promise<string>;
 } = {
+  runStatus: async (env, runId) => {
+    try {
+      return (await (await env.SYNC.get(runId)).status()).status;
+    } catch {
+      return null;
+    }
+  },
   basin: catalogTarget,
   start: (env, user, account) => startSync(env, user, account),
   census: (env, user, account, mode) => startCensus(env, user, account, mode),
 };
-
-/** Staged Basin batches allowed to wait; past this, copying stops until Basin takes them. */
-export const BASIN_QUEUE_MAX = 20;
 
 export async function runBatch(
   env: Env,
@@ -229,8 +265,8 @@ export async function runBatch(
         calls += added.calls;
       }
     }
-    // Basin is behind: commit what's staged before copying more.
-    const take = state.basinQueue.length >= BASIN_QUEUE_MAX ? [] : state.pending.slice(0, RUN_SIZE);
+    // Basin is behind: this run only commits what's staged, so its CPU stays in budget.
+    const take = state.basinQueue.length ? [] : state.pending.slice(0, RUN_SIZE);
     rest = state.pending.slice(take.length);
     // Sizes first (format=minimal), so raw batches can be packed to fit in memory.
     const sized = [];
@@ -242,7 +278,13 @@ export async function runBatch(
       sized.push(...messages);
       rest.push(...retry);
     }
-    const batches = packBySize(sized, limits.batchBytes);
+    // Keep the run's CPU in budget: what doesn't fit goes to the next run.
+    const budget = limits.cpuMs ?? RUN_CPU_MS;
+    let cpu = 0;
+    let fit = 0;
+    while (fit < sized.length && (fit === 0 || cpu + messageCpuMs(sized[fit].sizeEstimate) <= budget)) cpu += messageCpuMs(sized[fit++].sizeEstimate);
+    rest = [...sized.slice(fit).map((m) => m.id), ...rest];
+    const batches = packBySize(sized.slice(0, fit), limits.batchBytes);
     for (const [b, ids] of batches.entries()) {
       if (calls >= limits.calls - COMMIT_CALLS) {
         rest = [...batches.slice(b).flat(), ...rest];
@@ -302,16 +344,17 @@ export async function runBatch(
         state.basinReady = true;
       }
       const queued: BasinRow[] = [];
-      for (const key of state.basinQueue) {
+      const commit = state.basinQueue.slice(0, BASIN_COMMIT_KEYS);
+      for (const key of commit) {
         r2b++;
         const obj = await env.ARCHIVE.get(key);
         if (obj) queued.push(...(await gunzipJson<BasinRow[]>(obj.body)));
       }
       await target.append(queued);
       // A Basin commit writes data and metadata files through the catalog: about 10 R2 writes.
-      r2a += 10 + state.basinQueue.length;
-      await env.ARCHIVE.delete(state.basinQueue);
-      state.basinQueue = [];
+      r2a += 10 + commit.length;
+      await env.ARCHIVE.delete(commit);
+      state.basinQueue = state.basinQueue.slice(commit.length);
     } catch (e) {
       // The rows stay staged; the next run commits them.
       basinError = `Basin didn't take this batch (${String(e).slice(0, 120)}). Retrying with the next batch.`;
@@ -428,8 +471,10 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
 }
 
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
-  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult | Awaited<ReturnType<typeof basinCheck>> | Awaited<ReturnType<typeof runCensus>>> {
+  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult | number | Awaited<ReturnType<typeof basinCheck>> | Awaited<ReturnType<typeof runCensus>>> {
     if (event.payload.check) return step.do('basin check', { retries: { limit: 0, delay: '1 second' } }, () => basinCheck(this.env));
+    const { names } = event.payload;
+    if (names) return step.do('names', () => accountQuota(this.env).setNames(names));
     const user = asUserId(event.payload.user);
     const { account } = event.payload;
     const runId = event.instanceId;

@@ -2,7 +2,7 @@ import { asUserId, mailboxName, r2Keys, type SyncState } from '@mailcellar/schem
 import { introspectWorkflowInstance } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { accountMailbox, BATCH_BYTES, nextReset, RUN_CALLS, RUN_SIZE, runBatch as run, runCensus, syncDeps } from '../src/sync';
+import { accountMailbox, BATCH_BYTES, messageCpuMs, nextReset, RUN_CALLS, RUN_SIZE, runBatch as run, runCensus, syncDeps } from '../src/sync';
 import { fileTarget } from './fixtures/basin';
 import { fakeGmail, fakeMessages, fakeRaw } from './fixtures/gmail';
 
@@ -70,9 +70,10 @@ describe('sync', () => {
   it('copies RUN_SIZE messages a run, then asks for another run', async () => {
     fakeGmail(fakeMessages(RUN_SIZE + 20));
     const { user, account, mailbox } = await setup('run-1', { pageToken: '', historyId: '100', total: RUN_SIZE + 20 }, []);
-    expect(await runBatch(env, user, account, 'run-1')).toMatchObject({ copied: RUN_SIZE, phase: 'backfill', more: true });
+    const roomy = { calls: RUN_CALLS, batchBytes: BATCH_BYTES, cpuMs: 1e9 };
+    expect(await runBatch(env, user, account, 'run-1', roomy)).toMatchObject({ copied: RUN_SIZE, phase: 'backfill', more: true });
     expect((await mailbox.syncState())!.pageToken).toBe(String(RUN_SIZE));
-    expect(await runBatch(env, user, account, 'run-1')).toMatchObject({ copied: 20, phase: 'live', more: false });
+    expect(await runBatch(env, user, account, 'run-1', roomy)).toMatchObject({ copied: 20, phase: 'live', more: false });
   }, 30_000);
 
   it('picks up new mail once live', async () => {
@@ -107,6 +108,39 @@ describe('sync', () => {
     expect(await runBatch(env, user, account, 'run-1')).toMatchObject({ copied: 0, phase: 'live', more: false });
     expect(await table(user).read()).toHaveLength(2);
     expect(await env.ARCHIVE.get(s.basinQueue[0])).toBeNull();
+  });
+
+  it('AC-CPU1 stops a run at its CPU budget and leaves the rest for the next run', async () => {
+    const mail = fakeMessages(10);
+    for (const m of mail) m.raw = fakeRaw(1, { pad: 100 * 1024 });
+    fakeGmail(mail);
+    const { user, account, mailbox } = await setup();
+    // Room for 4 of these messages, as estimated.
+    const cpuMs = messageCpuMs(100 * 1024) * 4.5;
+    const r = await runBatch(env, user, account, 'run-1', { calls: RUN_CALLS, batchBytes: BATCH_BYTES, cpuMs });
+    expect(r).toMatchObject({ copied: 4, more: true });
+    expect((await mailbox.syncState())!.pending).toHaveLength(6);
+    expect(await table(user).read()).toHaveLength(4);
+    // A message bigger than the whole budget still goes, alone.
+    expect(await runBatch(env, user, account, 'run-1', { calls: RUN_CALLS, batchBytes: BATCH_BYTES, cpuMs: 1 })).toMatchObject({ copied: 1, more: true });
+  });
+
+  it('AC-CPU2 a run with Basin behind only commits, two staged batches at a time', async () => {
+    fakeGmail(fakeMessages(6));
+    const { user, account, mailbox } = await setup();
+    const failing = { calls: RUN_CALLS, batchBytes: BATCH_BYTES, basin: async () => ({ ensure: async () => { throw new Error('catalog down'); }, append: async () => {} }) };
+    // Three runs of 2 messages each, all staged while Basin is down.
+    for (let i = 0; i < 3; i++) {
+      const s = (await mailbox.syncState())!;
+      await mailbox.saveSync({ ...s, basinQueue: [] });
+      await runBatch(env, user, account, 'run-1', { ...failing, cpuMs: messageCpuMs(1000) * 1.5 });
+      const after = (await mailbox.syncState())!;
+      await mailbox.saveSync({ ...after, basinQueue: [...s.basinQueue, ...after.basinQueue] });
+    }
+    expect((await mailbox.syncState())!.basinQueue).toHaveLength(3);
+    expect(await runBatch(env, user, account, 'run-1')).toMatchObject({ copied: 0, more: true });
+    expect((await mailbox.syncState())!.basinQueue).toHaveLength(1);
+    expect(await table(user).read()).toHaveLength(2);
   });
 
   it('stops with a reason when Google no longer accepts the account', async () => {
