@@ -4,20 +4,20 @@
 // preset, then Start backfill; picked queued months can be taken back out.
 // Everything shown is what the sync state says now; nothing is estimated.
 import {
-  ErrorLine, IconButton, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow, usePrefs,
+  ErrorLine, IconButton, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow,
   type CoverageData, type CoverageFact, type CoveragePick, type FilterToken, type ScheduleRun,
 } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Progress } from '@columenlabs/lumen-ui/ui/progress';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
-import { addMonths, monthRange, type AccountCoverage, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
+import { addMonths, monthRange, type AccountCoverage, type MonthCoverage, type SyncOverview, type SyncSummary, type QuotaMeter, QUOTA_STOP } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { EmptyState } from './archive';
-import { AccountLimits, AccountLimitsTools } from './quota';
+import { AccountLimits, AccountLimitsTools, useQuota } from './quota';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 const size = (bytes: number) =>
@@ -78,10 +78,50 @@ function headline(s: SyncSummary): string | null {
   return 'Not running. Sync now or the next scheduled run continues it.';
 }
 
+/** A time to resume at: `5:00 PM PDT` today, `Oct 25, 5:00 PM PDT` another day. */
+function resumeTime(iso: string): string {
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}, ${t}`;
+}
+
+/**
+ * The one backfill state every card shows: paused by the person, paused by the spend cap, paused
+ * for a daily free limit until it resets, or running. The Rate tile, the Sync card and Backfills
+ * all read it, so they never disagree.
+ */
+export interface BackfillState {
+  kind: 'person' | 'budget' | 'limit' | 'other';
+  /** Short, for a badge or tile: "Paused by you". Null: not paused. */
+  label: string | null;
+  /** One line on why and when it resumes. */
+  detail: string | null;
+}
+const compact = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : fmt(n));
+export function backfillState(
+  o: { paused: boolean; pausedBy: 'person' | 'budget' | null } | undefined,
+  s: SyncSummary | undefined,
+  meters: QuotaMeter[] = [],
+): BackfillState {
+  if (o?.paused && o.pausedBy === 'budget')
+    return { kind: 'budget', label: 'Paused: spend cap', detail: 'Stopped at the backfill spend cap. Resume to go on.' };
+  if (o?.paused) return { kind: 'person', label: 'Paused by you', detail: 'Nothing copies until you resume.' };
+  if (s?.phase === 'paused') {
+    // Say how close the meter is: the backfill stops short of the limit so the app keeps working.
+    const m = meters.find((x) => x.label === s.pausedFor);
+    const why = m
+      ? `${m.label}: ${compact(m.used)} of ${compact(m.limit)} today. Backfill stops at ${compact(m.limit * QUOTA_STOP)} so the app keeps working.`
+      : `Paused at the daily ${s.pausedFor ?? 'free'} limit.`;
+    return { kind: 'limit', label: 'Paused: daily limit', detail: `${why}${s.resumesAt ? ` Resumes ${resumeTime(s.resumesAt)}.` : ''}` };
+  }
+  return { kind: 'other', label: null, detail: null };
+}
+
 /** The badge: what the sync is doing now. */
 function badge(s: SyncSummary): { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' } {
   if (s.phase === null) return { label: 'Not started', variant: 'outline' };
   if (s.phase === 'live' && s.status !== 'running') return { label: 'Live', variant: 'secondary' };
+  if (s.phase === 'paused') return { label: 'Paused: daily limit', variant: 'secondary' };
   return STATUS[s.status];
 }
 
@@ -92,8 +132,10 @@ const duration = (min: number) =>
 const left = (m: MonthCoverage) => Math.max(0, (m.gmail ?? 0) - m.copied);
 
 /** The copy rate over the last 10 minutes, or why there is none. */
-function rateTile(s: SyncSummary): { value: string; caption: string } {
-  if (s.phase === 'paused') return { value: 'Paused', caption: s.pausedFor ? `for ${s.pausedFor}${s.resumesAt ? `, resumes ${when(s.resumesAt)}` : ''}` : s.resumesAt ? `resumes ${when(s.resumesAt)}` : 'waiting' };
+function rateTile(s: SyncSummary, state: BackfillState): { value: string; caption: string } {
+  if (state.kind === 'person') return { value: 'Paused', caption: 'by you' };
+  if (state.kind === 'budget') return { value: 'Paused', caption: 'spend cap' };
+  if (state.kind === 'limit') return { value: 'Paused', caption: s.resumesAt ? `until ${resumeTime(s.resumesAt)}` : 'daily limit' };
   if (s.status === 'stopped') return { value: 'Stopped', caption: 'see the error below' };
   if (s.ratePerMin === null) return { value: '—', caption: s.status === 'running' ? 'measuring' : 'not copying' };
   return { value: `${fmt(Math.round(s.ratePerMin))} / min`, caption: 'last 10 minutes' };
@@ -101,20 +143,20 @@ function rateTile(s: SyncSummary): { value: string; caption: string } {
 
 const pct = (s: SyncSummary) => (s.total ? Math.min(100, Math.round((s.copied / s.total) * 1000) / 10) : 0);
 
-function AccountSync({ id, sync: s, basin, paused }: { id: string; sync: SyncSummary; basin: boolean; paused: boolean }) {
+function AccountSync({ id, sync: s, basin, state }: { id: string; sync: SyncSummary; basin: boolean; state: BackfillState }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
   const { data: cov } = useQuery(useCoverage(id));
   const queued = cov?.months.filter(busyMonth) ?? [];
   const toCopy = queued.reduce((n, m) => n + left(m), 0);
-  const rate = rateTile(s);
+  const rate = rateTile(s, state);
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2 text-sm">
-          {paused ? <Badge variant="secondary">Paused</Badge> : <Badge variant={badge(s).variant}>{badge(s).label}</Badge>}
-          {paused ? <span className="text-muted-foreground">Nothing copies until you resume in Backfills.</span> : headline(s) && <span className="text-muted-foreground">{headline(s)}</span>}
+          {state.label ? <Badge variant="secondary">{state.label}</Badge> : <Badge variant={badge(s).variant}>{badge(s).label}</Badge>}
+          {state.detail ? <span className="text-muted-foreground">{state.detail}</span> : headline(s) && <span className="text-muted-foreground">{headline(s)}</span>}
         </div>
         <Button
           variant="outline"
@@ -151,8 +193,6 @@ function AccountSync({ id, sync: s, basin, paused }: { id: string; sync: SyncSum
             caption={!queued.length ? 'nothing queued' : `messages in ${fmt(queued.length)} month${queued.length > 1 ? 's' : ''}${s.ratePerMin ? ` · ${duration(toCopy / s.ratePerMin)} left` : ''}`}
           />
           <Tile className="lg:flex-1" label="Size" value={size(s.bytes)} caption="as Gmail counts it" />
-          <Tile className="lg:flex-1" label="Started" value={s.startedAt ? when(s.startedAt) : '—'} />
-          <Tile className="lg:flex-1" label="Last saved" value={s.updatedAt ? when(s.updatedAt) : '—'} />
         </TileRow>
       )}
       {s.error && <ErrorLine error={new Error(s.error)} />}
@@ -162,7 +202,19 @@ function AccountSync({ id, sync: s, basin, paused }: { id: string; sync: SyncSum
 }
 
 /** An account's coverage: polls every 15 seconds while the census counts or a month is copying. */
+/**
+ * Coverage polls every 15 s only while something copies, counts or indexes, and not while backfill
+ * is paused. Hidden tabs don't poll; the refresh buttons cover the rest.
+ */
+function useLive() {
+  const { data } = useSync();
+  return !!data && !data.paused && !data.accounts.every((a) => a.sync.phase === 'paused');
+}
+const active = (c: AccountCoverage, live: boolean) =>
+  c.census.status === 'counting' || (live && c.months.some((m) => busyMonth(m) || indexing(m)));
+
 function useCoverage(id: string) {
+  const live = useLive();
   return {
     queryKey: ['coverage', id],
     queryFn: async (): Promise<AccountCoverage> => {
@@ -172,7 +224,7 @@ function useCoverage(id: string) {
     },
     refetchInterval: (q: { state: { data?: AccountCoverage } }) => {
       const d = q.state.data;
-      return d && (d.census.status === 'counting' || d.months.some((m) => busyMonth(m) || indexing(m))) ? 15_000 : false;
+      return d && active(d, live) ? 15_000 : false;
     },
   };
 }
@@ -425,7 +477,8 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
     });
   const sync = useSync();
   const paused = !!sync.data?.paused;
-  const { timeZone } = usePrefs();
+  const quota = useQuota();
+  const state = backfillState(sync.data, sync.data?.accounts.find((a) => a.id === id)?.sync, quota.data?.meters);
   /** Pause or resume all backfill; nothing copies while paused. */
   const setPaused = (to: boolean) =>
     act('pause', async () => {
@@ -460,14 +513,9 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   if (gone.length) setStopped((s) => s.filter((x) => !gone.includes(x)));
   const next = months.filter((m) => m.state === 'queued' && !copying.includes(m.month));
   const failed = months.filter((m) => m.state === 'failed');
-  // Months finished today in the person's time zone, latest first.
-  const day = (iso: string) => new Date(iso).toLocaleDateString('en-CA', { timeZone });
-  const done = months
-    .filter((m) => m.state === 'done' && m.finishedAt && day(m.finishedAt) === day(new Date().toISOString()))
-    .sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!));
   const busy = [...now, ...next];
   const toCopy = busy.reduce((n, m) => n + left(m), 0);
-  if (!busy.length && !halting.length && !failed.length && !done.length)
+  if (!busy.length && !halting.length && !failed.length)
     return (
       <div className="flex flex-col gap-1 text-sm">
         {said && <span className="text-xs text-gain">{said}</span>}
@@ -485,15 +533,23 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
             {rate && toCopy ? ` · ${duration(toCopy / rate)} at ${fmt(Math.round(rate))} a minute` : ''}
           </span>
           <span className="text-xs text-muted-foreground">
-            {paused ? 'Paused: nothing copies until you resume' : `Copying ${fmt(now.length)} at once`} · {fmt(next.length)} waiting
+            {state.label ? <b className="font-medium text-foreground">{state.label}</b> : `Copying ${fmt(now.length)} at once`} · {fmt(next.length)} waiting
             {failed.length > 0 && <> · <span className="text-loss">{fmt(failed.length)} failed</span></>}
           </span>
+          {state.detail && <span className="text-xs text-muted-foreground">{state.detail}</span>}
           {said && <span className="text-xs text-gain">{said}</span>}
         </div>
         <span className="flex gap-2">
-          <Button variant={paused ? 'default' : 'outline'} size="sm" disabled={!sync.data || inFlight !== null} onClick={() => void setPaused(!paused)}>
-            {inFlight === 'pause' ? <Loader2Icon className="animate-spin" /> : paused ? <PlayIcon /> : <PauseIcon />} {paused ? 'Resume' : 'Pause'}
-          </Button>
+          {state.kind === 'limit' ? (
+            // Paused by the daily limit: it resumes by itself; a click can't lift the limit.
+            <Button variant="outline" size="sm" disabled title={state.detail ?? undefined}>
+              <PauseIcon /> {sync.data?.accounts.find((a) => a.id === id)?.sync.resumesAt ? `Resumes ${resumeTime(sync.data.accounts.find((a) => a.id === id)!.sync.resumesAt!)}` : 'Paused for limit'}
+            </Button>
+          ) : (
+            <Button variant={paused ? 'default' : 'outline'} size="sm" disabled={!sync.data || inFlight !== null} onClick={() => void setPaused(!paused)}>
+              {inFlight === 'pause' ? <Loader2Icon className="animate-spin" /> : paused ? <PlayIcon /> : <PauseIcon />} {paused ? 'Resume' : 'Pause'}
+            </Button>
+          )}
           {busy.length + failed.length > 0 && (
             <Button variant="outline" size="sm" disabled={inFlight !== null} onClick={() => void unqueue('clear')}>
               {inFlight === 'clear' ? <Loader2Icon className="animate-spin" /> : <ListXIcon />} Clear queue
@@ -531,15 +587,6 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
           )}
         </BackfillSection>
       )}
-      <BackfillSection title="Done today" count={done.length}>
-        {done.length ? (
-          done.map((m) => (
-            <BackfillRow key={m.month} m={m} note={new Date(m.finishedAt!).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone })} />
-          ))
-        ) : (
-          <li className="py-2 text-xs text-muted-foreground">No month finished yet today.</li>
-        )}
-      </BackfillSection>
       {problem && <ErrorLine error={new Error(problem)} />}
     </div>
   );
@@ -581,6 +628,7 @@ function freshness(s: SyncSummary, now = Date.now()): string {
  */
 function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string | null; onPick: (email: string) => void }) {
   const ids = accounts.map((a) => a.id);
+  const live = useLive();
   const source = {
     queryKey: ['coverage-all', ids],
     queryFn: async (): Promise<Record<string, AccountCoverage>> => {
@@ -594,7 +642,7 @@ function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview[
       return Object.fromEntries(all);
     },
     refetchInterval: (q: { state: { data?: Record<string, AccountCoverage> } }) =>
-      Object.values(q.state.data ?? {}).some((c) => c.census.status === 'counting' || c.months.some((m) => busyMonth(m) || indexing(m))) ? 15_000 : false,
+      Object.values(q.state.data ?? {}).some((c) => active(c, live)) ? 15_000 : false,
   };
   return (
     <div className="flex flex-col gap-2">
@@ -665,6 +713,7 @@ function followed(accounts: SyncOverview['accounts'], follows: FilterToken[]) {
 
 export function BackfillPage() {
   const query = useSync();
+  const quota = useQuota();
   const data = query.data;
   const [picked, setPicked] = useState<string | null>(null);
   const shown = data?.accounts.find((a) => a.email === picked) ?? data?.accounts[0];
@@ -724,7 +773,7 @@ export function BackfillPage() {
                 tools: <RefreshTool keys={[['sync'], ['coverage']]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} paused={data.paused} />;
+                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} state={backfillState(data, a.sync, quota.data?.meters)} />;
                 },
               },
               {
@@ -763,6 +812,8 @@ export function SyncStatus() {
   const copied = syncs.reduce((n, s) => n + s.copied, 0);
   const value = !data.basin
     ? 'Waiting for Basin'
+    : data.paused
+      ? (backfillState(data, undefined).label ?? 'Paused')
     : syncs.some((s) => s.status === 'stopped')
       ? 'Stopped'
       : syncs.every((s) => s.phase === 'live')
@@ -772,7 +823,7 @@ export function SyncStatus() {
           : syncs.every((s) => s.phase === null)
             ? 'Not started'
             : syncs.some((s) => s.phase === 'paused')
-              ? 'Paused (limit)'
+              ? 'Paused: daily limit'
               : 'Not running';
   const ok = !data.basin || syncs.some((s) => s.status === 'stopped') ? false : syncs.every((s) => s.phase === 'live') ? true : null;
   return (
