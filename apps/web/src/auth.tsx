@@ -79,7 +79,7 @@ export function AccountsSettings() {
           >
             <div className="flex flex-col gap-3">
               <p className="text-sm text-muted-foreground">
-                MailCellar reads this mailbox, and moves a message to Gmail’s Trash only once its copy here is safe.
+                MailCellar copies all mail from this account. Modify lets it remove mail from Gmail when you archive it.
               </p>
               <KeyTestLine
                 test={a.test}
