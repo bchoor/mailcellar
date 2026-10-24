@@ -109,6 +109,8 @@ export interface SyncParams {
    * user's accounts is waiting or being copied. The answer lists those months if there are any.
    */
   trial?: string;
+  /** With `trial`: take the test account's other waiting months out of the queue first. */
+  park?: boolean;
   /** Pause the user's backfill (as the person's pause). */
   pause?: boolean;
   /** Build the search index for this month from Basin, once the month has landed there. */

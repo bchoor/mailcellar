@@ -1106,7 +1106,7 @@ export class MailboxDO extends DurableObject<Env> {
    * Copy one month as a test of the copy engine: queue it (unless it is already) and resume
    * backfill, but only when no other month of any account is waiting or being copied.
    */
-  async trial(account: string, month: string): Promise<{ started: boolean; active: { account: string; months: string[] }[]; job?: number | null }> {
+  async trial(account: string, month: string, park = false): Promise<{ started: boolean; active: { account: string; months: string[] }[]; job?: number | null; parked?: string[] }> {
     const user = this.userId();
     if (!user || !this.hasAccount(account) || !/^\d{4}-\d{2}$/.test(month)) return { started: false, active: [] };
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
@@ -1116,9 +1116,17 @@ export class MailboxDO extends DurableObject<Env> {
       const months = (await accountMailbox(this.env, user, id).activeList()).filter((m) => id !== account || m !== month);
       if (months.length) active.push({ account: id, months });
     }
+    // `park`: months waiting on the test's own account are taken out of the queue (Retry on
+    // their job queues them again); another account's months still stop the test.
+    let parked: string[] = [];
+    if (park && active.length === 1 && active[0].account === account) {
+      parked = active[0].months;
+      await accountMailbox(this.env, user, account).unqueueMonths(parked);
+      active.length = 0;
+    }
     if (active.length) return { started: false, active };
     const job = await accountMailbox(this.env, user, account).queueMonths([month], `Speed test: ${month}`);
-    return { started: await this.setBackfillPaused(false), active, job };
+    return { started: await this.setBackfillPaused(false), active, job, parked };
   }
 
   /** An account's latest backfill jobs. Null: not this user's account. */

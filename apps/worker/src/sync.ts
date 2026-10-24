@@ -544,7 +544,7 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     const runId = event.instanceId;
     if (event.payload.trial) {
       const trial = event.payload.trial;
-      return step.do('trial', () => this.env.MAILBOX.getByName(mailboxName(user)).trial(account, trial));
+      return step.do('trial', () => this.env.MAILBOX.getByName(mailboxName(user)).trial(account, trial, !!event.payload.park));
     }
     if (event.payload.pause) return step.do('pause', () => this.env.MAILBOX.getByName(mailboxName(user)).setBackfillPaused(true).then(() => true));
     if (event.payload.commit) {
