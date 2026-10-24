@@ -3,8 +3,8 @@ name: Release
 # Versioning: docs/releases.md. Copied from EdgeDesk's release workflow; runs
 # scripts/release.sh on OpenShip's self-hosted runner.
 # - push to main: one patch once RELEASE_EVERY merges (repo variable, default 10)
-#   landed since the last tag, or on the first merge 7 days after it, only while the
-#   repo variable RELEASE_ON_MERGE is "true". Its notes are key takeaways Claude
+#   landed since the last tag, or on the first merge 7 days after it. On by default;
+#   set the repo variable RELEASE_ON_MERGE to "false" to pause it. Its notes are key takeaways Claude
 #   writes (secret ANTHROPIC_API_KEY).
 # - Run workflow: patch (now, whatever the count), minor or notes, dry run by default.
 # - Pull requests that change the release path: dry run only, in their own job
@@ -51,7 +51,7 @@ jobs:
         run: bash scripts/release.sh patch
 
   release:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && vars.RELEASE_ON_MERGE == 'true')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && vars.RELEASE_ON_MERGE != 'false')
     runs-on: [self-hosted, openship, linux, arm64]
     permissions:
       contents: write
