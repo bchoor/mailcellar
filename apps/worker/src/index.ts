@@ -1,4 +1,4 @@
-import { ARCHIVE_VIEWS, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
+import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, messageFilters, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
@@ -146,6 +146,21 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
   if (job && request.method === 'POST') {
     const r = await mailbox.jobAction(job[1], Number(job[2]), job[3] as 'cancel' | 'retry');
     return r ? Response.json(r, { headers: noStore }) : Response.json({ error: 'not_found' }, { status: 404 });
+  }
+  // One page of an account's messages under the Messages page's filters.
+  const paged = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages$/);
+  if (paged && request.method === 'GET') {
+    if (!(await mailbox.accountToken(paged[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    const filters = messageFilters(url.searchParams.get('f'));
+    if (!filters) return Response.json({ error: 'bad_filter' }, { status: 400, headers: noStore });
+    const size = Number(url.searchParams.get('size'));
+    const page = await accountMailbox(env, who.user, paged[1]).messagePage(
+      filters,
+      url.searchParams.get('cursor'),
+      (MESSAGE_PAGE_SIZES as readonly number[]).includes(size) ? size : 50,
+      url.searchParams.get('asc') === '1',
+    );
+    return Response.json(page, { headers: noStore });
   }
   // One Gmail account's pages: its archive (its own mailbox DO) and its Gmail settings (read live).
   const scoped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/(archive\/[a-z]+|filters|subscriptions)$/);

@@ -116,3 +116,51 @@ export const ARCHIVE_VIEWS: readonly ArchiveView[] = ['months', 'labels', 'domai
 
 /** At most this many rows a page: the rest is reached by search, not by scrolling. */
 export const ARCHIVE_LIMIT = 1000;
+
+/**
+ * One filter on the Messages page, applied by the server: a chip's values (any of them matches),
+ * or with `not` none of them. `from`, `domain` and `subject` match text within; `label` a label's
+ * name or id; `text` searches subject, sender and snippet. `size` (bytes) and `attachments` take
+ * an `op` (`gt`, `lt`, `eq`, or `between` with `a..b`). `range` values are `from..to` in epoch ms.
+ */
+export interface MessageFilter {
+  key: 'from' | 'domain' | 'subject' | 'label' | 'text' | 'size' | 'attachments' | 'range';
+  values: string[];
+  not?: boolean;
+  op?: 'gt' | 'lt' | 'eq' | 'between';
+}
+export const MESSAGE_PAGE_SIZES = [25, 50, 100] as const;
+/** One page of messages, newest first (or oldest first), and where the next starts. */
+export interface MessagePage {
+  rows: MessageRow[];
+  /** Pass back as `cursor` for the next page; null on the last. */
+  next: string | null;
+  /** Every message the filter matches, when known without scanning (no filter: the months' sum). */
+  total: number | null;
+  /** The page stopped at the scan budget before it filled: Next keeps searching. */
+  partial: boolean;
+  /** Months copied to Basin whose mail is not in this index yet (not shown here). */
+  unindexed: number;
+}
+
+const FILTER_KEYS: readonly MessageFilter['key'][] = ['from', 'domain', 'subject', 'label', 'text', 'size', 'attachments', 'range'];
+const FILTER_OPS: readonly NonNullable<MessageFilter['op']>[] = ['gt', 'lt', 'eq', 'between'];
+/** The `f` query parameter (JSON filters) checked; null when it is not a list of filters. */
+export function messageFilters(raw: string | null): MessageFilter[] | null {
+  if (!raw) return [];
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(v) || v.length > 12) return null;
+  const out: MessageFilter[] = [];
+  for (const f of v as Partial<MessageFilter>[]) {
+    if (!f || !FILTER_KEYS.includes(f.key!) || !Array.isArray(f.values) || !f.values.length || f.values.length > 20) return null;
+    if (!f.values.every((x) => typeof x === 'string' && x.length <= 200)) return null;
+    if (f.op !== undefined && !FILTER_OPS.includes(f.op)) return null;
+    out.push({ key: f.key!, values: f.values, ...(f.not ? { not: true } : {}), ...(f.op ? { op: f.op } : {}) });
+  }
+  return out;
+}

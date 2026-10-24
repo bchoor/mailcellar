@@ -1,11 +1,21 @@
 // The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
 // mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
-import { LumenLayout, LumenSavedWidget, Tile, TileRow, useLumenLoad, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
+import { type FilterToken, LumenLayout, LumenSavedWidget, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
-import { Input } from '@columenlabs/lumen-ui/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
-import { type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
-import type { ArchiveRows, ArchiveView, DomainRow, LabelRow, MessageRow, MonthRow, SenderRow } from '@mailcellar/schema';
+import { CONTAINS_KEY, type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
+import {
+  type ArchiveRows,
+  type ArchiveView,
+  type DomainRow,
+  type LabelRow,
+  MESSAGE_PAGE_SIZES,
+  type MessageFilter,
+  type MessagePage,
+  type MessageRow,
+  type MonthRow,
+  type SenderRow,
+} from '@mailcellar/schema';
 import { useQuery } from '@tanstack/react-query';
 import {
   AtSignIcon,
@@ -20,8 +30,9 @@ import {
   TagIcon,
   UserIcon,
 } from 'lucide-react';
-import { type ReactNode, useDeferredValue, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
+import { daySpan, localDay, type Period, periodOf, periodSpan, periods } from './period';
 
 // Sizes stay exact here and round only when shown, so a total matches the sum of its rows.
 const KB = 1024;
@@ -178,17 +189,19 @@ function Clip({ text, w }: { text: string; w: string }) {
   );
 }
 
-type MessageView = MessageRow & { labelNames: string[] };
+type MessageView = MessageRow & { labelNames: string[]; period: string; day: string };
 const MESSAGES: ViewDomain<MessageView> = {
   id: 'messages',
   rowKey: (r) => r.id,
   text: (r) => [r.subject, r.fromAddr, r.fromName],
   fields: [
-    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => day(r.ts), format: 'text', render: (r) => dayText(r.ts) },
+    // The day in the person's time zone, like Period.
+    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.day, format: 'text', render: (r) => dayText(Date.parse(`${r.day}T00:00:00Z`)) },
     { key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.fromAddr, format: 'text', filterable: true, groupable: true, render: (r) => <Clip text={r.fromAddr} w="14rem" /> },
     { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.fromAddr.split('@')[1] ?? '', format: 'text', filterable: true, groupable: true },
     { key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text', render: (r) => <Clip text={r.subject} w="22rem" /> },
-    { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.labelNames.join(', '), format: 'text', filterable: true, groupable: true, render: (r) => <Clip text={r.labelNames.join(', ')} w="12rem" /> },
+    { key: 'period', label: 'Period', icon: CalendarClockIcon, value: (r) => r.period, format: 'text', filterable: true, groupable: true },
+    { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.labelNames.join(', '), values: (r) => r.labelNames, format: 'text', filterable: true, groupable: true, render: (r) => <Clip text={r.labelNames.join(', ')} w="12rem" /> },
     { key: 'size_kb', label: 'Size (KB)', icon: HardDriveIcon, value: (r) => Math.max(1, r.size / KB), format: 'rounded', aggregate: 'sum', filterable: true },
     { key: 'attachments', label: 'Attachments', icon: PaperclipIcon, value: (r) => r.attachments, format: 'rounded', aggregate: 'sum', filterable: true },
   ],
@@ -269,28 +282,94 @@ export function OverviewPage() {
   );
 }
 
+/** The Messages page's chips as the server's filters; a chip it can't apply is left out. */
+function toFilters(tokens: FilterToken[], list: Period[], tz: string): MessageFilter[] {
+  const byKey = new Map<string, FilterToken[]>();
+  for (const t of tokens) byKey.set(t.key, [...(byKey.get(t.key) ?? []), t]);
+  const out: MessageFilter[] = [];
+  for (const [key, ts] of byKey) {
+    const not = !!ts[0].not;
+    const values = ts.map((t) => t.value);
+    const op = ts[0].op === 'gt' || ts[0].op === 'lt' || ts[0].op === 'between' ? ts[0].op : ts[0].op ? 'eq' : undefined;
+    if (key === CONTAINS_KEY) out.push({ key: 'text', values, not });
+    else if (key === 'from' || key === 'domain' || key === 'subject' || key === 'label') out.push({ key, values, not });
+    else if (key === 'period' || key === 'date') {
+      const spans = values
+        .map((v) => (key === 'period' ? periodSpan(list, v, tz) : daySpan(v, tz)))
+        .filter((x): x is Period => !!x)
+        .map((x) => `${x.from}..${x.to}`);
+      if (spans.length) out.push({ key: 'range', values: spans, not });
+    } else if ((key === 'size_kb' || key === 'attachments') && op) {
+      const scale = key === 'size_kb' ? KB : 1;
+      const v = ts[0].value.split('..').map((x) => String(Number(x) * scale)).join('..');
+      out.push({ key: key === 'size_kb' ? 'size' : 'attachments', values: [v], op });
+    }
+  }
+  return out;
+}
+
 export function MessagesPage() {
-  const [search, setSearch] = useState('');
-  const q = useDeferredValue(search.trim());
-  const messages = useArchive('messages', q);
+  const id = useMailbox().account?.id ?? null;
+  const { timeZone } = usePrefs();
   const labelNames = useLabelNames();
+  const [tokens, setTokens] = useState<FilterToken[]>([]);
+  const [size, setSize] = useState(50);
+  // Page n starts after cursors[n]; each page read adds the next one's.
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [page, setPage] = useState(0);
+  const list = useMemo(() => periods(Date.now(), timeZone), [timeZone]);
+  const filters = useMemo(() => toFilters(tokens, list, timeZone), [tokens, list, timeZone]);
+  const key = JSON.stringify(filters);
+  // A new filter or page size starts again from the newest.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resets when the filter or size changes.
+  useEffect(() => {
+    setCursors([null]);
+    setPage(0);
+  }, [key, size, id]);
+  const cursor = cursors[page] ?? null;
+  const messages = useQuery({
+    queryKey: ['messages', id, key, size, cursor],
+    queryFn: async (): Promise<MessagePage | null> => {
+      if (!id) return null;
+      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}) });
+      const res = await fetch(`/api/accounts/${id}/messages?${qs}`);
+      if (!res.ok) throw new Error(`Couldn't load messages (${res.status})`);
+      return res.json();
+    },
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === id && prevQuery?.queryKey[2] === key ? prev : undefined),
+  });
+  const data = messages.data;
+  useEffect(() => {
+    if (!data || messages.isPlaceholderData) return;
+    setCursors((c) => (c[page + 1] === data.next ? c : [...c.slice(0, page + 1), data.next]));
+  }, [data, messages.isPlaceholderData, page]);
   const load = useLumenLoad(messages);
   const [config, setConfig] = useState(() =>
     view('Messages', { columns: ['date', 'from', 'subject', 'label', 'size_kb', 'attachments'], sort: { key: 'date', desc: true } }),
   );
-  const rows = (messages.data ?? []).map((m) => ({ ...m, labelNames: labelNames(m.labels) }));
-  const loaded = !!messages.data && !messages.isPlaceholderData;
+  const rows = (data?.rows ?? []).map((m) => ({ ...m, labelNames: labelNames(m.labels), period: periodOf(list, m.ts), day: localDay(m.ts, timeZone) }));
+  const loaded = !!data && !messages.isPlaceholderData;
   const crumbs = useMailboxCrumbs('Messages');
-  if (loaded && !rows.length && !q) return <EmptyPage title="Messages" />;
+  if (loaded && !rows.length && !filters.length && page === 0) return <EmptyPage title="Messages" />;
   const noMatch = loaded && !rows.length && (
-    <EmptyState icon={SearchIcon} title={`No mail matches “${q}”`}>
-      Search looks at the subject, the sender and the first lines of each message.
+    <EmptyState icon={SearchIcon} title="No mail matches these filters">
+      {data?.partial ? 'None in the mail searched so far. Next page keeps searching.' : 'Text search looks at the subject, the sender and the first lines of each message.'}
     </EmptyState>
   );
+  const seen = page * size + rows.length;
+  const meta =
+    loaded &&
+    [
+      data.total !== null ? `${count(data.total)} messages` : `${count(seen)}${data.next ? '+' : ''} matching`,
+      data.partial ? 'searching on' : '',
+      data.unindexed ? `${count(data.unindexed)} copied month${data.unindexed === 1 ? '' : 's'} not searchable yet` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
   return (
     <LumenLayout
       crumbs={crumbs}
-      meta={loaded && rows.length ? <span className="text-xs text-muted-foreground">{q ? `${count(rows.length)} matching` : `Newest ${count(rows.length)} shown`}</span> : undefined}
+      meta={meta ? <span className="text-xs text-muted-foreground">{meta}</span> : undefined}
       domain={MESSAGES}
       config={config}
       rows={rows}
@@ -298,20 +377,16 @@ export function MessagesPage() {
       onConfigChange={setConfig}
       rowTitle={(r) => r.subject}
       state={noMatch || undefined}
-      // One search box: it searches the whole mailbox, where the view's filter would only see the rows shown.
-      hideFilter
-      viewTools={
-        <div className="relative w-full sm:w-72">
-          <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            className="h-8 pl-8"
-            placeholder="Search all mail"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            aria-label="Search all mail"
-          />
-        </div>
-      }
+      onTokens={setTokens}
+      paging={{
+        page,
+        size,
+        total: data?.total ?? null,
+        more: !!data?.next,
+        onPage: (p) => setPage(Math.max(0, Math.min(p, cursors.length - 1))),
+        onSize: setSize,
+        sizes: MESSAGE_PAGE_SIZES,
+      }}
     />
   );
 }

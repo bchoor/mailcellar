@@ -40,6 +40,9 @@ import {
   mailboxName,
   r2Keys,
   type SyncParams,
+  type MessageFilter,
+  type MessageRow,
+  type MessagePage,
 } from '@mailcellar/schema';
 import type { Env } from './env';
 import { accountMailbox, accessToken, BasinNotReady, launchLanes, runDied, syncDeps } from './sync';
@@ -1111,6 +1114,92 @@ export class MailboxDO extends DurableObject<Env> {
     throw new Error('unknown view');
   }
 
+  /**
+   * One page of messages under the Messages page's filters, keyset-paged on (ts, id) over the
+   * ts index. Free text narrows through FTS; every other filter is checked on rows read in ts
+   * order, at most SCAN_BUDGET rows a page, so a rare filter returns a partial page and a cursor
+   * that keeps searching instead of reading the whole mailbox.
+   */
+  async messagePage(filters: MessageFilter[], cursor: string | null, size: number, asc: boolean): Promise<MessagePage> {
+    const sql = this.ctx.storage.sql;
+    let read = 0;
+    const exec = <R extends Record<string, SqlStorageValue>>(query: string, ...args: (string | number)[]) => {
+      const c = sql.exec<R>(query, ...args);
+      const out = c.toArray();
+      read += c.rowsRead;
+      return out;
+    };
+    const text = filters.filter((f) => f.key === 'text' && !f.not).flatMap((f) => f.values).join(' ');
+    const match = ftsQuery(text);
+    const rest = filters.filter((f) => !(f.key === 'text' && !f.not));
+    // Label chips name labels as the page shows them (Inbox, Promotions, yours by name).
+    const labelIds = rest.some((f) => f.key === 'label')
+      ? exec<{ id: string; name: string; type: string }>(`SELECT id, name, type FROM labels`)
+      : [];
+    const keep = messageTest(rest, labelIds);
+    // Date chips bound the ts range read, so an old period is a seek, not a scan from today.
+    const spans = filters
+      .filter((f) => f.key === 'range' && !f.not)
+      .map((f) => f.values.map((v) => v.split('..').map(Number)))
+      .map((r) => [Math.min(...r.map((x) => x[0])), Math.max(...r.map((x) => x[1]))]);
+    const lo = spans.length ? Math.max(...spans.map((x) => x[0])) : null;
+    const hi = spans.length ? Math.min(...spans.map((x) => x[1])) : null;
+    const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
+      subject, snippet, size, attachments, labels, state`;
+    const [cmp, dir] = asc ? ['>', 'ASC'] : ['<', 'DESC'];
+    let at = cursor ? decodeCursor(cursor) : null;
+    const rows: MessageRow[] = [];
+    let scanned = 0;
+    let more = true;
+    let last: { ts: number; id: string } | null = null;
+    while (rows.length <= size && scanned < SCAN_BUDGET && more) {
+      const chunk = rest.length ? SCAN_CHUNK : size + 1 - rows.length;
+      const where = [
+        at ? `(ts, id) ${cmp} (?, ?)` : '1',
+        lo !== null && Number.isFinite(lo) ? 'ts >= ?' : '1',
+        hi !== null && Number.isFinite(hi) ? 'ts < ?' : '1',
+        match ? `id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?)` : '1',
+      ];
+      const args: (string | number)[] = [
+        ...(at ? [at.ts, at.id] : []),
+        ...(lo !== null && Number.isFinite(lo) ? [lo] : []),
+        ...(hi !== null && Number.isFinite(hi) ? [hi] : []),
+        ...(match ? [match] : []),
+      ];
+      const got = exec<Record<string, SqlStorageValue>>(
+        `SELECT ${cols} FROM messages WHERE ${where.join(' AND ')} ORDER BY ts ${dir}, id ${dir} LIMIT ?`,
+        ...args,
+        chunk,
+      ) as unknown as (Omit<MessageRow, 'labels'> & { labels: string })[];
+      more = got.length === chunk;
+      scanned += got.length;
+      for (const g of got) {
+        last = { ts: g.ts, id: g.id };
+        const m = { ...g, labels: g.labels.split(' ').filter(Boolean) } as MessageRow;
+        if (!keep(m)) continue;
+        rows.push(m);
+        if (rows.length > size) break;
+      }
+      at = last;
+    }
+    const full = rows.length > size;
+    if (full) rows.length = size;
+    const end = full ? rows[rows.length - 1] : more ? last : null;
+    const total = filters.length
+      ? null
+      : (exec<{ n: number }>(`SELECT coalesce(sum(n), 0) AS n FROM months`)[0]?.n ?? 0);
+    const unindexed =
+      exec<{ n: number }>(`SELECT count(*) AS n FROM basin_months WHERE copied > 0 AND indexed_at IS NULL`)[0]?.n ?? 0;
+    this.count({ do_rows_read: read });
+    return {
+      rows,
+      next: end ? encodeCursor(end) : null,
+      total,
+      partial: !full && !!end,
+      unindexed,
+    };
+  }
+
   /** The schedules with the person's changes applied, when Gmail sync next runs, and how it last went. */
   async schedules(): Promise<Schedule[]> {
     return DEFAULT_SCHEDULES.map((s) => this.schedule(s.id)!);
@@ -1465,6 +1554,61 @@ export class MailboxDO extends DurableObject<Env> {
       )
       .toArray() as UsageDay[];
   }
+}
+
+/** Rows read at most for one Messages page, and how many a read takes. */
+const SCAN_BUDGET = 2000;
+const SCAN_CHUNK = 250;
+const encodeCursor = (k: { ts: number; id: string }) => `${k.ts}.${k.id}`;
+function decodeCursor(c: string): { ts: number; id: string } | null {
+  const m = /^(-?\d{1,15})\.([0-9a-f]{1,32})$/.exec(c);
+  return m ? { ts: Number(m[1]), id: m[2] } : null;
+}
+
+/** Gmail's built-in label ids as the pages name them: INBOX is Inbox, CATEGORY_SOCIAL is Social. */
+const shownLabel = (l: { name: string; type: string }) =>
+  l.type === 'system' ? l.name.replace(/^CATEGORY_/, '').toLowerCase() : l.name.toLowerCase();
+
+/** The Messages page's filters, other than free text, as one test on a message. */
+export function messageTest(filters: MessageFilter[], labels: { id: string; name: string; type: string }[]): (m: MessageRow) => boolean {
+  const byName = new Map(labels.map((l) => [shownLabel(l), l.id]));
+  const num = (op: MessageFilter['op'], value: string, n: number) => {
+    const [a, b] = value.split('..').map(Number);
+    if (op === 'between') return n >= a && n <= b;
+    if (op === 'gt') return n > a;
+    if (op === 'lt') return n < a;
+    return n === a;
+  };
+  const tests = filters.map((f) => {
+    const vs = f.values.map((v) => v.toLowerCase());
+    const has = (s: string) => vs.some((v) => s.toLowerCase().includes(v));
+    const one = (m: MessageRow): boolean => {
+      switch (f.key) {
+        case 'from':
+          return has(m.fromAddr) || has(m.fromName);
+        case 'domain':
+          return vs.includes((m.fromAddr.split('@')[1] ?? '').toLowerCase());
+        case 'subject':
+          return has(m.subject);
+        case 'text':
+          return has(m.subject) || has(m.fromAddr) || has(m.fromName) || has(m.snippet);
+        case 'label':
+          return vs.some((v) => m.labels.includes(byName.get(v) ?? v.toUpperCase()) || m.labels.includes(v));
+        case 'size':
+          return f.values.every((v) => num(f.op, v, m.size));
+        case 'attachments':
+          return f.values.every((v) => num(f.op, v, m.attachments));
+        case 'range':
+          return f.values.some((v) => {
+            const [a, b] = v.split('..').map(Number);
+            return m.ts >= a && m.ts < b;
+          });
+      }
+      return true;
+    };
+    return (m: MessageRow) => one(m) !== !!f.not;
+  });
+  return (m) => tests.every((t) => t(m));
 }
 
 /** A search box's words as an FTS5 query: each word quoted, so FTS syntax in it is literal. */
