@@ -2,6 +2,7 @@ import { mailboxName } from '@mailcellar/schema';
 import { env, exports } from 'cloudflare:workers';
 import { vi } from 'vitest';
 import { userIdFor } from '../src/auth';
+import { accountMailbox } from '../src/sync';
 import { seedSample } from './fixtures/sample';
 
 export const ORIGIN = 'https://mailcellar.icaruslab.dev';
@@ -39,11 +40,15 @@ export function mockFetch(rest: (url: string, init?: RequestInit) => Promise<Res
   });
 }
 
-/** A person signed in through Access, and if asked, the sample mailbox (test fixture only). */
-export async function signIn(email: string, opts: { sample?: boolean } = {}) {
+/** A person signed in through Access and, if asked, a connected Gmail account holding the sample mail (test fixture only). */
+export async function signIn(email: string, opts: { account?: boolean; sample?: boolean } = {}) {
   const user = await userIdFor(email);
   const mailbox = env.MAILBOX.getByName(mailboxName(user));
-  if (opts.sample) await seedSample(mailbox);
+  // A made-up account ID of the real shape; its refresh token is never sent anywhere real.
+  const accountId = `a${user.slice(1, 23).padEnd(22, 'x')}`;
+  if (opts.account || opts.sample)
+    await mailbox.connectAccount({ id: accountId, email: `gmail-${email}`, refreshToken: 'test-refresh', scopes: ['https://www.googleapis.com/auth/gmail.modify'] });
+  if (opts.sample) await seedSample(accountMailbox(env, user, accountId));
   const token = await accessToken({ email });
   const api = (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
@@ -51,5 +56,5 @@ export async function signIn(email: string, opts: { sample?: boolean } = {}) {
     if (init.method && init.method !== 'GET') headers.set('origin', ORIGIN);
     return exports.default.fetch(`${ORIGIN}${path}`, { redirect: 'manual', ...init, headers });
   };
-  return { user, email, mailbox, token, api };
+  return { user, email, mailbox, token, api, accountId, archive: `/api/accounts/${accountId}/archive` };
 }

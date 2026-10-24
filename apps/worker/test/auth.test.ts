@@ -38,7 +38,6 @@ describe('identity (Cloudflare Access)', () => {
     const { api, email } = await signIn('ada@example.com');
     const me = (await (await api('/api/me')).json()) as Me;
     expect(me).toEqual({ user: { email }, accounts: [] });
-    expect(await (await api('/api/archive/messages')).json()).toEqual([]);
   });
 
   it('answers 401 without a valid Access token', async () => {

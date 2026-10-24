@@ -21,9 +21,9 @@ describe('api', () => {
 
 describe('no made-up data', () => {
   it('serves a new user an empty archive until real mail arrives', async () => {
-    const { api } = await signIn('newcomer@example.com');
+    const { api, archive } = await signIn('newcomer@example.com', { account: true });
     for (const view of ['months', 'labels', 'domains', 'senders', 'messages']) {
-      const res = await api(`/api/archive/${view}`);
+      const res = await api(`${archive}/${view}`);
       expect(await res.json(), view).toEqual([]);
     }
   });

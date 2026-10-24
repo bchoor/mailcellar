@@ -6,3 +6,6 @@
 @source "./";
 
 :root[data-app="mailcellar"] { --primary: oklch(0.52 0.13 250); }
+
+/* A mailbox section is headed by its address: keep it as typed, not in capitals. */
+.mailbox-nav [data-sidebar="group-label"] { text-transform: none; letter-spacing: normal; }
