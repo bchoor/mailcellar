@@ -323,6 +323,81 @@ function Jobs({ id }: { id: string }) {
   );
 }
 
+/** How fresh a mailbox's copy is: when its sync last saved, in words. */
+function freshness(s: SyncSummary, now = Date.now()): string {
+  if (!s.updatedAt) return 'Never synced';
+  const min = Math.round((now - Date.parse(s.updatedAt)) / 60_000);
+  const ago = min < 1 ? 'just now' : min < 60 ? `${min} min ago` : min < 48 * 60 ? `${Math.round(min / 60)} h ago` : `${Math.round(min / 1440)} days ago`;
+  return `Synced ${ago}`;
+}
+
+/**
+ * Every mailbox on one map: one row each, one column per month (or quarter, or year), and how
+ * fresh each copy is. Picks queue a backfill in each mailbox picked.
+ */
+function AllMailboxesMap({ accounts, basin }: { accounts: SyncOverview['accounts']; basin: boolean }) {
+  const client = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const ids = accounts.map((a) => a.id);
+  const source = {
+    queryKey: ['coverage-all', ids],
+    queryFn: async (): Promise<Record<string, AccountCoverage>> => {
+      const all = await Promise.all(
+        ids.map(async (id) => {
+          const res = await fetch(`/api/accounts/${id}/coverage`);
+          if (!res.ok) throw new Error(`Couldn't load the coverage (${res.status})`);
+          return [id, (await res.json()) as AccountCoverage] as const;
+        }),
+      );
+      return Object.fromEntries(all);
+    },
+    refetchInterval: (q: { state: { data?: Record<string, AccountCoverage> } }) =>
+      Object.values(q.state.data ?? {}).some((c) => c.census.status === 'counting' || c.months.some(busyMonth)) ? 15_000 : false,
+  };
+  const { data } = useQuery(source);
+  return (
+    <div className="flex flex-col gap-2">
+      <LumenCoverageMap
+        source={{
+          ...source,
+          select: (all): CoverageData => {
+            const per = accounts.map((a) => (all[a.id] ? facts(a.id, a.email)(all[a.id]) : { facts: [], rows: [] }));
+            return {
+              facts: per.flatMap((p) => p.facts),
+              rows: accounts.map((a) => ({
+                row: a.id,
+                label: a.email,
+                sub: freshness(a.sync),
+                badge: <Badge variant={badge(a.sync).variant}>{badge(a.sync).label}</Badge>,
+              })),
+              current: Object.values(all)[0]?.current,
+            };
+          },
+        }}
+        title="All mailboxes by month"
+        icon={CalendarRangeIcon}
+        rows={{ title: 'Mailbox' }}
+        block="month"
+        zoom={['month', 'quarter', 'year']}
+        unit="messages"
+        summary={['complete']}
+        select={basin ? 'backfill' : undefined}
+        selectable={(row, month) => {
+          const m = data?.[row]?.months.find((x) => x.month === month);
+          return !!m && m.gmail !== null && m.gmail > 0 && !busyMonth(m);
+        }}
+        onQueue={async (pick: CoveragePick) => {
+          const errors = await Promise.all(pick.map((p) => queueBackfill(p.row, p.months, 'Picked months')));
+          setError(errors.find(Boolean) ?? null);
+          await client.invalidateQueries();
+        }}
+        hint="Each row is one mailbox: its months, how much is copied, and when it last synced."
+      />
+      {error && <ErrorLine error={new Error(error)} />}
+    </div>
+  );
+}
+
 export function BackfillPage() {
   const query = useSync();
   const data = query.data;
@@ -353,6 +428,12 @@ export function BackfillPage() {
                   Add one in Settings ▸ Accounts. Its backfill shows here.
                 </EmptyState>
               ),
+            }]
+          : []),
+        ...(data && data.accounts.length > 1
+          ? [{
+              id: 'all', title: 'All mailboxes by month', kind: 'own' as const, link: false as const, w: 6,
+              children: <AllMailboxesMap accounts={data.accounts} basin={data.basin} />,
             }]
           : []),
         ...(data?.accounts ?? []).flatMap((a) => [
