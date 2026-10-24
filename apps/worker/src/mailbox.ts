@@ -101,6 +101,10 @@ export const MIGRATIONS: readonly string[] = [
   `CREATE TABLE basin_months (
      month TEXT PRIMARY KEY, copied INTEGER NOT NULL, landed_at TEXT, indexed_at TEXT
    ) STRICT, WITHOUT ROWID;`,
+  // 7: the person paused backfill (2026-10-24). A user's mailbox that already has accounts starts
+  // paused; nothing copies until they resume it. A new mailbox starts unpaused.
+  `INSERT INTO meta (key, value) SELECT 'backfill_paused', 'true' WHERE EXISTS (SELECT 1 FROM accounts)
+   ON CONFLICT (key) DO NOTHING`,
 ];
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -173,6 +177,32 @@ export class MailboxDO extends DurableObject<Env> {
 
   async schemaVersion(): Promise<number> {
     return this.readVersion();
+  }
+
+  /** Whether the person paused backfill: then no sync or backfill month starts, and runs stop at their next batch. */
+  async backfillPaused(): Promise<boolean> {
+    return this.isPaused();
+  }
+
+  private isPaused(): boolean {
+    return this.ctx.storage.sql.exec(`SELECT 1 FROM meta WHERE key = 'backfill_paused'`).toArray().length > 0;
+  }
+
+  /** Pause or resume backfill. Resuming starts each account's sync again; lanes pick up where they stood. */
+  async setBackfillPaused(paused: boolean): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const { rowsWritten } = paused
+      ? sql.exec(`INSERT INTO meta (key, value) VALUES ('backfill_paused', 'true') ON CONFLICT (key) DO NOTHING`)
+      : sql.exec(`DELETE FROM meta WHERE key = 'backfill_paused'`);
+    if (rowsWritten) this.count({ do_rows_written: rowsWritten });
+    if (paused || !this.env.BASIN_TOKEN) return;
+    for (const { id } of sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray()) {
+      try {
+        await this.syncAccount(id, true);
+      } catch (e) {
+        console.error('resume sync', id, e);
+      }
+    }
   }
 
   /** This account's sync progress, or null before its first sync. */
@@ -747,7 +777,8 @@ export class MailboxDO extends DurableObject<Env> {
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
     if (ids.length && this.schedule('gmail-sync')!.on) {
       let run: ScheduleRun;
-      if (!this.env.BASIN_TOKEN) run = { at: new Date().toISOString(), ok: false, detail: 'Waiting for Basin write access' };
+      if (this.isPaused()) run = { at: new Date().toISOString(), ok: true, detail: 'Backfill paused' };
+      else if (!this.env.BASIN_TOKEN) run = { at: new Date().toISOString(), ok: false, detail: 'Waiting for Basin write access' };
       else {
         let started = 0;
         let failed = 0;
@@ -789,8 +820,10 @@ export class MailboxDO extends DurableObject<Env> {
     const accounts = this.ctx.storage.sql
       .exec<{ id: string; email: string }>(`SELECT id, email FROM accounts ORDER BY added_at`)
       .toArray();
+    const paused = this.isPaused();
     return {
       basin: !!this.env.BASIN_TOKEN,
+      paused,
       accounts: user
         ? await Promise.all(
             accounts.map(async (a) => {
@@ -799,8 +832,8 @@ export class MailboxDO extends DurableObject<Env> {
               // A run Cloudflare stopped never saves again: start it afresh, so the page never shows a dead run as running.
               // Lanes are checked on their own: a lane that stopped saving starts again where it stood.
               const ownWork = state && (state.phase !== 'live' || state.pending.length > 0 || state.basinQueue.length > 0);
-              if (state?.lanes?.length) await launchLanes(this.env, user, a.id);
-              if (state && ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) {
+              if (!paused && state?.lanes?.length) await launchLanes(this.env, user, a.id);
+              if (!paused && state && ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) {
                 try {
                   await syncDeps.start(this.env, user, a.id);
                   state = await mailbox.syncState();
@@ -819,9 +852,10 @@ export class MailboxDO extends DurableObject<Env> {
    * Start syncing an account unless a run is going or waiting to resume. Sync now (`manual`)
    * also restarts a sync that stopped on an error; the schedule leaves those for the person.
    */
-  async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
+  async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' | 'paused' }> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return { error: 'not_found' };
+    if (this.isPaused()) return { error: 'paused' };
     const state = await accountMailbox(this.env, user, account).syncState();
     const status = syncStatus(state);
     const dead = status === 'running' && (await runDied(this.env, state!.runId));
@@ -867,9 +901,10 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /** Queue months to copy for an account, and start its sync if none is going. */
-  async backfill(account: string, months: string[], label: string): Promise<{ job: number | null; status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
+  async backfill(account: string, months: string[], label: string): Promise<{ job: number | null; status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' | 'paused' }> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return { error: 'not_found' };
+    if (this.isPaused()) return { error: 'paused' };
     if (!this.env.BASIN_TOKEN) return { error: 'basin_not_ready' };
     const job = await accountMailbox(this.env, user, account).queueMonths(months, label);
     const r = await this.syncAccount(account, true);
@@ -891,7 +926,7 @@ export class MailboxDO extends DurableObject<Env> {
     if (!user || !this.hasAccount(account)) return null;
     const changed = await accountMailbox(this.env, user, account).changeJob(job, action);
     if (changed === null) return null;
-    if (action === 'retry' && changed && this.env.BASIN_TOKEN) await this.syncAccount(account, true);
+    if (action === 'retry' && changed && this.env.BASIN_TOKEN && !this.isPaused()) await this.syncAccount(account, true);
     return { changed };
   }
 

@@ -2,7 +2,7 @@ import { asUserId, mailboxName, MAX_LANES, r2Keys, type SyncParams, type SyncSta
 import { introspectWorkflowInstance } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { accountMailbox, BASIN_BEHIND, BATCH_BYTES, messageCpuMs, nextReset, RUN_CALLS, RUN_SIZE, runBatch as run, runCensus, runIndex, syncDeps, type RunOptions } from '../src/sync';
+import { accountMailbox, BASIN_BEHIND, launchLanes, BATCH_BYTES, messageCpuMs, nextReset, RUN_CALLS, RUN_SIZE, runBatch as run, runCensus, runIndex, syncDeps, type RunOptions } from '../src/sync';
 import { fileTarget } from './fixtures/basin';
 import { fakeGmail, fakeMessages, fakeRaw } from './fixtures/gmail';
 
@@ -53,6 +53,21 @@ async function rowsWritten(user: string, account: string) {
 describe('sync', () => {
   // Skip the one-second pause between Gmail batches.
   beforeEach(() => void vi.spyOn(scheduler, 'wait').mockResolvedValue(undefined));
+
+  it('AC-PAUSE1 a paused backfill starts no lane, and a lane already going stops where it stands', async () => {
+    fakeGmail(fakeMessages(3));
+    const { user, account, mailbox } = await setup();
+    expect(await runBatch(env, user, account, 'run-1')).toMatchObject({ phase: 'live' });
+    await env.MAILBOX.getByName(mailboxName(user)).setBackfillPaused(true);
+    const before = await mailbox.laneState('2024-01');
+    expect(await lane(user, account, '2024-01')).toEqual({ copied: 0, phase: 'backfill', more: false, resumesAt: null });
+    // The lane keeps where it stood, and nothing copied.
+    expect(await mailbox.laneState('2024-01')).toEqual(before);
+    expect((await mailbox.syncState())!.copied).toBe(0);
+    launched = [];
+    expect(await launchLanes(env, user, account)).toBe(0);
+    expect(launched).toEqual([]);
+  });
 
   it('AC-BF1 copies a month to R2 and Basin with no index rows, then builds its index from Basin once it lands', async () => {
     const mail = fakeMessages(3);

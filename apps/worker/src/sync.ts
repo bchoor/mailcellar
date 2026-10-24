@@ -206,6 +206,7 @@ export function indexedFromBasin(r: Pick<BasinRow, 'id' | 'thread_id' | 'ts' | '
  * died. Each lane copies one month to R2 and Basin, then takes the next queued month.
  */
 export async function launchLanes(env: Env, user: UserId, account: string, legacy?: SyncState): Promise<number> {
+  if (await env.MAILBOX.getByName(mailboxName(user)).backfillPaused()) return 0;
   const lanes = await accountMailbox(env, user, account).claimLanes(MAX_LANES, account, legacy);
   for (const l of lanes) await syncDeps.launch(env, { user, account, month: l.month }, l.runId);
   return lanes.length;
@@ -260,7 +261,10 @@ export async function runBatch(
     return { copied: 0, phase: 'backfill', more: false, resumesAt: null };
   }
 
-  const refreshToken = await env.MAILBOX.getByName(mailboxName(user)).accountToken(account);
+  const owner = env.MAILBOX.getByName(mailboxName(user));
+  // Paused by the person: stop without saving. A lane keeps where it stood; resuming picks it up.
+  if (await owner.backfillPaused()) return { copied: 0, phase: state.phase, more: false, resumesAt: null };
+  const refreshToken = await owner.accountToken(account);
   if (!refreshToken) return stop('This account was removed from MailCellar.');
 
   // The account's daily limits are shared by every user: pause before one, resume after it resets.

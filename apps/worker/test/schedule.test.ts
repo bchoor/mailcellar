@@ -69,7 +69,7 @@ describe('Sync now', () => {
   it("lists every account's sync, and whether Basin can be written", async () => {
     const { api, id } = await withAccount();
     const all = (await (await api('/api/sync')).json()) as SyncOverview;
-    expect(all).toEqual({ basin: false, accounts: [{ id, email: 'me@example.com', sync: expect.objectContaining({ status: 'idle', phase: null }) }] });
+    expect(all).toEqual({ basin: false, paused: false, accounts: [{ id, email: 'me@example.com', sync: expect.objectContaining({ status: 'idle', phase: null }) }] });
   });
 
   it("refuses to start until Basin can be written, and shows the account's sync", async () => {
@@ -192,6 +192,27 @@ describe('Backfill by month', () => {
     const retry = await api(`/api/accounts/${id}/jobs/${job}/retry`, { method: 'POST' });
     expect(await retry.json()).toEqual({ changed: 2 });
     expect((await api(`/api/accounts/${id}/jobs/999/cancel`, { method: 'POST' })).status).toBe(404);
+  });
+});
+
+describe('Pausing backfill', () => {
+  it('AC-PAUSE2 Sync now, Copy and the schedule start nothing while paused, and the sync API says so', async () => {
+    const { api, id, mailbox } = await withAccount();
+    let started = 0;
+    syncDeps.start = async () => (started++, 'r1');
+    const put = (body: unknown) => api('/api/backfill/paused', { method: 'PUT', body: JSON.stringify(body) });
+    expect((await put({ paused: 'yes' })).status).toBe(400);
+    expect(((await (await put({ paused: true })).json()) as SyncOverview).paused).toBe(true);
+    expect(((await (await api('/api/sync')).json()) as SyncOverview).paused).toBe(true);
+    const now = await api(`/api/accounts/${id}/sync`, { method: 'POST' });
+    expect([now.status, await now.json()]).toEqual([409, { error: 'paused' }]);
+    const copy = await api(`/api/accounts/${id}/backfill`, { method: 'POST', body: JSON.stringify({ months: ['2024-01'] }) });
+    expect([copy.status, await copy.json()]).toEqual([409, { error: 'paused' }]);
+    expect(await runDurableObjectAlarm(mailbox)).toBe(true);
+    const list = (await (await api('/api/schedules')).json()) as Schedule[];
+    expect(list[0].last).toMatchObject({ ok: true, detail: 'Backfill paused' });
+    expect(started).toBe(0);
+    expect(((await (await put({ paused: false })).json()) as SyncOverview).paused).toBe(false);
   });
 });
 
