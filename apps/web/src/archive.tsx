@@ -1,11 +1,11 @@
-// The archive pages. Each reads its own rows from the mailbox's rollups (/api/archive/*),
-// so no page loads every message: Senders reads senders, Time reads months, and so on.
+// The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
+// mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
 import { LumenLayout, LumenSavedWidget, Tile, TileRow, useLumenLoad, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Input } from '@columenlabs/lumen-ui/ui/input';
 import { type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
 import type { ArchiveRows, ArchiveView, DomainRow, LabelRow, MessageRow, MonthRow, SenderRow } from '@mailcellar/schema';
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   AtSignIcon,
   CalendarClockIcon,
@@ -20,6 +20,7 @@ import {
   UserIcon,
 } from 'lucide-react';
 import { type ReactNode, useDeferredValue, useState } from 'react';
+import { useMailbox, useMailboxCrumbs } from './mailbox';
 
 // Sizes stay exact here and round only when shown, so a total matches the sum of its rows.
 const KB = 1024;
@@ -61,27 +62,36 @@ export function EmptyState({ icon: Icon, title, children }: { icon: LucideIcon; 
   );
 }
 
-const NO_MAIL = (
-  <EmptyState icon={MailIcon} title="No mail yet">
-    Add a Gmail account in Settings ▸ Accounts. Mail shows here once the backfill copies it.
-  </EmptyState>
-);
+function NoMail() {
+  const { account } = useMailbox();
+  return (
+    <EmptyState icon={MailIcon} title="No mail yet">
+      {account
+        ? `Mail from ${account.email} shows here once the backfill copies it.`
+        : 'Add a Gmail account in Settings ▸ Accounts. Mail shows here once the backfill copies it.'}
+    </EmptyState>
+  );
+}
 /** The empty state once a rollup has loaded with no rows; nothing while it loads or fails. */
 const isEmpty = (query: { data?: unknown[] }) => !!query.data && !query.data.length;
 /** A page of an archive with nothing in it yet: the empty state alone, no charts or totals. */
 const EmptyPage = ({ title }: { title: string }) => (
-  <LumenLayout crumbs={[{ label: title }]} cards={[{ id: 'empty', title, kind: 'own', w: 6, link: false, children: NO_MAIL }]} />
+  <LumenLayout crumbs={useMailboxCrumbs(title)} cards={[{ id: 'empty', title, kind: 'own', w: 6, link: false, children: <NoMail /> }]} />
 );
 
 function useArchive<V extends ArchiveView>(view: V, q = '') {
+  const id = useMailbox().account?.id ?? null;
   return useQuery({
-    queryKey: ['archive', view, q],
+    queryKey: ['archive', id, view, q],
+    // No mailbox: nothing to read, so the page shows its empty state.
     queryFn: async (): Promise<ArchiveRows[V][]> => {
-      const res = await fetch(`/api/archive/${view}${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+      if (!id) return [];
+      const res = await fetch(`/api/accounts/${id}/archive/${view}${q ? `?q=${encodeURIComponent(q)}` : ''}`);
       if (!res.ok) throw new Error(`Couldn't load ${view} (${res.status})`);
       return res.json();
     },
-    placeholderData: keepPreviousData,
+    // While a new search loads, keep the last results; never another mailbox's.
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === id ? prev : undefined),
   });
 }
 
@@ -206,11 +216,12 @@ export function OverviewPage() {
   const years = new Set(rows.map((r) => r.month.slice(0, 4)));
   const first = rows.reduce((a, r) => (r.month < a ? r.month : a), rows[0]?.month ?? '');
   const userLabels = (labels.data ?? []).filter((l) => l.type === 'user');
+  const crumbs = useMailboxCrumbs('Overview');
   // An empty archive has no totals or charts worth drawing: say so once.
   if (isEmpty(months)) return <EmptyPage title="Overview" />;
   return (
     <LumenLayout
-      crumbs={[{ label: 'Overview' }]}
+      crumbs={crumbs}
       domain={MONTHS}
       config={config}
       rows={rows}
@@ -253,6 +264,7 @@ export function MessagesPage() {
   );
   const rows = (messages.data ?? []).map((m) => ({ ...m, labelNames: labelNames(m.labels) }));
   const loaded = !!messages.data && !messages.isPlaceholderData;
+  const crumbs = useMailboxCrumbs('Messages');
   if (loaded && !rows.length && !q) return <EmptyPage title="Messages" />;
   const noMatch = loaded && !rows.length && (
     <EmptyState icon={SearchIcon} title={`No mail matches “${q}”`}>
@@ -261,7 +273,7 @@ export function MessagesPage() {
   );
   return (
     <LumenLayout
-      crumbs={[{ label: 'Messages' }]}
+      crumbs={crumbs}
       meta={loaded && rows.length ? <span className="text-xs text-muted-foreground">{q ? `${count(rows.length)} matching` : `Newest ${count(rows.length)} shown`}</span> : undefined}
       domain={MESSAGES}
       config={config}
@@ -300,10 +312,11 @@ function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
   const query = useArchive(source);
   const load = useLumenLoad(query);
   const [config, setConfig] = useState(() => view(title, initial));
+  const crumbs = useMailboxCrumbs(title);
   if (isEmpty(query)) return <EmptyPage title={title} />;
   return (
     <LumenLayout
-      crumbs={[{ label: title }]}
+      crumbs={crumbs}
       domain={domain}
       config={config}
       rows={query.data ?? []}

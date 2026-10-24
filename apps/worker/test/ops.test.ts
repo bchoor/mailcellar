@@ -4,14 +4,15 @@ import { signIn } from './helpers';
 
 const owner = signIn('ops-owner@example.com', { sample: true });
 const api = async (path: string, init?: RequestInit) => (await owner).api(path, init);
+const archive = async (view: string) => api(`${(await owner).archive}/${view}`);
 const put = (id: string, body: unknown) =>
   api(`/api/schedules/${id}`, { method: 'PUT', body: typeof body === 'string' ? body : JSON.stringify(body) });
 
 describe('schedules', () => {
-  it('starts from the defaults, with sync waiting on a Gmail account', async () => {
+  it('starts from the defaults, with sync waiting on Basin', async () => {
     const list = (await (await api('/api/schedules')).json()) as Schedule[];
     expect(list.map((s) => s.id)).toEqual(['gmail-sync', 'compaction']);
-    expect(list[0].waiting).toMatch(/Gmail/);
+    expect(list[0].waiting).toMatch(/Basin/);
   });
 
   it('saves a change and keeps earlier ones', async () => {
@@ -46,8 +47,8 @@ describe('schedules', () => {
 });
 
 describe('usage', () => {
-  it("counts the mailbox's own rows written, read and messages indexed", async () => {
-    await api('/api/archive/senders'); // seeds the sample and reads a rollup
+  it("sums every mailbox's own rows written, read and messages indexed", async () => {
+    await archive('senders'); // seeds the sample and reads a rollup
     const usage = (await (await api('/api/usage')).json()) as UsageDay[];
     const today = new Date().toISOString().slice(0, 10);
     const v = (m: string) => usage.find((u) => u.day === today && u.metric === m)?.value ?? 0;
@@ -61,12 +62,12 @@ describe('usage', () => {
       const usage = (await (await api('/api/usage')).json()) as UsageDay[];
       return usage.filter((u) => u.metric === 'do_rows_written').reduce((a, u) => a + u.value, 0);
     };
-    await api('/api/archive/months');
+    await archive('months');
     const before = await written();
     await put('compaction', { from: '04:00' }); // 1 schedule row + 1 meter row
     expect((await written()) - before).toBe(2);
     const mid = await written();
-    await api('/api/archive/labels'); // 1 rows-read row + 1 rows-written row
+    await archive('labels'); // 1 rows-read row + 1 rows-written row
     expect((await written()) - mid).toBe(2);
   });
 });

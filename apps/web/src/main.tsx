@@ -16,23 +16,16 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  Navigate,
   useLocation,
 } from '@tanstack/react-router';
-import {
-  CalendarClockIcon,
-  GaugeIcon,
-  GlobeIcon,
-  HourglassIcon,
-  LayoutDashboardIcon,
-  SearchIcon,
-  TagIcon,
-  UserIcon,
-  UsersIcon,
-} from 'lucide-react';
-import { StrictMode, useEffect } from 'react';
+import { CalendarClockIcon, GaugeIcon, HourglassIcon, UserIcon } from 'lucide-react';
+import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
 import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
+import { FiltersPage, SubscriptionsPage } from './gmail-pages';
+import { MAILBOX_PAGES, MailboxNav, mailboxPath } from './mailbox';
 import { UsagePage } from './ops-pages';
 import { BackfillPage, SyncStatus, syncAllNow } from './sync';
 import './index.css';
@@ -72,19 +65,6 @@ function SchedulesSettings() {
   );
 }
 
-const nav = (
-  <NavGroup
-    label="Archive"
-    items={[
-      { title: 'Overview', to: '/', icon: LayoutDashboardIcon, exact: true },
-      { title: 'Messages', to: '/messages', icon: SearchIcon },
-      { title: 'Senders', to: '/senders', icon: UsersIcon },
-      { title: 'Domains', to: '/domains', icon: GlobeIcon },
-      { title: 'Labels', to: '/labels', icon: TagIcon },
-      { title: 'Time', to: '/time', icon: CalendarClockIcon },
-    ]}
-  />
-);
 const opsNav = (
   <NavGroup
     label="Operations"
@@ -112,7 +92,8 @@ function Frame() {
       app="mailcellar"
       appLabel="MailCellar"
       brand={<span className="px-2 font-semibold">MailCellar</span>}
-      nav={<>{nav}{opsNav}</>}
+      // One section per Gmail account, then the pages that cover all of them.
+      nav={<><MailboxNav />{opsNav}</>}
       user={me.data ? { email: me.data.user.email, name: null } : null}
       // Signing out is Cloudflare Access's: it ends the Access session for this site.
       signOutUrl="/cdn-cgi/access/logout"
@@ -135,14 +116,36 @@ function Frame() {
 declare const __SINGLE_FILE__: boolean;
 
 const root = createRootRoute({ component: Frame });
-const PAGES = { '/': OverviewPage, '/messages': MessagesPage, '/senders': SendersPage, '/domains': DomainsPage, '/labels': LabelsPage, '/time': TimePage };
-const routes = Object.entries(PAGES).map(([path, component]) => createRoute({ getParentRoute: () => root, path, component }));
+const PAGES: Record<(typeof MAILBOX_PAGES)[number], () => ReactNode> = {
+  '': OverviewPage,
+  messages: MessagesPage,
+  senders: SendersPage,
+  domains: DomainsPage,
+  labels: LabelsPage,
+  time: TimePage,
+  'gmail/filters': FiltersPage,
+  'gmail/subscriptions': SubscriptionsPage,
+};
+const mailboxRoutes = MAILBOX_PAGES.map((page) =>
+  createRoute({ getParentRoute: () => root, path: `/m/$mailbox${page ? `/${page}` : ''}`, component: PAGES[page] }),
+);
+
+// Outside a mailbox (home, or an old link like /messages): open that page in the first mailbox.
+// With none connected, Overview says how to add one.
+function FirstMailbox({ page }: { page: string }) {
+  const first = useMe().data?.accounts[0];
+  if (!first) return <OverviewPage />;
+  return <Navigate to={mailboxPath(first.id, page)} replace />;
+}
+const firstRoutes = MAILBOX_PAGES.map((page) =>
+  createRoute({ getParentRoute: () => root, path: `/${page}`, component: () => <FirstMailbox page={page} /> }),
+);
 const opsRoutes = [
   createRoute({ getParentRoute: () => root, path: '/backfill', component: BackfillPage }),
   createRoute({ getParentRoute: () => root, path: '/usage', component: UsagePage }),
 ];
 const router = createRouter({
-  routeTree: root.addChildren([...routes, ...opsRoutes]),
+  routeTree: root.addChildren([...mailboxRoutes, ...firstRoutes, ...opsRoutes]),
   // Real URLs, so refresh, Back and links work. The one-file prototype has no server to answer them.
   history: __SINGLE_FILE__ ? createMemoryHistory({ initialEntries: ['/'] }) : createBrowserHistory(),
 });
