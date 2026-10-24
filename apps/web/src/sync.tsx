@@ -202,19 +202,7 @@ function AccountSync({ id, sync: s, basin, state }: { id: string; sync: SyncSumm
 }
 
 /** An account's coverage: polls every 15 seconds while the census counts or a month is copying. */
-/**
- * Coverage polls every 15 s only while something copies, counts or indexes, and not while backfill
- * is paused. Hidden tabs don't poll; the refresh buttons cover the rest.
- */
-function useLive() {
-  const { data } = useSync();
-  return !!data && !data.paused && !data.accounts.every((a) => a.sync.phase === 'paused');
-}
-const active = (c: AccountCoverage, live: boolean) =>
-  c.census.status === 'counting' || (live && c.months.some((m) => busyMonth(m) || indexing(m)));
-
 function useCoverage(id: string) {
-  const live = useLive();
   return {
     queryKey: ['coverage', id],
     queryFn: async (): Promise<AccountCoverage> => {
@@ -224,7 +212,7 @@ function useCoverage(id: string) {
     },
     refetchInterval: (q: { state: { data?: AccountCoverage } }) => {
       const d = q.state.data;
-      return d && active(d, live) ? 15_000 : false;
+      return d && (d.census.status === 'counting' || d.months.some((m) => busyMonth(m) || indexing(m))) ? 15_000 : false;
     },
   };
 }
@@ -628,7 +616,6 @@ function freshness(s: SyncSummary, now = Date.now()): string {
  */
 function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string | null; onPick: (email: string) => void }) {
   const ids = accounts.map((a) => a.id);
-  const live = useLive();
   const source = {
     queryKey: ['coverage-all', ids],
     queryFn: async (): Promise<Record<string, AccountCoverage>> => {
@@ -642,7 +629,7 @@ function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview[
       return Object.fromEntries(all);
     },
     refetchInterval: (q: { state: { data?: Record<string, AccountCoverage> } }) =>
-      Object.values(q.state.data ?? {}).some((c) => active(c, live)) ? 15_000 : false,
+      Object.values(q.state.data ?? {}).some((c) => c.census.status === 'counting' || c.months.some((m) => busyMonth(m) || indexing(m))) ? 15_000 : false,
   };
   return (
     <div className="flex flex-col gap-2">
