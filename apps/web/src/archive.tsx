@@ -3,6 +3,7 @@
 import { LumenLayout, LumenSavedWidget, Tile, TileRow, useLumenLoad, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Input } from '@columenlabs/lumen-ui/ui/input';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
 import { type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
 import type { ArchiveRows, ArchiveView, DomainRow, LabelRow, MessageRow, MonthRow, SenderRow } from '@mailcellar/schema';
 import { useQuery } from '@tanstack/react-query';
@@ -162,6 +163,21 @@ const SENDERS: ViewDomain<SenderRow> = {
   ],
 } as ViewDomain<SenderRow>;
 
+/** Text cut to a column's width with an ellipsis; the whole of it shows on hover. */
+function Clip({ text, w }: { text: string; w: string }) {
+  if (!text) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="block truncate" style={{ maxWidth: w }}>
+          {text}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-md whitespace-normal break-all">{text}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 type MessageView = MessageRow & { labelNames: string[] };
 const MESSAGES: ViewDomain<MessageView> = {
   id: 'messages',
@@ -169,10 +185,10 @@ const MESSAGES: ViewDomain<MessageView> = {
   text: (r) => [r.subject, r.fromAddr, r.fromName],
   fields: [
     { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => day(r.ts), format: 'text', render: (r) => dayText(r.ts) },
-    { key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.fromAddr, format: 'text', filterable: true, groupable: true },
+    { key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.fromAddr, format: 'text', filterable: true, groupable: true, render: (r) => <Clip text={r.fromAddr} w="14rem" /> },
     { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.fromAddr.split('@')[1] ?? '', format: 'text', filterable: true, groupable: true },
-    { key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text' },
-    { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.labelNames.join(', '), format: 'text', filterable: true, groupable: true },
+    { key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text', render: (r) => <Clip text={r.subject} w="22rem" /> },
+    { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.labelNames.join(', '), format: 'text', filterable: true, groupable: true, render: (r) => <Clip text={r.labelNames.join(', ')} w="12rem" /> },
     { key: 'size_kb', label: 'Size (KB)', icon: HardDriveIcon, value: (r) => Math.max(1, r.size / KB), format: 'rounded', aggregate: 'sum', filterable: true },
     { key: 'attachments', label: 'Attachments', icon: PaperclipIcon, value: (r) => r.attachments, format: 'rounded', aggregate: 'sum', filterable: true },
   ],
