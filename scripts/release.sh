@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Cut MailCellar releases (docs/releases.md) through the GitHub REST API.
-# Adapted from EdgeDesk's scripts/release.sh, without its desk tags and in-app changelog.
+# Cut MailCellar releases (docs/releases.md) through the GitHub REST API, no Actions.
+# Copied from columenlabs/edgedesk scripts/release.sh; MailCellar has no desks.
 #   scripts/release.sh          one patch release at main once RELEASE_EVERY (10)
 #                               first-parent merges landed since the latest v0.* tag,
 #                               or on the first merge 7 days after it; FORCE=1 cuts
-#                               it now whatever the count
+#                               it now whatever the count. Behind by more than one batch
+#                               (a recut), it cuts one patch at each RELEASE_EVERY-th merge
 #   scripts/release.sh minor    tag main as the next minor; its notes are the
 #                               hand-written docs/releases/v0.X.0.md (required)
 #   scripts/release.sh notes    set the latest minor release's notes from its file again
 #   DRY_RUN=1 scripts/release.sh  print the releases it would cut, create nothing
-# .github/workflows/release.yml runs it on each merge to main. Needs gh with REST
-# access to the repo, and jq. A patch's notes are key takeaways Claude writes from the
-# batch's PRs (ANTHROPIC_API_KEY), then the list of those PRs; without a key they are
-# GitHub's generated PR list. With no v0.* tag yet, it first tags the first commit v0.0.0.
+# .github/workflows/release.yml runs it on each merge to main (OpenShip's self-hosted
+# runner). With no v0.* tag yet, it first tags the first commit v0.0.0.
+# Needs gh with REST access to the repo, and jq. A patch's notes are key
+# takeaways Claude writes from the batch's PRs (ANTHROPIC_API_KEY), then the list of
+# those PRs written by the script; without a key they are GitHub's PR list.
 set -euo pipefail
 BUMP=${1:-patch}
 DRY_RUN=${DRY_RUN:-0}
@@ -50,12 +52,42 @@ release() { # tag sha previous-tag [notes-file]
     notes=$(gh api -X POST "repos/$REPO/releases/generate-notes" \
       -f tag_name="$1" -f target_commitish="$2" -f previous_tag_name="$3" --jq .body)
   fi
-  gh api -X POST "repos/$REPO/releases" \
-    -f tag_name="$1" -f target_commitish="$2" -f name="$1" -f body="$notes" --silent
+  at=$(gh api -X POST "repos/$REPO/releases" \
+    -f tag_name="$1" -f target_commitish="$2" -f name="$1" -f body="$notes" --jq .published_at)
+  git tag -f "$1" "$2" > /dev/null
   echo "$1 $(git log -1 --format='%h %s' "$2")"
+  changelog "$1" "$at" "$notes" "$2"
 }
 
-takeaways() { # tag sha previous-tag: Key takeaways and changes by area, from the PRs
+# The app's What's new, as in EdgeDesk: each release's Key takeaways, newest first, in CHANGELOG
+# (read by scripts/changelog.mjs at build time, served at /api/releases; the newest one is the
+# version in the status bar). Committed to main through the contents API, so Workers Builds deploys
+# it; a GITHUB_TOKEN commit starts no workflow, and the patch count below skips these commits.
+# A failed write is reported, never fatal: the release stands.
+CHANGELOG=apps/web/changelog.json
+# Each bullet opens with its type tags, `[Feature] [Fix] **Headline**: ...`; they become the
+# takeaway's chips. Unknown tags are dropped.
+TAGS_JQ='map(capture("^(?<tags>(\\[[A-Za-z]+\\][ \t]*)*)(?<text>.*)$")
+  | [.tags | scan("\\[([A-Za-z]+)\\]")[0] | ascii_downcase] as $tags
+  | {text, types: [$tags[] | select(IN("feature", "improvement", "fix", "performance", "security"))] | unique})'
+changelog() { # tag published_at notes sha
+  bullets=$(printf '%s\n' "$3" | awk '
+    /^#{1,3}[ \t]/ { if (inside) exit; inside = tolower($0) ~ /key takeaways/; next }
+    inside && /^[ \t]*[-*][ \t]+/ { sub(/^[ \t]*[-*][ \t]+/, ""); print }' | jq -R . | jq -s "$TAGS_JQ")
+  for attempt in 1 2 3; do
+    file=$(gh api "repos/$REPO/contents/$CHANGELOG?ref=main") || break
+    sha=$(jq -r .sha <<< "$file")
+    next=$(jq -r .content <<< "$file" | base64 -d | jq --arg tag "$1" --arg at "$2" --arg sha "$4" --argjson t "$bullets" \
+      '[{tag: $tag, sha: $sha, published_at: $at, takeaways: $t}] + map(select(.tag != $tag))
+       | sort_by(.published_at) | reverse')
+    gh api -X PUT "repos/$REPO/contents/$CHANGELOG" -f message="changelog: $1" -f branch=main \
+      -f sha="$sha" -f content="$(printf '%s\n' "$next" | base64 -w0)" --silent && return
+    sleep $((attempt * 2))
+  done
+  echo "could not write $1 to $CHANGELOG" >&2
+}
+
+takeaways() { # tag sha previous-tag: Key takeaways and changes by desk, from the PRs
   prs=$(git log --first-parent --format=%s "$3..$2" | grep -oE '\(#[0-9]+\)$' | tr -dc '0-9\n')
   pulls=$(for n in $prs; do
     gh api "repos/$REPO/pulls/$n" --jq '{number, title, body, login: .user.login}' \
@@ -75,8 +107,9 @@ a few short bullets each in plain words, merging related PRs. No PR numbers, no 
 Output only the markdown."
   body=$(jq -n --arg model "$MODEL" --arg text "$prompt"$'\n\n'"$input" \
     '{model: $model, max_tokens: 16000, messages: [{role: "user", content: $text}]}')
-  # Only a whole reply is published: anything but end_turn (max_tokens, refusal, an error)
-  # is asked again, at most 3 times, then fails the release.
+  # The model thinks before it writes, so 4,000 tokens ran out on every release of 2026-10-22.
+  # Only a whole reply is published: v0.3.56 went out cut mid-sentence. Anything but end_turn
+  # (max_tokens, refusal, an error) is asked again, at most 3 times, then fails the release.
   for attempt in 1 2 3; do
     reply=$(curl -sS https://api.anthropic.com/v1/messages \
       -H "x-api-key: $ANTHROPIC_API_KEY" -H 'anthropic-version: 2023-06-01' \
@@ -100,7 +133,7 @@ if [ "$BUMP" = minor ]; then
   git show "origin/main:$FILE" > /dev/null 2>&1 \
     || { echo "$FILE is not on main: write the key takeaways first (docs/releases.md)" >&2; exit 1; }
   git show "origin/main:$FILE" > "${RUNNER_TEMP:-/tmp}/notes.md"
-  release "$TAG" "$(git rev-parse origin/main)" "$LATEST" "${RUNNER_TEMP:-/tmp}/notes.md"
+  release "$TAG" "$(git rev-parse origin/main)" "v0.$MINOR.0" "${RUNNER_TEMP:-/tmp}/notes.md"
   exit
 fi
 if [ "$BUMP" = notes ]; then
@@ -109,14 +142,26 @@ if [ "$BUMP" = notes ]; then
     || { echo "docs/releases/$TAG.md is not on main" >&2; exit 1; }
   if [ "$DRY_RUN" = 1 ]; then echo "would set $TAG notes from docs/releases/$TAG.md"; exit; fi
   id=$(gh api "repos/$REPO/releases/tags/$TAG" --jq .id)
-  gh api -X PATCH "repos/$REPO/releases/$id" -F body=@"${RUNNER_TEMP:-/tmp}/notes.md" --silent
+  at=$(gh api -X PATCH "repos/$REPO/releases/$id" -F body=@"${RUNNER_TEMP:-/tmp}/notes.md" --jq .published_at)
   echo "$TAG notes set from docs/releases/$TAG.md"
+  changelog "$TAG" "$at" "$(cat "${RUNNER_TEMP:-/tmp}/notes.md")" "$(git rev-list -n1 "$TAG")"
   exit
 fi
-COUNT=$(git rev-list --first-parent --count "$LATEST..origin/main")
+# The changelog commits release.sh itself writes are not merges.
+mapfile -t MERGES < <(git rev-list --first-parent --reverse --invert-grep --grep='^changelog: ' "$LATEST..origin/main")
+# Behind by a batch or more (a recut over main's history): one patch at each RELEASE_EVERY-th merge.
+LATEST_SHA=$(git rev-list -n1 "$LATEST")
+while [ "${#MERGES[@]}" -ge "$RELEASE_EVERY" ]; do
+  PATCH=$((PATCH + 1))
+  LATEST_SHA=${MERGES[$((RELEASE_EVERY - 1))]}
+  release "v0.$MINOR.$PATCH" "$LATEST_SHA" "$LATEST"
+  LATEST="v0.$MINOR.$PATCH"
+  MERGES=("${MERGES[@]:$RELEASE_EVERY}")
+done
+COUNT=${#MERGES[@]}
 if [ "$COUNT" = 0 ]; then echo "nothing merged since $LATEST"; exit; fi
-AGE_DAYS=$(( ($(date +%s) - $(git log -1 --format=%ct "$LATEST")) / 86400 ))
-if [ "$FORCE" != 1 ] && [ "$COUNT" -lt "$RELEASE_EVERY" ] && [ "$AGE_DAYS" -lt 7 ]; then
+AGE_DAYS=$(( ($(date +%s) - $(git log -1 --format=%ct "$LATEST_SHA")) / 86400 ))
+if [ "$FORCE" != 1 ] && [ "$AGE_DAYS" -lt 7 ]; then
   echo "$COUNT of $RELEASE_EVERY merges, $AGE_DAYS of 7 days since $LATEST: no release yet"
   exit
 fi
