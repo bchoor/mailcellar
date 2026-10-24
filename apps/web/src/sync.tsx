@@ -11,7 +11,7 @@ import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Progress } from '@columenlabs/lumen-ui/ui/progress';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
-import { addMonths, monthRange, type AccountCoverage, type MonthCoverage, type SyncOverview, type SyncSummary, type QuotaMeter, QUOTA_STOP } from '@mailcellar/schema';
+import { addMonths, monthRange, type AccountCoverage, type BackfillStatus, type MonthCoverage, type SyncOverview, type SyncSummary, type QuotaMeter, QUOTA_STOP } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
@@ -24,17 +24,31 @@ const size = (bytes: number) =>
   bytes < 1e6 ? `${fmt(Math.round(bytes / 1e3))} KB` : bytes < 1e9 ? `${(bytes / 1e6).toFixed(1)} MB` : `${(bytes / 1e9).toFixed(2)} GB`;
 const when = (iso: string) => new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
-/** Each account's sync. Polls every 15 seconds while one is copying. */
+/** The one query every backfill card and the status bar read; each picks its part with `select`. */
+export const BACKFILL_KEY = ['backfill'];
+
+/** Copying, indexing or counting somewhere: the only time the backfill is polled. */
+const busy = (s: BackfillStatus | undefined) =>
+  !!s && s.accounts.some((a) => a.copy.status === 'copying' || a.index.status === 'indexing' || a.census.status === 'counting' || (!s.paused && a.months.some(busyMonth)));
+
+/**
+ * Every mailbox's backfill (GET /api/backfill/status, read from one kept row a mailbox). Polls
+ * every 15 seconds while something copies, indexes or counts, and never while the tab is hidden.
+ */
+const backfillQuery = {
+  queryKey: BACKFILL_KEY,
+  queryFn: async (): Promise<BackfillStatus> => {
+    const res = await fetch('/api/backfill/status');
+    if (!res.ok) throw new Error(`Couldn't load the backfill (${res.status})`);
+    return res.json();
+  },
+  refetchInterval: (q: { state: { data?: BackfillStatus } }) => (busy(q.state.data) ? 15_000 : false),
+  refetchIntervalInBackground: false,
+} as const;
+
+/** Each account's sync, and the backfill's one state. */
 export function useSync() {
-  return useQuery({
-    queryKey: ['sync'],
-    queryFn: async (): Promise<SyncOverview> => {
-      const res = await fetch('/api/sync');
-      if (!res.ok) throw new Error(`Couldn't load the backfill (${res.status})`);
-      return res.json();
-    },
-    refetchInterval: (q) => (q.state.data?.accounts.some((a) => a.sync.status === 'running') ? 15_000 : false),
-  });
+  return useQuery(backfillQuery);
 }
 
 const monthName = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', year: 'numeric', timeZone: 'UTC' });
@@ -166,7 +180,7 @@ function AccountSync({ id, sync: s, basin, state }: { id: string; sync: SyncSumm
             setBusy(true);
             try {
               setResult(await syncNow(id));
-              await client.invalidateQueries({ queryKey: ['sync'] });
+              await client.invalidateQueries({ queryKey: BACKFILL_KEY });
             } finally {
               setBusy(false);
             }
@@ -201,20 +215,13 @@ function AccountSync({ id, sync: s, basin, state }: { id: string; sync: SyncSumm
   );
 }
 
-/** An account's coverage: polls every 15 seconds while the census counts or a month is copying. */
+/** One account's coverage, from the backfill query. */
+const coverageOf = (s: BackfillStatus, id: string): AccountCoverage =>
+  s.accounts.find((a) => a.id === id) ?? { months: [], census: { status: 'not_started', month: null, finishedAt: null, error: null }, current: '' };
+
+/** An account's coverage: the backfill query, narrowed to the account. */
 function useCoverage(id: string) {
-  return {
-    queryKey: ['coverage', id],
-    queryFn: async (): Promise<AccountCoverage> => {
-      const res = await fetch(`/api/accounts/${id}/coverage`);
-      if (!res.ok) throw new Error(`Couldn't load the coverage (${res.status})`);
-      return res.json();
-    },
-    refetchInterval: (q: { state: { data?: AccountCoverage } }) => {
-      const d = q.state.data;
-      return d && (d.census.status === 'counting' || d.months.some((m) => busyMonth(m) || indexing(m))) ? 15_000 : false;
-    },
-  };
+  return { ...backfillQuery, select: (s: BackfillStatus) => coverageOf(s, id) };
 }
 
 /** A month copied to Basin whose search index is still being built from it. */
@@ -314,7 +321,7 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
   const { data } = useQuery(source);
   const [error, setError] = useState<string | null>(null);
   const [preselect, setPreselect] = useState<CoveragePick>();
-  const refresh = () => Promise.all(['coverage', 'jobs', 'sync'].map((k) => client.invalidateQueries({ queryKey: k === 'sync' ? ['sync'] : [k, id] })));
+  const refresh = () => client.invalidateQueries({ queryKey: BACKFILL_KEY });
   const month = (key: string) => data?.months.find((x) => x.month === key);
   const queue = async (months: string[]) => {
     setError(await queueBackfill(id, months, 'Picked months'));
@@ -334,7 +341,7 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
   return (
     <div className="flex flex-col gap-2">
       <LumenCoverageMap
-        source={{ ...source, select: facts(id, email, copying) }}
+        source={{ ...backfillQuery, select: (s: BackfillStatus) => facts(id, email, copying)(coverageOf(s, id)) }}
         stateLabels={STATE_LABELS}
         title={`${email} by month`}
         icon={CalendarRangeIcon}
@@ -438,7 +445,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   const client = useQueryClient();
   const { data, error } = useQuery(useCoverage(id));
   const [problem, setProblem] = useState<string | null>(null);
-  const refresh = () => Promise.all(['coverage', 'jobs', 'sync'].map((k) => client.invalidateQueries({ queryKey: k === 'sync' ? ['sync'] : [k, id] })));
+  const refresh = () => client.invalidateQueries({ queryKey: BACKFILL_KEY });
   /** The action in flight ('clear', 'pause', or a month), and what the last one did. */
   const [inFlight, setInFlight] = useState<string | null>(null);
   const [said, setSaid] = useState<string | null>(null);
@@ -476,7 +483,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
         return null;
       }
       setProblem(null);
-      client.setQueryData(['sync'], await res.json());
+      await res.json();
       await refresh();
       return to ? 'Paused. Nothing new starts until you resume.' : 'Resumed. Queued months start copying.';
     });
@@ -615,28 +622,14 @@ function freshness(s: SyncSummary, now = Date.now()): string {
  * fresh each copy is. Picks queue a backfill in each mailbox picked.
  */
 function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string | null; onPick: (email: string) => void }) {
-  const ids = accounts.map((a) => a.id);
-  const source = {
-    queryKey: ['coverage-all', ids],
-    queryFn: async (): Promise<Record<string, AccountCoverage>> => {
-      const all = await Promise.all(
-        ids.map(async (id) => {
-          const res = await fetch(`/api/accounts/${id}/coverage`);
-          if (!res.ok) throw new Error(`Couldn't load the coverage (${res.status})`);
-          return [id, (await res.json()) as AccountCoverage] as const;
-        }),
-      );
-      return Object.fromEntries(all);
-    },
-    refetchInterval: (q: { state: { data?: Record<string, AccountCoverage> } }) =>
-      Object.values(q.state.data ?? {}).some((c) => c.census.status === 'counting' || c.months.some((m) => busyMonth(m) || indexing(m))) ? 15_000 : false,
-  };
+  const source = backfillQuery;
   return (
     <div className="flex flex-col gap-2">
       <LumenCoverageMap
         source={{
           ...source,
-          select: (all): CoverageData => {
+          select: (s: BackfillStatus): CoverageData => {
+            const all = Object.fromEntries(s.accounts.map((a) => [a.id, a as AccountCoverage]));
             const per = accounts.map((a) => (all[a.id] ? facts(a.id, a.email, a.sync.months)(all[a.id]) : { facts: [], rows: [] }));
             return {
               facts: per.flatMap((p) => p.facts),
@@ -742,7 +735,7 @@ export function BackfillPage() {
               {
                 id: 'mailboxes', title: 'Mailboxes', icon: MailIcon, kind: 'widget' as const, color: 'teal' as const, w: 6,
                 publishes: [{ key: 'mailbox', value: shown!.email }],
-                tools: <RefreshTool keys={[['sync']]} />,
+                tools: <RefreshTool keys={[BACKFILL_KEY]} />,
                 children: <MailboxList accounts={data.accounts} picked={shown!.email} onPick={setPicked} />,
               },
               ...(data.accounts.length > 1
@@ -757,7 +750,7 @@ export function BackfillPage() {
           ? [
               {
                 id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
-                tools: <RefreshTool keys={[['sync'], ['coverage']]} />,
+                tools: <RefreshTool keys={[BACKFILL_KEY]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
                   return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} state={backfillState(data, a.sync, quota.data?.meters)} />;
@@ -772,7 +765,7 @@ export function BackfillPage() {
               },
               {
                 id: 'jobs', title: 'Backfills', icon: ListChecksIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
-                tools: <RefreshTool keys={[['sync'], ['coverage']]} />,
+                tools: <RefreshTool keys={[BACKFILL_KEY]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
                   return <Backfills key={a.id} id={a.id} rate={a.sync.ratePerMin} copying={a.sync.months} />;

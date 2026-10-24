@@ -83,6 +83,8 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     await mailbox.setBackfillPaused(body.paused);
     return Response.json(await mailbox.syncAll(), { headers: noStore });
   }
+  // The one read the Backfill page and status bar poll: every mailbox, from its status row.
+  if (url.pathname === '/api/backfill/status' && request.method === 'GET') return Response.json(await mailbox.backfillStatus(), { headers: noStore });
   if (url.pathname === '/api/sync' && request.method === 'GET') return Response.json(await mailbox.syncAll(), { headers: noStore });
   const sync = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/sync$/);
   if (sync && request.method === 'GET') {
