@@ -100,7 +100,7 @@ function rateTile(s: SyncSummary): { value: string; caption: string } {
 
 const pct = (s: SyncSummary) => (s.total ? Math.min(100, Math.round((s.copied / s.total) * 1000) / 10) : 0);
 
-function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; basin: boolean }) {
+function AccountSync({ id, sync: s, basin, paused }: { id: string; sync: SyncSummary; basin: boolean; paused: boolean }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
@@ -113,6 +113,7 @@ function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; ba
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2 text-sm">
           <Badge variant={badge(s).variant}>{badge(s).label}</Badge>
+          {paused && <Badge variant="outline">Backfill paused</Badge>}
           {headline(s) && <span className="text-muted-foreground">{headline(s)}</span>}
         </div>
         <Button
@@ -505,7 +506,7 @@ export function BackfillPage() {
                 id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} />;
+                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} paused={data.backfillPaused} />;
                 },
               },
               {

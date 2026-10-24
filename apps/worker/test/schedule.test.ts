@@ -69,7 +69,7 @@ describe('Sync now', () => {
   it("lists every account's sync, and whether Basin can be written", async () => {
     const { api, id } = await withAccount();
     const all = (await (await api('/api/sync')).json()) as SyncOverview;
-    expect(all).toEqual({ basin: false, accounts: [{ id, email: 'me@example.com', sync: expect.objectContaining({ status: 'idle', phase: null }) }] });
+    expect(all).toEqual({ basin: false, backfillPaused: false, accounts: [{ id, email: 'me@example.com', sync: expect.objectContaining({ status: 'idle', phase: null }) }] });
   });
 
   it("refuses to start until Basin can be written, and shows the account's sync", async () => {

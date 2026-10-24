@@ -791,6 +791,7 @@ export class MailboxDO extends DurableObject<Env> {
       .toArray();
     return {
       basin: !!this.env.BASIN_TOKEN,
+      backfillPaused: this.env.BACKFILL_PAUSED === '1',
       accounts: user
         ? await Promise.all(
             accounts.map(async (a) => {

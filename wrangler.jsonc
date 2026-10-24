@@ -24,7 +24,9 @@
     "BASIN_WAREHOUSE": "87a4f50952b4b2ce00cab6c2680e63ae_mailcellar",
     "BASIN_BUCKET": "mailcellar",
     // The account whose analytics and plan the quota meter reads: secrets CF_ANALYTICS_TOKEN and CF_BILLING_TOKEN.
-    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae"
+    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae",
+    // Backfill held (Bikram, 2026-10-24): no backfill month starts copying while this is "1". New mail still syncs.
+    "BACKFILL_PAUSED": "1"
   },
   "durable_objects": {
     "bindings": [

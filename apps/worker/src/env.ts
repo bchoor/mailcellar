@@ -16,6 +16,8 @@ export interface Env {
   /** Copies one Gmail account, a batch a run (sync.ts). */
   SYNC: Workflow<SyncParams>;
   APP_VERSION: string;
+  /** "1": backfill held, no month starts copying (new mail still syncs). */
+  BACKFILL_PAUSED?: string;
   /** Cloudflare's analytics for the whole account (quota.ts): the account and a read-only Account Analytics token (a Worker secret). */
   CF_ACCOUNT_ID: string;
   /** A read-only Billing Read token (a Worker secret): the account's plan sets the limits and whether backfills pause (quota.ts). */

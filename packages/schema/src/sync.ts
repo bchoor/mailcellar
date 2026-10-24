@@ -162,6 +162,8 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
 /** GET /api/sync: each account's sync, and whether Basin (the system of record) can be written yet. */
 export interface SyncOverview {
   basin: boolean;
+  /** Backfill held: queued months wait, new mail still syncs. */
+  backfillPaused: boolean;
   accounts: { id: string; email: string; sync: SyncSummary }[];
 }
 

@@ -206,6 +206,8 @@ export function indexedFromBasin(r: Pick<BasinRow, 'id' | 'thread_id' | 'ts' | '
  * died. Each lane copies one month to R2 and Basin, then takes the next queued month.
  */
 export async function launchLanes(env: Env, user: UserId, account: string, legacy?: SyncState): Promise<number> {
+  // Backfill held: queued months wait, nothing starts copying.
+  if (env.BACKFILL_PAUSED === '1') return 0;
   const lanes = await accountMailbox(env, user, account).claimLanes(MAX_LANES, account, legacy);
   for (const l of lanes) await syncDeps.launch(env, { user, account, month: l.month }, l.runId);
   return lanes.length;

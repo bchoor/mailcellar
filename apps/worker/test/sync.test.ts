@@ -2,7 +2,7 @@ import { asUserId, mailboxName, MAX_LANES, r2Keys, type SyncParams, type SyncSta
 import { introspectWorkflowInstance } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { accountMailbox, BASIN_BEHIND, BATCH_BYTES, messageCpuMs, nextReset, RUN_CALLS, RUN_SIZE, runBatch as run, runCensus, runIndex, syncDeps, type RunOptions } from '../src/sync';
+import { accountMailbox, BASIN_BEHIND, launchLanes, BATCH_BYTES, messageCpuMs, nextReset, RUN_CALLS, RUN_SIZE, runBatch as run, runCensus, runIndex, syncDeps, type RunOptions } from '../src/sync';
 import { fileTarget } from './fixtures/basin';
 import { fakeGmail, fakeMessages, fakeRaw } from './fixtures/gmail';
 
@@ -165,6 +165,15 @@ describe('sync', () => {
     expect((await mailbox.laneState('2024-01'))!.pending).toEqual([mail[2].id]);
     expect(await lane(user, account, '2024-01')).toMatchObject({ copied: 1, more: false });
     expect(await table(user).read()).toHaveLength(3);
+  });
+
+  it('AC-BF5 a held backfill starts no month: queued months wait', async () => {
+    const { user, account, mailbox } = await setup();
+    const held = { ...env, BACKFILL_PAUSED: '1' };
+    launched.length = 0;
+    expect(await launchLanes(held, user, account)).toBe(0);
+    expect(launched).toEqual([]);
+    expect(await mailbox.hasQueued()).toBe(true);
   });
 
   it('keeps a batch staged when Basin fails, and commits it with the next run', async () => {

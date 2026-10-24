@@ -12,6 +12,8 @@ export default defineConfig({
           GOOGLE_CLIENT_SECRET: 'test-secret',
           ACCESS_TEAM_DOMAIN: 'https://test.cloudflareaccess.com',
           ACCESS_AUD: 'test-aud',
+          // Backfill runs in tests; AC-BF5 holds it on its own.
+          BACKFILL_PAUSED: '0',
         },
       },
     }),
