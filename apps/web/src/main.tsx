@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
+import { AccountsSettings, SignInPage, useMe } from './auth';
 import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
 import { BackfillPage, UsagePage } from './ops-pages';
 import './index.css';
@@ -66,12 +67,6 @@ function SchedulesSettings() {
   );
 }
 
-// Accounts connect with Google sign-in (next PR). Until then there are none, and the
-// app never shows made-up ones.
-function AccountsSettings() {
-  return <p className="text-sm text-muted-foreground">No Gmail account is connected yet. Google sign-in, which connects one, comes next.</p>;
-}
-
 const nav = (
   <NavGroup
     label="Archive"
@@ -104,12 +99,17 @@ function CloseMenuOnNavigate() {
 }
 
 function Frame() {
+  const me = useMe();
+  if (me.isPending) return null;
+  if (me.data === null) return <SignInPage />;
   return (
     <LumenShell
       app="mailcellar"
       appLabel="MailCellar"
       brand={<span className="px-2 font-semibold">MailCellar</span>}
       nav={<>{nav}{opsNav}</>}
+      user={me.data?.user ?? null}
+      signOutUrl="/api/auth/logout"
       settings={[
         { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts this archive keeps', content: <AccountsSettings /> },
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Work the archive runs on its own', content: <SchedulesSettings /> },

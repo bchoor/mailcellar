@@ -1,6 +1,10 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   ARCHIVE_LIMIT,
+  GMAIL_SCOPES,
+  SESSION_DAYS,
+  type ConnectedAccount,
+  type Me,
   domainOf,
   ftsRowid,
   monthOf,
@@ -53,6 +57,15 @@ export const MIGRATIONS: readonly string[] = [
    CREATE TABLE usage_days (
      day TEXT NOT NULL, metric TEXT NOT NULL, value INTEGER NOT NULL, PRIMARY KEY (day, metric)
    ) STRICT, WITHOUT ROWID;`,
+  // 4: sign-in. The person's connected Gmail accounts with their refresh tokens (never sent
+  // to the app), their sessions by token hash, and each message's state: live in Gmail and
+  // here, or archived (trashed in Gmail, kept here). A purged message has no row.
+  `CREATE TABLE accounts (
+     id TEXT PRIMARY KEY, email TEXT NOT NULL, refresh_token TEXT NOT NULL,
+     scopes TEXT NOT NULL, added_at TEXT NOT NULL, tested_at TEXT NOT NULL, test_error TEXT
+   ) STRICT, WITHOUT ROWID;
+   CREATE TABLE sessions (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL) STRICT, WITHOUT ROWID;
+   ALTER TABLE messages ADD COLUMN state TEXT NOT NULL DEFAULT 'live' CHECK (state IN ('live', 'archived'));`,
 ];
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -158,7 +171,8 @@ export class MailboxDO extends DurableObject<Env> {
       for (const m of batch) {
         const labelText = m.labels.join(' ');
         const insert = sql.exec(
-          `INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
+          `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
           m.id, m.threadId, m.ts, m.fromAddr, m.fromName, m.subject, m.snippet, m.size, m.attachments, labelText,
         );
         rowsWritten += insert.rowsWritten;
@@ -248,7 +262,7 @@ export class MailboxDO extends DurableObject<Env> {
         );
       case 'messages': {
         const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
-          subject, snippet, size, attachments, labels`;
+          subject, snippet, size, attachments, labels, state`;
         const match = ftsQuery(q);
         const found = match
           ? rows(
@@ -270,6 +284,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** The schedules with the person's changes applied. Nothing runs them until phase 2's sync. */
   async schedules(): Promise<Schedule[]> {
+    const hasAccount = this.ctx.storage.sql.exec(`SELECT 1 FROM accounts LIMIT 1`).toArray().length > 0;
     const saved = new Map(
       this.ctx.storage.sql
         .exec<{ id: string; change: string }>(`SELECT id, change FROM schedules`)
@@ -279,7 +294,7 @@ export class MailboxDO extends DurableObject<Env> {
     return DEFAULT_SCHEDULES.map((s) => ({
       ...s,
       ...saved.get(s.id),
-      waiting: s.id === 'gmail-sync' ? 'Waiting for a connected Gmail account' : null,
+      waiting: s.id !== 'gmail-sync' ? null : hasAccount ? 'Sync arrives with the backfill, in the next phase' : 'Waiting for a connected Gmail account',
     }));
   }
 
@@ -302,6 +317,115 @@ export class MailboxDO extends DurableObject<Env> {
     );
     this.count({ do_rows_written: rowsWritten });
     return { ok: true, schedule: (await this.schedules()).find((s) => s.id === id)! };
+  }
+
+  /**
+   * Connect a Gmail account, or refresh its token and profile if it is connected already.
+   * The person's name and email are kept from the account they signed in with.
+   */
+  async connectAccount(
+    account: { id: string; email: string; refreshToken: string | null; scopes: string[] },
+    owner?: { email: string; name: string | null },
+  ): Promise<{ ok: true } | { ok: false; error: 'no_refresh' }> {
+    const sql = this.ctx.storage.sql;
+    const known = sql.exec<{ refresh_token: string }>(`SELECT refresh_token FROM accounts WHERE id = ?`, account.id).toArray()[0];
+    const token = account.refreshToken ?? known?.refresh_token;
+    if (!token) return { ok: false, error: 'no_refresh' };
+    let written = 0;
+    this.ctx.storage.transactionSync(() => {
+      written += sql.exec(
+        `INSERT INTO accounts VALUES (?, ?, ?, ?, ?, ?, NULL) ON CONFLICT (id) DO UPDATE SET
+           email = excluded.email, refresh_token = excluded.refresh_token, scopes = excluded.scopes,
+           tested_at = excluded.tested_at, test_error = NULL`,
+        account.id, account.email, token, account.scopes.join(' '), new Date().toISOString(), new Date().toISOString(),
+      ).rowsWritten;
+      if (owner)
+        for (const [key, value] of [['owner_email', owner.email], ['owner_name', owner.name ?? '']])
+          written += sql.exec(
+            `INSERT INTO meta VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+            key, value,
+          ).rowsWritten;
+      this.count({ do_rows_written: written });
+    });
+    return { ok: true };
+  }
+
+  /** An account's refresh token, for the Worker to test or sync with. Never sent to the app. */
+  async accountToken(id: string): Promise<string | null> {
+    return this.ctx.storage.sql.exec<{ refresh_token: string }>(`SELECT refresh_token FROM accounts WHERE id = ?`, id).toArray()[0]?.refresh_token ?? null;
+  }
+
+  /** Record a connection test: the scopes Google reports for the token, or why it failed. */
+  async recordTest(id: string, result: { scopes: string[] } | { error: string }): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const at = new Date().toISOString();
+    const { rowsWritten } =
+      'error' in result
+        ? sql.exec(`UPDATE accounts SET tested_at = ?, test_error = ? WHERE id = ?`, at, result.error, id)
+        : sql.exec(`UPDATE accounts SET tested_at = ?, test_error = NULL, scopes = ? WHERE id = ?`, at, result.scopes.join(' '), id);
+    if (rowsWritten) this.count({ do_rows_written: rowsWritten });
+  }
+
+  /** Disconnect an account and hand back its refresh token, so the Worker can revoke it at Google. */
+  async disconnectAccount(id: string): Promise<string | null> {
+    const sql = this.ctx.storage.sql;
+    const row = sql.exec<{ refresh_token: string }>(`DELETE FROM accounts WHERE id = ? RETURNING refresh_token`, id).toArray()[0];
+    if (row) this.count({ do_rows_written: 1 });
+    return row?.refresh_token ?? null;
+  }
+
+  /** Who is signed in and which accounts the archive keeps. Never includes tokens. */
+  async me(): Promise<Me> {
+    const sql = this.ctx.storage.sql;
+    const meta = new Map(
+      sql.exec<{ key: string; value: string }>(`SELECT key, value FROM meta WHERE key IN ('owner_email', 'owner_name')`)
+        .toArray()
+        .map((r) => [r.key, r.value]),
+    );
+    const accounts = sql
+      .exec<{ id: string; email: string; scopes: string; added_at: string; tested_at: string; test_error: string | null }>(
+        `SELECT id, email, scopes, added_at, tested_at, test_error FROM accounts ORDER BY added_at`,
+      )
+      .toArray()
+      .map((a): ConnectedAccount => {
+        const scopes = a.scopes.split(' ');
+        const modify = scopes.includes(GMAIL_SCOPES.modify);
+        const read = modify || scopes.includes(GMAIL_SCOPES.readonly);
+        return {
+          id: a.id,
+          email: a.email,
+          addedAt: a.added_at,
+          read,
+          modify,
+          test: {
+            at: a.tested_at,
+            ok: !a.test_error && read && modify,
+            detail: a.test_error ? null : `Read ${read ? '✓' : '✗'} · Modify ${modify ? '✓' : '✗'}`,
+            error: a.test_error ?? (!modify ? 'No modify access: cleanup can’t move mail to Gmail’s Trash. Add the account again and allow it.' : null),
+          },
+        };
+      });
+    return { user: { email: meta.get('owner_email') ?? '', name: meta.get('owner_name') || null }, accounts };
+  }
+
+  /** Start a session for a token's SHA-256 (hex); the token itself never reaches storage. */
+  async startSession(hash: string): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      const gone = sql.exec(`DELETE FROM sessions WHERE expires < ?`, now).rowsWritten;
+      const added = sql.exec(`INSERT INTO sessions VALUES (?, ?)`, hash, now + SESSION_DAYS * 86_400_000).rowsWritten;
+      this.count({ do_rows_written: gone + added });
+    });
+  }
+
+  /** Whether a session is live. Reads only, so checking every request costs no writes. */
+  async hasSession(hash: string): Promise<boolean> {
+    return this.ctx.storage.sql.exec(`SELECT 1 FROM sessions WHERE hash = ? AND expires > ?`, hash, Date.now()).toArray().length > 0;
+  }
+
+  async endSession(hash: string): Promise<void> {
+    if (this.ctx.storage.sql.exec(`DELETE FROM sessions WHERE hash = ?`, hash).rowsWritten) this.count({ do_rows_written: 1 });
   }
 
   /** Usage for the last `days` UTC days, oldest first. */

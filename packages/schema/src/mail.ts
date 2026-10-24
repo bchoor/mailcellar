@@ -92,7 +92,15 @@ export interface MonthRow { month: string; n: number; bytes: number }
 export interface LabelRow { id: string; name: string; type: 'system' | 'user'; n: number; bytes: number }
 export interface DomainRow { domain: string; n: number; bytes: number }
 export interface SenderRow { addr: string; name: string; n: number; bytes: number; firstTs: number; lastTs: number }
-export type MessageRow = IndexedMessage;
+/**
+ * Where a message lives. MailCellar always holds at least what Gmail holds:
+ * live is in both; archived was trashed in Gmail after MailCellar's copy was confirmed.
+ * A purged message is gone from both, so it has no row.
+ */
+export type MessageState = 'live' | 'archived';
+export const MESSAGE_STATES: readonly MessageState[] = ['live', 'archived'];
+
+export type MessageRow = IndexedMessage & { state: MessageState };
 export interface ArchiveRows {
   months: MonthRow;
   labels: LabelRow;

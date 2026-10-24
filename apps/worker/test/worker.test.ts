@@ -3,6 +3,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env, exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import { MIGRATIONS } from '../src/mailbox';
+import { signIn } from './helpers';
 
 describe('api', () => {
   it('reports health', async () => {
@@ -12,16 +13,17 @@ describe('api', () => {
   });
 
   it('returns JSON 404 for unknown API routes', async () => {
-    const res = await exports.default.fetch('https://mailcellar.icaruslab.dev/api/nope');
+    const res = await (await signIn('nope')).api('/api/nope');
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'not_found' });
   });
 });
 
 describe('no made-up data', () => {
-  it('serves an empty archive until real mail arrives', async () => {
+  it('serves a new user an empty archive until real mail arrives', async () => {
+    const { api } = await signIn('newcomer');
     for (const view of ['months', 'labels', 'domains', 'senders', 'messages']) {
-      const res = await exports.default.fetch(`https://mailcellar.icaruslab.dev/api/archive/${view}`);
+      const res = await api(`/api/archive/${view}`);
       expect(await res.json(), view).toEqual([]);
     }
   });
