@@ -16,6 +16,7 @@ import {
   type Schedule,
   type UsageDay,
   type UsageMetric,
+  type SyncState,
 } from '@mailcellar/schema';
 import type { Env } from './env';
 
@@ -134,6 +135,30 @@ export class MailboxDO extends DurableObject<Env> {
 
   async schemaVersion(): Promise<number> {
     return this.readVersion();
+  }
+
+  /** This account's sync progress, or null before its first sync. */
+  async syncState(): Promise<SyncState | null> {
+    const row = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'sync'`).toArray()[0];
+    return row ? (JSON.parse(row.value) as SyncState) : null;
+  }
+
+  /**
+   * Save sync progress. With `onlyIf`, saves only while that run still owns the sync, so a
+   * run replaced by a newer one can't overwrite it. Returns whether it saved.
+   */
+  async saveSync(state: SyncState, onlyIf?: string): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => {
+      if (onlyIf !== undefined) {
+        const current = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'sync'`).toArray()[0];
+        if (!current || (JSON.parse(current.value) as SyncState).runId !== onlyIf) return false;
+      }
+      this.ctx.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('sync', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+        JSON.stringify(state),
+      );
+      return true;
+    });
   }
 
   /** Record the mailbox's labels, so the Labels page can name them. Counts are kept. */

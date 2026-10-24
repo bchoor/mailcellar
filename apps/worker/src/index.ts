@@ -3,6 +3,7 @@ import { callback, connect, identity, revoke, testAccount, type Identity } from 
 import type { Env } from './env';
 
 export { MailboxDO } from './mailbox';
+export { SyncWorkflow } from './sync';
 
 // Static assets serve the app; only /api/* reaches this handler (run_worker_first).
 export default {

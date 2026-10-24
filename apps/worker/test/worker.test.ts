@@ -63,7 +63,7 @@ describe('mailbox DO', () => {
 describe('schema helpers', () => {
   it('builds per-user keys', () => {
     const u = asUserId('u_42');
-    expect(r2Keys.raw(u, 'abc')).toBe('u/u_42/raw/abc.eml.gz');
+    expect(r2Keys.raw(u, 'a1', 'abc')).toBe('u/u_42/a/a1/raw/abc.eml');
     expect(basinNamespace(u)).toBe('u_u_42');
   });
 
