@@ -108,6 +108,8 @@ export const MIGRATIONS: readonly string[] = [
   // 8: the Senders and Domains pages sort by count; without an index each load read every row.
   `CREATE INDEX senders_n ON senders (n);
    CREATE INDEX domains_n ON domains (n);`,
+  // 9: when each backfill month finished (done or failed), for the Backfills list's Done today.
+  `ALTER TABLE job_months ADD COLUMN finished_at TEXT;`,
 ];
 
 /** How long a kept page answer may lag the writes behind it, in ms. Tests set it to 0. */
@@ -415,7 +417,7 @@ export class MailboxDO extends DurableObject<Env> {
         `INSERT INTO basin_months (month, copied, landed_at) VALUES (?, 0, ?) ON CONFLICT (month) DO UPDATE SET landed_at = excluded.landed_at, indexed_at = NULL`,
         part.month, new Date().toISOString(),
       ).rowsWritten;
-      written += this.ctx.storage.sql.exec(`UPDATE job_months SET state = 'done', error = NULL WHERE job = ? AND month = ? AND state = 'running'`, part.job, part.month).rowsWritten;
+      written += this.ctx.storage.sql.exec(`UPDATE job_months SET state = 'done', error = NULL, finished_at = ? WHERE job = ? AND month = ? AND state = 'running'`, new Date().toISOString(), part.job, part.month).rowsWritten;
       this.count({ do_rows_written: written });
     });
   }
@@ -494,8 +496,8 @@ export class MailboxDO extends DurableObject<Env> {
   /** Close a running backfill month as done or failed. A canceled month stays canceled. */
   async finishPart(part: SyncPart, state: 'done' | 'failed', error: string | null = null): Promise<void> {
     const { rowsWritten } = this.ctx.storage.sql.exec(
-      `UPDATE job_months SET state = ?, error = ? WHERE job = ? AND month = ? AND state = 'running'`,
-      state, error, part.job, part.month,
+      `UPDATE job_months SET state = ?, error = ?, finished_at = ? WHERE job = ? AND month = ? AND state = 'running'`,
+      state, error, new Date().toISOString(), part.job, part.month,
     );
     if (rowsWritten) this.count({ do_rows_written: rowsWritten });
   }
@@ -550,7 +552,7 @@ export class MailboxDO extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const by = new Map<string, MonthCoverage>();
     const at = (month: string) =>
-      by.get(month) ?? by.set(month, { month, gmail: null, copied: 0, inBasin: 0, landed: false, indexed: 0, state: null, error: null }).get(month)!;
+      by.get(month) ?? by.set(month, { month, gmail: null, copied: 0, inBasin: 0, landed: false, indexed: 0, state: null, error: null, finishedAt: null }).get(month)!;
     // The latest job to touch a month decides its state. One pass over job_months: the old
     // correlated max(job) per row scanned the table once a row (~70k rows read a call at 265 months).
     let read = 0;
@@ -568,11 +570,11 @@ export class MailboxDO extends DurableObject<Env> {
       basin.add(r.month);
       Object.assign(m, { inBasin: r.copied, landed: r.landed_at !== null, copied: Math.max(m.copied, r.copied) });
     }
-    for (const r of each<{ month: string; state: PartState; error: string | null }>(
-      `SELECT month, state, error FROM (
-         SELECT month, state, error, row_number() OVER (PARTITION BY month ORDER BY job DESC) AS latest FROM job_months
+    for (const r of each<{ month: string; state: PartState; error: string | null; finished_at: string | null }>(
+      `SELECT month, state, error, finished_at FROM (
+         SELECT month, state, error, finished_at, row_number() OVER (PARTITION BY month ORDER BY job DESC) AS latest FROM job_months
        ) WHERE latest = 1`,
-    )) Object.assign(at(r.month), { state: r.state, error: r.error });
+    )) Object.assign(at(r.month), { state: r.state, error: r.error, finishedAt: r.finished_at });
     // Months copied before Basin came first went to Basin and the index together.
     for (const m of by.values()) if (!basin.has(m.month)) Object.assign(m, { inBasin: m.indexed, landed: m.indexed > 0 && m.state === 'done' });
     this.count({ do_rows_read: read });
@@ -647,12 +649,12 @@ export class MailboxDO extends DurableObject<Env> {
     return changed;
   }
 
-  /** Take months out of the queue (all of them when `months` is null). Mail already copied stays. Returns months changed. */
+  /** Take months out of the queue, failed ones included (all of them when `months` is null). Mail already copied stays. Returns months changed. */
   async unqueueMonths(months: string[] | null): Promise<number> {
     const sql = this.ctx.storage.sql;
     const cursor = months
-      ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running') AND month IN (SELECT value FROM json_each(?)) RETURNING month`, JSON.stringify(months))
-      : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running') RETURNING month`);
+      ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') AND month IN (SELECT value FROM json_each(?)) RETURNING month`, JSON.stringify(months))
+      : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') RETURNING month`);
     const changed = cursor.toArray().length;
     if (changed) this.count({ do_rows_written: cursor.rowsWritten });
     return changed;
@@ -964,9 +966,10 @@ export class MailboxDO extends DurableObject<Env> {
   async backfill(account: string, months: string[], label: string): Promise<{ job: number | null; status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' | 'paused' }> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return { error: 'not_found' };
-    if (this.isPaused()) return { error: 'paused' };
     if (!this.env.BASIN_TOKEN) return { error: 'basin_not_ready' };
     const job = await accountMailbox(this.env, user, account).queueMonths(months, label);
+    // Paused: the months wait in the queue and start when the person resumes.
+    if (this.isPaused()) return { job, status: 'idle' };
     const r = await this.syncAccount(account, true);
     // A sync already going: the new months get lanes now, up to MAX_LANES at once.
     if (!('error' in r) && r.status !== 'started') await launchLanes(this.env, user, account);

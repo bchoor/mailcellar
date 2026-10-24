@@ -244,6 +244,8 @@ export interface MonthCoverage {
   state: PartState | null;
   /** Why that backfill failed. */
   error: string | null;
+  /** When that backfill finished the month (done or failed); null while it runs, or for months finished before this was kept. */
+  finishedAt: string | null;
 }
 
 /** GET /api/accounts/:id/coverage. */

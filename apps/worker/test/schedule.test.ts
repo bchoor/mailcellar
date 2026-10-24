@@ -170,7 +170,7 @@ describe('Backfill by month', () => {
     expect(started).toEqual(['full']);
     await accountMailbox(env, user, id).putMonthCount('2026-09', 12);
     const second = (await (await api(`/api/accounts/${id}/coverage`)).json()) as AccountCoverage;
-    expect(second.months).toEqual([{ month: '2026-09', gmail: 12, copied: 0, inBasin: 0, landed: false, indexed: 0, state: null, error: null }]);
+    expect(second.months).toEqual([{ month: '2026-09', gmail: 12, copied: 0, inBasin: 0, landed: false, indexed: 0, state: null, error: null, finishedAt: null }]);
     expect((await api(`/api/accounts/a${'x'.repeat(22)}/coverage`)).status).toBe(404);
   });
 
@@ -229,6 +229,9 @@ describe('Backfill by month', () => {
     expect(await (await post({ months: ['2024-02'] })).json()).toMatchObject({ changed: 1 });
     const left = (await (await api(`/api/accounts/${id}/coverage`)).json()) as AccountCoverage;
     expect(left.months.filter((m) => m.state === 'queued').map((m) => m.month)).toEqual(['2024-01', '2024-03']);
+    // A failed month leaves with Clear queue too.
+    expect((await box.claimLanes(1, id)).map((l) => l.month)).toEqual(['2024-03']);
+    await box.finishPart({ job: 1, month: '2024-03' }, 'failed', 'HTTP 403');
     expect(await (await post({})).json()).toMatchObject({ changed: 2 });
     expect(await (await post({})).json()).toMatchObject({ changed: 0 });
     expect((await api(`/api/accounts/a${'x'.repeat(22)}/backfill/cancel`, { method: 'POST', body: '{}' })).status).toBe(404);
@@ -247,7 +250,8 @@ describe('Pausing backfill', () => {
     const now = await api(`/api/accounts/${id}/sync`, { method: 'POST' });
     expect([now.status, await now.json()]).toEqual([409, { error: 'paused' }]);
     const copy = await api(`/api/accounts/${id}/backfill`, { method: 'POST', body: JSON.stringify({ months: ['2024-01'] }) });
-    expect([copy.status, await copy.json()]).toEqual([409, { error: 'paused' }]);
+    // Copy queues while paused (it starts on resume); this test env has no Basin, so it stops there.
+    expect([copy.status, await copy.json()]).toEqual([409, { error: 'basin_not_ready' }]);
     expect(await runDurableObjectAlarm(mailbox)).toBe(true);
     const list = (await (await api('/api/schedules')).json()) as Schedule[];
     expect(list[0].last).toMatchObject({ ok: true, detail: 'Backfill paused' });
