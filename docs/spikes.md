@@ -6,7 +6,7 @@ so we find the wall before we build into it. Phase 1 covers S4, S5, S6 and S9.
 ## S9: CI on OpenShip — done (2026-10-24)
 
 Type-check, build, test and `wrangler deploy --dry-run` run green on the self-hosted
-arm64 runner. CI, Release and Deploy are registered against `main`.
+arm64 runner. CI and Release are registered against `main`; deploys moved to Cloudflare Workers Builds.
 
 ## S4: search-index writes per message — done (2026-10-24)
 
