@@ -155,7 +155,17 @@ export function parseBatch(text: string, contentType: string) {
   return out;
 }
 
+const fromBase64 = (Uint8Array as unknown as { fromBase64?: (s: string, o: { alphabet: string; lastChunkHandling?: string }) => Uint8Array }).fromBase64;
+
+/** Standard base64 as bytes; natively where the runtime has it. */
+function b64Bytes(s: string): Uint8Array {
+  if (fromBase64) return fromBase64(s, { alphabet: 'base64', lastChunkHandling: 'loose' });
+  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+
 export function b64urlBytes(s: string): Uint8Array {
+  // Native where the runtime has it: several times faster than atob and a loop.
+  if (fromBase64) return fromBase64(s, { alphabet: 'base64url' });
   const bin = atob(s.replaceAll('-', '+').replaceAll('_', '/'));
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -163,10 +173,10 @@ export function b64urlBytes(s: string): Uint8Array {
 }
 
 /** Bytes as a string, one character a byte (true latin1, unlike TextDecoder's windows-1252). */
+const utf16 = new TextDecoder('utf-16le');
 function binary(bytes: Uint8Array): string {
-  let s = '';
-  for (let i = 0; i < bytes.length; i += 32768) s += String.fromCharCode(...bytes.subarray(i, i + 32768));
-  return s;
+  // Widen each byte to a UTF-16 unit and decode natively: about 8 times faster than String.fromCharCode.
+  return utf16.decode(new Uint16Array(bytes));
 }
 
 /** The header block of a raw message, unfolded, as name → first value. */
@@ -231,9 +241,11 @@ export const unescapeSnippet = (s: string) =>
   );
 
 /** Parts marked as attachments. A cheap count over the raw bytes, not a MIME parse (spike S3). */
+/** One character a byte, decoded natively: fine for finding ASCII header text, not for showing text. */
+const latin1 = new TextDecoder('latin1');
+
 export function countAttachments(raw: Uint8Array): number {
-  const text = binary(raw);
-  return (text.match(/^content-disposition:[ \t]*attachment/gim) ?? []).length;
+  return (latin1.decode(raw).match(/^content-disposition:[ \t]*attachment/gim) ?? []).length;
 }
 
 /** The index row for a message, from Gmail's fields and the raw headers. */
@@ -281,7 +293,7 @@ function decodeBody(body: string, encoding: string, charset: string): string {
   const enc = encoding.toLowerCase();
   if (enc === 'base64') {
     try {
-      bytes = Uint8Array.from(atob(body.replace(/[^A-Za-z0-9+/=]/g, '')), (c) => c.charCodeAt(0));
+      bytes = b64Bytes(body.replace(/[^A-Za-z0-9+/=]/g, ''));
     } catch {
       return '';
     }
@@ -307,9 +319,13 @@ const htmlToText = (html: string) =>
     .replace(/\s*\n\s*/g, '\n')
     .trim();
 
+/** Body text is looked for in a message's first bytes only: text parts come before attachments. */
+export const BODY_SCAN = 256 * 1024;
+
 /**
  * The readable text of a message, for full-text search in Basin: the first text/plain part,
- * or the first text/html part with tags removed. Attachments are skipped, not decoded.
+ * or the first text/html part with tags removed. Attachments are skipped, not decoded. Only the
+ * first BODY_SCAN bytes are read, which keeps a message with big attachments cheap.
  */
 export function bodyText(raw: Uint8Array, max = 32 * 1024): string {
   type Found = { plain?: string; html?: string };
@@ -333,9 +349,10 @@ export function bodyText(raw: Uint8Array, max = 32 * 1024): string {
       return;
     }
     const charset = /charset="?([^";\s]+)"?/i.exec(h('content-type'))?.[1] ?? 'utf-8';
-    if (type.startsWith('text/plain') && found.plain === undefined) found.plain = decodeBody(body, h('content-transfer-encoding'), charset);
-    else if (type.startsWith('text/html') && found.html === undefined) found.html = htmlToText(decodeBody(body, h('content-transfer-encoding'), charset));
+    // Only as much source as the text kept can need: HTML is mostly tags.
+    if (type.startsWith('text/plain') && found.plain === undefined) found.plain = decodeBody(body.slice(0, max * 2), h('content-transfer-encoding'), charset);
+    else if (type.startsWith('text/html') && found.html === undefined) found.html = htmlToText(decodeBody(body.slice(0, max * 2), h('content-transfer-encoding'), charset));
   };
-  walk(binary(raw), 0);
+  walk(binary(raw.subarray(0, BODY_SCAN)), 0);
   return (found.plain ?? found.html ?? '').trim().slice(0, max);
 }
