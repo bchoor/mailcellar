@@ -2,6 +2,7 @@ import { DEFAULT_SCHEDULES, nextRun, syncStatus, type AccountCoverage, type Back
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
+import { keepFor } from '../src/mailbox';
 import { accountMailbox, syncDeps } from '../src/sync';
 import { signIn } from './helpers';
 
@@ -180,6 +181,31 @@ describe('Backfill by month', () => {
       expect((await post(bad)).status).toBe(400);
     const res = await post({ months: ['2024-01'] });
     expect([res.status, await res.json()]).toEqual([409, { error: 'basin_not_ready' }]);
+  });
+
+  it('AC-READS1 keeps the map and jobs answers a minute while runs write, and drops them when the person queues', async () => {
+    const { id, user } = await withAccount();
+    const box = accountMailbox(env, user, id);
+    const read = async () => (await box.usage()).filter((u) => u.metric === 'do_rows_read').reduce((t, u) => t + u.value, 0);
+    keepFor.ms = 60_000;
+    try {
+      await box.putMonthCount('2024-01', 5);
+      expect((await box.coverageMonths()).map((m) => m.month)).toEqual(['2024-01']);
+      const before = await read();
+      // Polls with nothing written read nothing.
+      await box.coverageMonths();
+      await box.coverageMonths();
+      expect(await read()).toBe(before);
+      // A run's write shows within the minute, not at once.
+      await box.putMonthCount('2024-02', 7);
+      expect((await box.coverageMonths()).map((m) => m.month)).toEqual(['2024-01']);
+      // Queueing shows at once.
+      await box.queueMonths(['2024-02'], 'Test');
+      expect((await box.coverageMonths()).map((m) => [m.month, m.state])).toEqual([['2024-01', null], ['2024-02', 'queued']]);
+      expect((await box.jobList()).map((j) => j.label)).toEqual(['Test']);
+    } finally {
+      keepFor.ms = 0;
+    }
   });
 
   it('lists jobs, and cancels or retries one', async () => {
