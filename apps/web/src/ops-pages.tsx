@@ -74,7 +74,8 @@ const USAGE_VIEW: CustomViewConfig = {
 function LimitsCard({ days }: { days: UsageDay[] }) {
   const today = new Date().toISOString().slice(0, 10);
   const indexed = days.find((d) => d.day === today && d.metric === 'messages_indexed')?.value ?? 0;
-  const plan = useQuota().data?.plan;
+  const quota = useQuota().data;
+  const plan = quota?.plan;
   return (
     <div className="flex flex-col gap-4">
       <TileRow>
@@ -83,7 +84,13 @@ function LimitsCard({ days }: { days: UsageDay[] }) {
           className="lg:flex-1"
           label="Plan"
           value={plan ? PLAN_NAMES[plan] : '…'}
-          caption={plan === 'paid' ? 'use past the allowance is billed' : 'daily limits refuse work past them'}
+          caption={
+            quota && !quota.planReadAt
+              ? 'taken as Free until Cloudflare billing can be read'
+              : plan === 'paid'
+                ? 'use past the allowance is billed'
+                : 'daily limits refuse work past them'
+          }
         />
       </TileRow>
       <AccountLimits />

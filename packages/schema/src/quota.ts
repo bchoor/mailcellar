@@ -23,7 +23,7 @@ export interface QuotaLimit {
   perMillion?: number;
 }
 
-/** The account's Workers plan. Set by the CF_PLAN Worker var; change it when the account moves to Paid. */
+/** The account's Workers plan, read from Cloudflare's billing; Free until it can be read. */
 export type QuotaPlan = 'free' | 'paid';
 export const QUOTA_PLANS: QuotaPlan[] = ['free', 'paid'];
 export const PLAN_NAMES: Record<QuotaPlan, string> = { free: 'Workers Free', paid: 'Workers Paid' };
@@ -89,6 +89,10 @@ export interface QuotaMeter {
 /** GET /api/quota: the account's meters now, and whether backfills are paused for a limit. */
 export interface QuotaOverview {
   plan: QuotaPlan;
+  /** When the plan was last read from Cloudflare; null when it never was (then it is taken as Free). */
+  planReadAt: string | null;
+  /** Why the plan couldn't be read, if it couldn't. */
+  planError: string | null;
   /** When Cloudflare's figures were read; null when they couldn't be (then only MailCellar's own count shows). */
   readAt: string | null;
   /** Why Cloudflare's figures couldn't be read, if they couldn't. */

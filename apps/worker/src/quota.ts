@@ -1,4 +1,4 @@
-// The account's meters for its Workers plan (CF_PLAN), one Durable Object for every user and mailbox (name
+// The account's meters for its Workers plan (read from Cloudflare's billing), one Durable Object for every user and mailbox (name
 // 'account'). Each sync and census run asks it for room before its batch and reports what the
 // batch used after. It reads Cloudflare's analytics for the whole account (every project on
 // it) at most every 5 minutes, and adds what MailCellar has counted since.
@@ -35,9 +35,9 @@ interface CfAccount {
 }
 
 /** The account's use this period of each meter on the plan, from Cloudflare's GraphQL analytics. */
-export async function readCloudflare(env: Env, now = new Date()): Promise<Record<QuotaMetric, number>> {
+export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()): Promise<Record<QuotaMetric, number>> {
   if (!env.CF_ANALYTICS_TOKEN) throw new Error('No Cloudflare analytics token is set.');
-  const limits = quotaLimits(quotaDeps.plan(env));
+  const limits = quotaLimits(plan);
   const day = now.toISOString().slice(0, 10);
   const from = (m: QuotaMetric) => (limits[m].period === 'day' ? day : `${day.slice(0, 8)}01`);
   const res = await fetch(GRAPHQL, {
@@ -68,8 +68,31 @@ export async function readCloudflare(env: Env, now = new Date()): Promise<Record
   };
 }
 
-/** Swapped in tests: each test gets its own meter and plan, and none calls Cloudflare. */
-export const quotaDeps = { readCloudflare, name: 'account', plan: (env: Env): QuotaPlan => (env.CF_PLAN === 'paid' ? 'paid' : 'free') };
+/** The plan is read again after this. */
+export const PLAN_READ_MS = 6 * 3_600_000;
+
+/**
+ * The account's Workers plan, from its subscriptions (a read-only Billing Read token). Workers
+ * Paid shows as a subscription to a Workers rate plan; with none, the account is on Free.
+ */
+export async function readPlan(env: Env): Promise<QuotaPlan> {
+  if (!env.CF_BILLING_TOKEN) throw new Error('No Cloudflare billing token is set, so the plan is taken as Workers Free.');
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/subscriptions`, {
+    headers: { authorization: `Bearer ${env.CF_BILLING_TOKEN}` },
+  });
+  if (!res.ok) throw new Error(`Cloudflare billing answered HTTP ${res.status}, so the plan is taken as Workers Free.`);
+  const body = (await res.json()) as { result?: { state?: string; rate_plan?: { id?: string; public_name?: string } }[] };
+  const workers = (body.result ?? []).some(
+    (s) => {
+      const name = `${s.rate_plan?.id ?? ''} ${s.rate_plan?.public_name ?? ''}`;
+      return s.state !== 'Cancelled' && /workers/i.test(name) && !/free/i.test(name);
+    },
+  );
+  return workers ? 'paid' : 'free';
+}
+
+/** Swapped in tests: each test gets its own meter, and none calls Cloudflare. */
+export const quotaDeps = { readCloudflare, readPlan, name: 'account' };
 
 /** The one meter for the whole Cloudflare account. */
 export const accountQuota = (env: Env) => env.QUOTA.getByName(quotaDeps.name);
@@ -86,8 +109,27 @@ export class QuotaDO extends DurableObject<Env> {
     `);
   }
 
+  /** The plan last read from Cloudflare; Free until one is read. */
+  private get plan(): QuotaPlan {
+    return this.meta('plan') === 'paid' ? 'paid' : 'free';
+  }
+
   private get limits() {
-    return quotaLimits(quotaDeps.plan(this.env));
+    return quotaLimits(this.plan);
+  }
+
+  /** Read the plan at most once every PLAN_READ_MS. A failed read keeps the last plan known. */
+  private async refreshPlan(now: Date) {
+    const tried = this.meta('plan_tried_at');
+    if (tried && now.getTime() - Date.parse(tried) < PLAN_READ_MS) return;
+    this.setMeta('plan_tried_at', now.toISOString());
+    try {
+      this.setMeta('plan', await quotaDeps.readPlan(this.env));
+      this.setMeta('plan_read_at', now.toISOString());
+      this.setMeta('plan_error', null);
+    } catch (e) {
+      this.setMeta('plan_error', e instanceof Error ? e.message : 'The plan could not be read.');
+    }
   }
 
   /** MailCellar's own count this period. It is kept by UTC day, so a plan change keeps it. */
@@ -110,11 +152,12 @@ export class QuotaDO extends DurableObject<Env> {
 
   /** Read Cloudflare's figures at most once every CF_READ_MS, whether the last try worked or not. */
   private async refresh(now: Date) {
+    await this.refreshPlan(now);
     const tried = this.meta('tried_at');
     if (tried && now.getTime() - Date.parse(tried) < CF_READ_MS) return;
     this.setMeta('tried_at', now.toISOString());
     try {
-      const cf = await quotaDeps.readCloudflare(this.env, now);
+      const cf = await quotaDeps.readCloudflare(this.env, this.plan, now);
       for (const m of metrics)
         this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO cloudflare VALUES (?, ?, ?, ?)`, m, periodKey(this.limits, m, now), cf[m], this.ours(m, now));
       this.setMeta('read_at', now.toISOString());
@@ -173,7 +216,9 @@ export class QuotaDO extends DurableObject<Env> {
     });
     const over = meters.find((m) => m.hard && m.used >= m.limit * QUOTA_STOP);
     return {
-      plan: quotaDeps.plan(this.env),
+      plan: this.plan,
+      planReadAt: this.meta('plan_read_at'),
+      planError: this.meta('plan_error'),
       readAt: this.meta('read_at'),
       readError: this.meta('read_error'),
       day: now.toISOString().slice(0, 10),

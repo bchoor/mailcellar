@@ -1,7 +1,7 @@
 import { asUserId, mailboxName, QUOTA_METRICS, type QuotaMetric, type QuotaOverview } from '@mailcellar/schema';
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { accountQuota, quotaDeps, readCloudflare } from '../src/quota';
+import { accountQuota, quotaDeps, readCloudflare, readPlan } from '../src/quota';
 import { accountMailbox, BATCH_BYTES, RUN_CALLS, runBatch, runCensus } from '../src/sync';
 import { fakeGmail, fakeMessages } from './fixtures/gmail';
 import { mockFetch, signIn } from './helpers';
@@ -62,7 +62,7 @@ describe('Account limits', () => {
       });
     });
     const now = new Date('2026-10-24T18:00:00Z');
-    const cf = await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, now);
+    const cf = await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, 'free', now);
     expect(cf).toEqual({
       workers_requests: 1958, do_rows_written: 15929, do_rows_read: 6117, d1_rows_written: 3690, d1_rows_read: 27604,
       r2_class_a: 1000, r2_class_b: 5000,
@@ -70,8 +70,7 @@ describe('Account limits', () => {
     // On Free, Workers, DO and D1 count today; R2 counts the month.
     expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-24T00:00:00Z', to: now.toISOString(), dos: '2026-10-24', d1: '2026-10-24', r2: '2026-10-01' });
     // On Paid, everything counts the month.
-    quotaDeps.plan = () => 'paid';
-    await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, now);
+    await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, 'paid', now);
     expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-01T00:00:00Z', to: now.toISOString(), dos: '2026-10-01', d1: '2026-10-01', r2: '2026-10-01' });
   });
 
@@ -129,16 +128,36 @@ describe('Account limits', () => {
   });
 
   it('AC-Q7 on Workers Paid, limits are monthly allowances that bill past them, so nothing pauses', async () => {
-    quotaDeps.plan = () => 'paid';
+    quotaDeps.readPlan = async () => 'paid';
     cloudflare({ do_rows_written: 60_000_000, workers_requests: 9_000_000 });
     const quota = accountQuota(env);
     expect(await quota.reserve({ do_rows_written: 100_000 })).toBeNull();
     const q = await quota.overview();
     expect(q.plan).toBe('paid');
+    expect(q.planError).toBeNull();
     expect(q.paused).toBeNull();
     expect(q.meters.every((m) => !m.hard && m.period === 'month')).toBe(true);
     const w = q.meters.find((m) => m.metric === 'do_rows_written')!;
     expect(w).toMatchObject({ limit: 50_000_000, used: 60_000_000 });
     expect(w.cost).toBeCloseTo(10);
+  });
+
+  it("AC-Q8 reads the plan from the account's subscriptions; without a billing token it is Free and says so", async () => {
+    const q = await accountQuota(env).overview();
+    expect(q.plan).toBe('free');
+    expect(q.planReadAt).toBeNull();
+    expect(q.planError).toBe('No Cloudflare billing token is set, so the plan is taken as Workers Free.');
+
+    let subs: unknown[] = [];
+    mockFetch(async (url, init) => {
+      expect(url).toBe('https://api.cloudflare.com/client/v4/accounts/acct-1/subscriptions');
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer bill-token');
+      return Response.json({ success: true, result: subs });
+    });
+    const e = { ...env, CF_BILLING_TOKEN: 'bill-token', CF_ACCOUNT_ID: 'acct-1' };
+    subs = [{ state: 'Paid', rate_plan: { id: 'r2_paid', public_name: 'R2 Paid' } }];
+    expect(await readPlan(e)).toBe('free');
+    subs.push({ state: 'Paid', rate_plan: { id: 'workers_paid', public_name: 'Workers Paid' } });
+    expect(await readPlan(e)).toBe('paid');
   });
 });

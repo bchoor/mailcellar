@@ -23,15 +23,13 @@
     "BASIN_CATALOG_URI": "https://catalog.cloudflarestorage.com/87a4f50952b4b2ce00cab6c2680e63ae/mailcellar",
     "BASIN_WAREHOUSE": "87a4f50952b4b2ce00cab6c2680e63ae_mailcellar",
     "BASIN_BUCKET": "mailcellar",
-    // The account whose analytics the quota meter reads. The token is the CF_ANALYTICS_TOKEN secret.
-    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae",
-    // The account's Workers plan: "free" or "paid". Set to "paid" when the account upgrades; limits follow.
-    "CF_PLAN": "free"
+    // The account whose analytics and plan the quota meter reads: secrets CF_ANALYTICS_TOKEN and CF_BILLING_TOKEN.
+    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae"
   },
   "durable_objects": {
     "bindings": [
       { "name": "MAILBOX", "class_name": "MailboxDO" },
-      // The account's free-tier meters, shared by every user (quota.ts).
+      // The account's meters for its plan, shared by every user (quota.ts).
       { "name": "QUOTA", "class_name": "QuotaDO" }
     ]
   },

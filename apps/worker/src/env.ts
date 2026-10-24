@@ -18,8 +18,8 @@ export interface Env {
   APP_VERSION: string;
   /** Cloudflare's analytics for the whole account (quota.ts): the account and a read-only Account Analytics token (a Worker secret). */
   CF_ACCOUNT_ID: string;
-  /** The account's Workers plan, 'free' or 'paid': it sets the limits and whether backfills pause (quota.ts). */
-  CF_PLAN: string;
+  /** A read-only Billing Read token (a Worker secret): the account's plan sets the limits and whether backfills pause (quota.ts). */
+  CF_BILLING_TOKEN?: string;
   CF_ANALYTICS_TOKEN?: string;
   /** Google OAuth client: Worker secrets in production, .dev.vars locally. Never in the repo. */
   GOOGLE_CLIENT_ID: string;
