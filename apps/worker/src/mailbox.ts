@@ -37,7 +37,7 @@ import {
   syncSummary,
 } from '@mailcellar/schema';
 import type { Env } from './env';
-import { accountMailbox, BasinNotReady, syncDeps } from './sync';
+import { accountMailbox, BasinNotReady, runDied, syncDeps } from './sync';
 
 /**
  * Ordered schema migrations for the mailbox's SQLite database. Each entry runs once,
@@ -581,7 +581,22 @@ export class MailboxDO extends DurableObject<Env> {
     return {
       basin: !!this.env.BASIN_TOKEN,
       accounts: user
-        ? await Promise.all(accounts.map(async (a) => ({ ...a, sync: syncSummary(await accountMailbox(this.env, user, a.id).syncState()) })))
+        ? await Promise.all(
+            accounts.map(async (a) => {
+              const mailbox = accountMailbox(this.env, user, a.id);
+              let state = await mailbox.syncState();
+              // A run Cloudflare stopped never saves again: start it afresh, so the page never shows a dead run as running.
+              if (state && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) {
+                try {
+                  await syncDeps.start(this.env, user, a.id);
+                  state = await mailbox.syncState();
+                } catch (e) {
+                  if (!(e instanceof BasinNotReady)) throw e;
+                }
+              }
+              return { ...a, sync: syncSummary(state) };
+            }),
+          )
         : [],
     };
   }
@@ -593,8 +608,10 @@ export class MailboxDO extends DurableObject<Env> {
   async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return { error: 'not_found' };
-    const status = syncStatus(await accountMailbox(this.env, user, account).syncState());
-    if (status === 'running' || status === 'waiting' || (status === 'stopped' && !manual)) return { status };
+    const state = await accountMailbox(this.env, user, account).syncState();
+    const status = syncStatus(state);
+    const dead = status === 'running' && (await runDied(this.env, state!.runId));
+    if ((status === 'running' && !dead) || status === 'waiting' || (status === 'stopped' && !manual)) return { status };
     try {
       await syncDeps.start(this.env, user, account);
     } catch (e) {

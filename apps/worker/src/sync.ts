@@ -35,6 +35,17 @@ export function messageCpuMs(size: number): number {
   const kb = size / 1024;
   return 0.5 + kb * 0.01 + (size <= GZIP_MAX ? kb * 0.03 : 0) + Math.min(kb, 32) * 0.05;
 }
+/**
+ * Whether the run that owns a sync has died: its Workflow errored (Cloudflare stopped it, say
+ * for CPU), was terminated, or ended without handing over. Then nothing will save the sync
+ * again, so it is started afresh instead of waiting SYNC_STALE_MS. Copied mail is skipped.
+ */
+export async function runDied(env: Env, runId: string): Promise<boolean> {
+  if (!runId) return false;
+  const status = await syncDeps.runStatus(env, runId);
+  return status === 'errored' || status === 'terminated' || status === 'complete';
+}
+
 /** Staged Basin batches one run commits when Basin is behind; that run copies nothing new. */
 export const BASIN_COMMIT_KEYS = 2;
 /** What a full run may use, asked of the account's meters before it starts: about 6 DO rows a message (spike S4). */
@@ -152,12 +163,20 @@ export interface RunOptions {
   basin?: (env: Env, user: UserId) => Promise<BasinTarget | null>;
 }
 
-/** Where Basin rows go, and how a sync starts. Tests swap in a local table and a stand-in start. */
+/** Where Basin rows go, how a sync starts, and how a run's Workflow stands. Tests swap in stand-ins. */
 export const syncDeps: {
+  runStatus: (env: Env, runId: string) => Promise<string | null>;
   basin: (env: Env, user: UserId) => Promise<BasinTarget | null>;
   start: (env: Env, user: UserId, account: string) => Promise<string>;
   census: (env: Env, user: UserId, account: string, mode: CensusState['mode']) => Promise<string>;
 } = {
+  runStatus: async (env, runId) => {
+    try {
+      return (await (await env.SYNC.get(runId)).status()).status;
+    } catch {
+      return null;
+    }
+  },
   basin: catalogTarget,
   start: (env, user, account) => startSync(env, user, account),
   census: (env, user, account, mode) => startCensus(env, user, account, mode),
