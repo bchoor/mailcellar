@@ -53,7 +53,7 @@ export function sampleMessages(count: number, seed = 1): IndexedMessage[] {
     const [fromAddr, fromName, label, subject] = SENDERS[Math.floor(r() ** 1.6 * SENDERS.length)];
     const ts = start + Math.floor(Math.sqrt(r()) * span);
     const attachments = r() < 0.18 ? 1 + Math.floor(r() * 3) : 0;
-    const id = (ts * 1000 + i).toString(16).padStart(16, '0').slice(-16);
+    const id = (ts * 1000 + i).toString(16); // hex without leading zeros, as Gmail's are
     return {
       id,
       threadId: id,

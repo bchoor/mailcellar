@@ -40,105 +40,10 @@ import {
 } from 'lucide-react';
 import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { MESSAGES, type Msg } from './data';
+import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
 import { BackfillPage, BackfillStatus, UsagePage } from './ops-pages';
 import { RELEASES, RELEASES_API } from './releases';
 import './index.css';
-
-const MESSAGE_DOMAIN: ViewDomain<Msg> = {
-  id: 'messages',
-  rowKey: (r) => r.id,
-  text: (r) => [r.subject, r.from],
-  fields: [
-    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.date, format: 'text' },
-    { key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.from, format: 'text', filterable: true, groupable: true },
-    { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.domain, format: 'text', filterable: true, groupable: true },
-    { key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text' },
-    { key: 'label', label: 'Label', icon: TagIcon, value: (r) => r.label, format: 'text', filterable: true, groupable: true },
-    { key: 'account', label: 'Account', icon: InboxIcon, value: (r) => r.account, format: 'text', filterable: true, groupable: true },
-    { key: 'year', label: 'Year', icon: CalendarClockIcon, value: (r) => r.year, format: 'text', filterable: true, groupable: true },
-    { key: 'n', label: 'Messages', icon: MailIcon, value: (r) => r.n, format: 'integer', aggregate: 'sum' },
-    { key: 'size_mb', label: 'Size (MB)', icon: HardDriveIcon, value: (r) => r.size_mb, format: 'number', aggregate: 'sum', filterable: true },
-    { key: 'attachments', label: 'Attachments', icon: PaperclipIcon, value: (r) => r.attachments, format: 'integer', aggregate: 'sum', filterable: true },
-  ],
-} as ViewDomain<Msg>;
-
-const view = (name: string, over: Record<string, unknown>): CustomViewConfig => ({
-  name,
-  ...customViewConfigSchema.parse(over),
-});
-const TABLE = { id: 'table', kind: 'table', style: 'table', w: 6 };
-const grouped = (name: string, by: string, cards: unknown[] = []) =>
-  view(name, {
-    shape: 'group',
-    group: { fields: ['from', 'domain', 'label', 'account', 'year'], default: by },
-    columns: ['date', 'from', 'subject', 'label', 'n', 'size_mb', 'attachments'],
-    sort: { key: 'n', desc: true },
-    ...(cards.length ? { cards: [...cards, TABLE] } : {}),
-  });
-
-const VIEWS: Record<string, { title: string; config: CustomViewConfig }> = {
-  overview: {
-    title: 'Overview',
-    config: view('Overview', {
-      columns: ['date', 'from', 'subject', 'label', 'size_mb', 'attachments'],
-      sort: { key: 'date', desc: true },
-      cards: [
-        {
-          id: 'summary', kind: 'metric', style: 'row', w: 6,
-          tiles: [
-            { key: 'msgs', label: 'Messages', field: 'n', agg: 'sum' },
-            { key: 'senders', label: 'Senders', field: 'from', agg: 'distinct' },
-            { key: 'size', label: 'Size (MB)', field: 'size_mb', agg: 'sum' },
-            { key: 'att', label: 'Attachments', field: 'attachments', agg: 'sum' },
-          ],
-        },
-        { id: 'per_year', title: 'Messages per year', kind: 'chart', style: 'bars', date: 'date', values: ['n'], bucket: 'year', agg: 'sum', w: 6 },
-        { id: 'by_label', title: 'By label', kind: 'allocation', style: 'donut', by: 'label', value: 'n', w: 3 },
-        { id: 'by_domain', title: 'Top domains', kind: 'allocation', style: 'bar_list', by: 'domain', value: 'n', w: 3 },
-        TABLE,
-      ],
-    }),
-  },
-  messages: {
-    title: 'Messages',
-    config: view('Messages', {
-      columns: ['date', 'from', 'subject', 'label', 'account', 'size_mb', 'attachments'],
-      sort: { key: 'date', desc: true },
-    }),
-  },
-  senders: { title: 'Senders', config: grouped('Senders', 'from') },
-  domains: { title: 'Domains', config: grouped('Domains', 'domain') },
-  labels: {
-    title: 'Labels',
-    config: grouped('Labels', 'label', [{ id: 'label_share', title: 'Share by label', kind: 'allocation', style: 'donut', by: 'label', value: 'n', w: 3 }]),
-  },
-  time: {
-    title: 'Time',
-    config: grouped('Time', 'year', [
-      { id: 'per_month', title: 'Messages per month', kind: 'chart', style: 'bars', date: 'date', values: ['n'], bucket: 'month', agg: 'sum', w: 6 },
-    ]),
-  },
-};
-
-function ViewPage({ id }: { id: string }) {
-  const v = VIEWS[id] ?? VIEWS.overview;
-  const query = useQuery({ queryKey: ['messages'], queryFn: async () => MESSAGES });
-  const load = useLumenLoad(query);
-  const [config, setConfig] = useState(v.config);
-  return (
-    <LumenLayout
-      key={id}
-      crumbs={[{ label: v.title }]}
-      domain={MESSAGE_DOMAIN}
-      config={config}
-      rows={query.data ?? []}
-      load={load}
-      onConfigChange={setConfig}
-      rowTitle={(r) => r.subject}
-    />
-  );
-}
 
 const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
 const minutesAhead = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
@@ -278,13 +183,8 @@ function Frame() {
 }
 
 const root = createRootRoute({ component: Frame });
-const routes = Object.keys(VIEWS).map((id) =>
-  createRoute({
-    getParentRoute: () => root,
-    path: id === 'overview' ? '/' : `/${id}`,
-    component: () => <ViewPage id={id} />,
-  }),
-);
+const PAGES = { '/': OverviewPage, '/messages': MessagesPage, '/senders': SendersPage, '/domains': DomainsPage, '/labels': LabelsPage, '/time': TimePage };
+const routes = Object.entries(PAGES).map(([path, component]) => createRoute({ getParentRoute: () => root, path, component }));
 const opsRoutes = [
   createRoute({ getParentRoute: () => root, path: '/backfill', component: BackfillPage }),
   createRoute({ getParentRoute: () => root, path: '/usage', component: UsagePage }),
