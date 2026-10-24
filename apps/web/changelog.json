@@ -1,5 +1,42 @@
 [
   {
+    "tag": "v0.0.4",
+    "sha": "6768c995c6b8cfde9b0b861cf7b1c4a16f013be4",
+    "published_at": "2026-10-24T22:18:20Z",
+    "takeaways": [
+      {
+        "text": "**Pick months on the Backfill month map**: On the Backfill page, click a month, shift-click for a range, or use Select months (Missing, Last 3, Last 12, All), then press Start backfill to queue them, or use Remove from queue and Clear queue to take them back out.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Pause and Resume for backfill**: In the Backfills widget on the Backfill page, Pause stops all copying, including the 6-hourly scheduled sync, until you press Resume, and the Sync card shows Paused in the meantime.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Faster backfill copying**: When you backfill Gmail mail, each queued month now copies in its own parallel lane, fetching every message once in full and writing it to storage in packs of up to 50, aiming for about 1,500 messages a minute on Workers Free.",
+        "types": [
+          "performance"
+        ]
+      },
+      {
+        "text": "**Account limits by project**: On the Usage and Backfill pages, the Account limits card now has an All / MailCellar toggle, a Refresh button, and new bars for storage, Workflows and CPU per request.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Backfill buttons work while paused and respond at once**: On the Backfill page, Retry, Start backfill and Clear queue now work while paused, and Clear queue, Stop and Remove show their result immediately instead of after a reload.",
+        "types": [
+          "fix"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.3",
     "sha": "a3dcc23a497f3ed576f97aaee5a62a98f01ce2a3",
     "published_at": "2026-10-24T20:48:52Z",
