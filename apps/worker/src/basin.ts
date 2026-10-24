@@ -4,7 +4,9 @@
 // written through the R2 binding, so a commit costs a few of a run's 50 outside requests.
 import { BASIN_TABLES, basinNamespace, type UserId } from '@mailcellar/schema';
 import { ByteWriter } from 'hyparquet-writer';
-import { icebergAppend, icebergCreateTable, restCatalogConnect, restCatalogCreateNamespace, restCatalogListTables } from 'icebird';
+import { parquetReadObjects } from 'hyparquet';
+import { icebergAppend, icebergCreateTable, restCatalogConnect, restCatalogCreateNamespace, restCatalogListTables, restCatalogLoadTable } from 'icebird';
+import { fetchManifestEntries, icebergManifestList } from 'icebird/src/manifest.js';
 import type { Env } from './env';
 
 type AppendOptions = Parameters<typeof icebergAppend>[0];
@@ -99,10 +101,62 @@ export function r2Resolver(bucket: R2Bucket, bucketName: string): Resolver {
   };
 }
 
-/** Where a user's rows go: create the table once, then append batches. */
+/** Where a user's rows go: create the table once, then append batches; and one month read back. */
 export interface BasinTarget {
   ensure(): Promise<void>;
   append(rows: BasinRow[]): Promise<void>;
+  /** One account's rows for a month, without body text: what the search index is built from. */
+  monthRows(account: string, month: string): Promise<IndexColumns[]>;
+}
+
+/** The columns the search index is built from. */
+export const INDEX_COLUMNS = ['account', 'id', 'thread_id', 'ts', 'from_addr', 'from_name', 'subject', 'snippet', 'size', 'attachments', 'labels'] as const;
+export type IndexColumns = Pick<BasinRow, (typeof INDEX_COLUMNS)[number]>;
+
+type TableMetadata = Parameters<typeof icebergManifestList>[0]['metadata'];
+
+/** Months since January 1970: Iceberg's `month` partition value. */
+const monthOrdinal = (month: string) => {
+  const [y, m] = month.split('-').map(Number);
+  return (y - 1970) * 12 + (m - 1);
+};
+/** A manifest's partition bound: a 4-byte little-endian int for the month transform. */
+const boundInt = (b: unknown) => (b instanceof Uint8Array && b.byteLength >= 4 ? new DataView(b.buffer, b.byteOffset, 4).getInt32(0, true) : null);
+
+/**
+ * Read one month of one account back from the messages table: only the manifests whose month
+ * range covers it, only that month's data files, and only the index columns. A message
+ * committed twice (a retried batch) comes back once.
+ */
+export async function readMonth(metadata: TableMetadata, resolver: Resolver, account: string, month: string): Promise<IndexColumns[]> {
+  if (metadata['current-snapshot-id'] == null || Number(metadata['current-snapshot-id']) < 0) return [];
+  const target = monthOrdinal(month);
+  const { manifests } = await icebergManifestList({ metadata, resolver });
+  const files: { path: string; size: number }[] = [];
+  for (const m of manifests) {
+    if (m.content === 1) continue;
+    const range = (m as { partitions?: { lower_bound?: unknown; upper_bound?: unknown }[] }).partitions?.[0];
+    const lo = boundInt(range?.lower_bound);
+    const hi = boundInt(range?.upper_bound);
+    if (lo !== null && hi !== null && (target < lo || target > hi)) continue;
+    for (const e of await fetchManifestEntries(m, resolver)) {
+      const part = (e.data_file.partition as Record<string, unknown> | undefined)?.ts_month;
+      if (e.status === 2 || e.data_file.content || (part !== undefined && part !== null && Number(part) !== target)) continue;
+      files.push({ path: e.data_file.file_path, size: Number(e.data_file.file_size_in_bytes) });
+    }
+  }
+  const byId = new Map<string, IndexColumns>();
+  for (const f of files) {
+    const file = await resolver.reader(f.path, f.size);
+    const rows = (await parquetReadObjects({ file, columns: [...INDEX_COLUMNS] })) as Record<string, unknown>[];
+    for (const r of rows) {
+      if (r.account !== account) continue;
+      const ts = r.ts instanceof Date ? r.ts.toISOString() : new Date(Number(r.ts) / 1000).toISOString();
+      if (ts.slice(0, 7) !== month) continue;
+      byId.set(String(r.id), { ...(r as unknown as IndexColumns), ts, size: Number(r.size), attachments: Number(r.attachments), labels: (r.labels as string[] | null) ?? [] });
+    }
+  }
+  return [...byId.values()];
 }
 
 /** The user's table in the R2 Data Catalog, or null while the write token isn't set. */
@@ -114,8 +168,10 @@ export async function catalogTarget(env: Env, user: UserId): Promise<BasinTarget
     requestInit: { headers: { authorization: `Bearer ${env.BASIN_TOKEN}` } },
   });
   const namespace = basinNamespace(user);
+  const resolver = r2Resolver(env.ARCHIVE, env.BASIN_BUCKET);
   return {
     ensure: () => ensureTable(catalog, namespace),
+    monthRows: async (account, month) => readMonth((await restCatalogLoadTable(catalog, { namespace, table: MESSAGES_TABLE })).metadata, resolver, account, month),
     append: (rows) =>
       icebergAppend({ catalog, namespace, table: MESSAGES_TABLE, resolver: r2Resolver(env.ARCHIVE, env.BASIN_BUCKET), records: toRecords(rows) }).then(() => {}),
   };

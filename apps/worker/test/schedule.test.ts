@@ -169,7 +169,7 @@ describe('Backfill by month', () => {
     expect(started).toEqual(['full']);
     await accountMailbox(env, user, id).putMonthCount('2026-09', 12);
     const second = (await (await api(`/api/accounts/${id}/coverage`)).json()) as AccountCoverage;
-    expect(second.months).toEqual([{ month: '2026-09', gmail: 12, copied: 0, state: null, error: null }]);
+    expect(second.months).toEqual([{ month: '2026-09', gmail: 12, copied: 0, inBasin: 0, landed: false, indexed: 0, state: null, error: null }]);
     expect((await api(`/api/accounts/a${'x'.repeat(22)}/coverage`)).status).toBe(404);
   });
 
