@@ -416,7 +416,7 @@ export async function runBatch(
   return { copied: added.copied, phase: next.phase, more, resumesAt: next.resumesAt };
 }
 
-/** Index rows written a call when building a month's index (fewer calls, fewer search segments). */
+/** Index rows written a call when building a month's index (fewer calls, fewer search segments). Measured ~3 DO rows a message (Jul 2026). */
 export const INDEX_CHUNK = 500;
 /** Chunks one index run writes before handing over to a fresh run. */
 export const INDEX_CHUNKS_A_RUN = 4;
@@ -436,7 +436,7 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   let indexed = 0;
   for (let i = 0; i < INDEX_CHUNKS_A_RUN && at < rows.length; i++) {
     const chunk = rows.slice(at, at + INDEX_CHUNK);
-    const full = await quota.reserve({ do_rows_written: chunk.length * 3, do_rows_read: chunk.length * 2 });
+    const full = await quota.reserve({ do_rows_written: chunk.length * 4, do_rows_read: chunk.length * 2 });
     if (full) return { indexed, next: at, resumesAt: full.resumesAt };
     let r;
     try {
