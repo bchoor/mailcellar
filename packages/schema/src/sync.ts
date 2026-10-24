@@ -41,6 +41,8 @@ export interface SyncState {
 export interface SyncParams {
   user: string;
   account: string;
+  /** Instead of syncing, write one made-up row to the Basin check table (basin.ts, basinCheck). */
+  check?: boolean;
 }
 
 /** Where an account's sync stands: a run is going, it's waiting to resume, it stopped on an error, or it can start. */

@@ -7,7 +7,7 @@
 // a failed commit is retried by the next run instead of losing the batch.
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { asUserId, mailboxName, r2Keys, type IndexedMessage, type SyncParams, type SyncState, type UserId } from '@mailcellar/schema';
-import { catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
+import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, headers, indexRow, labels, listPage, packBySize, parseAddresses, profile, type RawMessage } from './gmail';
 
@@ -291,7 +291,8 @@ export async function runBatch(
 }
 
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
-  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult> {
+  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult | Awaited<ReturnType<typeof basinCheck>>> {
+    if (event.payload.check) return step.do('basin check', { retries: { limit: 0, delay: '1 second' } }, () => basinCheck(this.env));
     const user = asUserId(event.payload.user);
     const { account } = event.payload;
     const runId = event.instanceId;

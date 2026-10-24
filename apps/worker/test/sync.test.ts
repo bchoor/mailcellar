@@ -151,3 +151,10 @@ describe('sync', () => {
     }
   });
 });
+
+describe('basin check', () => {
+  it('reports a missing token instead of failing', async () => {
+    const { basinCheck } = await import('../src/basin');
+    expect(await basinCheck(env)).toEqual({ ok: false, ms: 0, error: 'BASIN_TOKEN is not set' });
+  });
+});
