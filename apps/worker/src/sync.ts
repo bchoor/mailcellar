@@ -416,7 +416,7 @@ export async function runBatch(
   return { copied: added.copied, phase: next.phase, more, resumesAt: next.resumesAt };
 }
 
-/** Index rows written a call when building a month's index (fewer calls, fewer search segments). */
+/** Index rows written a call when building a month's index (fewer calls, fewer search segments). Measured ~3 DO rows a message (Jul 2026). */
 export const INDEX_CHUNK = 500;
 /** Chunks one index run writes before handing over to a fresh run. */
 export const INDEX_CHUNKS_A_RUN = 4;
@@ -436,7 +436,7 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   let indexed = 0;
   for (let i = 0; i < INDEX_CHUNKS_A_RUN && at < rows.length; i++) {
     const chunk = rows.slice(at, at + INDEX_CHUNK);
-    const full = await quota.reserve({ do_rows_written: chunk.length * 3, do_rows_read: chunk.length * 2 });
+    const full = await quota.reserve({ do_rows_written: chunk.length * 4, do_rows_read: chunk.length * 2 });
     if (full) return { indexed, next: at, resumesAt: full.resumesAt };
     let r;
     try {
@@ -450,7 +450,9 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
     at += chunk.length;
   }
   if (at < rows.length) return { indexed, next: at, resumesAt: null };
-  await mailbox.markIndexed(month);
+  const inBasin = new Set(rows.map((r) => r.id)).size;
+  console.log(JSON.stringify({ indexedMonth: { month, inBasin, rows: rows.length } }));
+  await mailbox.markIndexed(month, inBasin);
   // Senders, domains and labels once backfill is done, not once a month.
   // (Senders, domains and labels left with no mail after unindexMonth keep their rows until mail returns.)
   if (!(await mailbox.hasQueued())) {
@@ -558,6 +560,7 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       const trial = event.payload.trial;
       return step.do('trial', () => this.env.MAILBOX.getByName(mailboxName(user)).trial(account, trial, !!event.payload.park));
     }
+    if (event.payload.missing) return step.do('queue missing months', () => this.env.MAILBOX.getByName(mailboxName(user)).backfillMissing(account));
     if (event.payload.pause) return step.do('pause', () => this.env.MAILBOX.getByName(mailboxName(user)).setBackfillPaused(true).then(() => true));
     if (event.payload.commit) {
       const r = await step.do('commit', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runCommit(this.env, user, account, runId));

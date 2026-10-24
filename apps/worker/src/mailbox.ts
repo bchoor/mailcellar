@@ -676,9 +676,15 @@ export class MailboxDO extends DurableObject<Env> {
     });
   }
 
-  /** The month's search index has been built from Basin. */
-  async markIndexed(month: string): Promise<void> {
-    const { rowsWritten } = this.ctx.storage.sql.exec(`UPDATE basin_months SET indexed_at = ? WHERE month = ?`, new Date().toISOString(), month);
+  /**
+   * The month's search index has been built from Basin, which has `inBasin` messages for it. The
+   * lanes' count can be off by one or two (a message copied twice is one row in search), so
+   * Basin's own count replaces it: the month is done, not left Indexing for a message it has.
+   */
+  async markIndexed(month: string, inBasin: number): Promise<void> {
+    const { rowsWritten } = this.ctx.storage.sql.exec(
+      `UPDATE basin_months SET indexed_at = ?, copied = ? WHERE month = ?`, new Date().toISOString(), inBasin, month,
+    );
     this.kept.clear();
     this.count({ do_rows_written: rowsWritten });
   }
@@ -1388,6 +1394,23 @@ export class MailboxDO extends DurableObject<Env> {
     // A sync already going: the new months get lanes now, up to MAX_LANES at once.
     if (!('error' in r) && r.status !== 'started') await launchLanes(this.env, user, account);
     return 'error' in r ? r : { job, status: r.status };
+  }
+
+  /**
+   * Queue every past month Gmail has more mail in than MailCellar copied, as one job, and resume
+   * backfill (the spend cap still pauses it). The months to copy come from the census.
+   */
+  async backfillMissing(account: string): Promise<{ months: string[]; job?: number | null; error?: string }> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return { months: [], error: 'not_found' };
+    const now = monthNow();
+    const months = (await accountMailbox(this.env, user, account).coverageMonths())
+      .filter((m) => m.month < now && m.gmail !== null && m.gmail > m.copied)
+      .map((m) => m.month);
+    if (!months.length) return { months };
+    if (!(await this.setBackfillPaused(false))) return { months, error: 'over_budget' };
+    const r = await this.backfill(account, months, 'All missing months');
+    return 'error' in r ? { months, error: r.error } : { months, job: r.job };
   }
 
   /**
