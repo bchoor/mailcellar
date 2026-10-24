@@ -1,6 +1,9 @@
 import {
+  configureLumen,
+  LumenPageState,
   LumenShell,
   NavGroup,
+  RouteError,
   SchedulesSection,
   type ScheduleItem,
   type ScheduleRun,
@@ -19,7 +22,7 @@ import {
   Navigate,
   useLocation,
 } from '@tanstack/react-router';
-import { CalendarClockIcon, GaugeIcon, HourglassIcon, UserIcon } from 'lucide-react';
+import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, UserIcon } from 'lucide-react';
 import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
@@ -29,6 +32,9 @@ import { MAILBOX_PAGES, MailboxNav, mailboxPath } from './mailbox';
 import { UsagePage } from './ops-pages';
 import { BackfillPage, SyncStatus, syncAllNow } from './sync';
 import './index.css';
+
+// Until a person picks: the device's theme, and Pacific time (Bikram, 2026-10-24).
+configureLumen({ defaultPrefs: { theme: 'system', timeZone: 'America/Los_Angeles' } });
 
 // Schedules are saved in the mailbox, which runs Gmail sync on its own. Run now syncs every account now.
 function SchedulesSettings() {
@@ -140,12 +146,27 @@ function FirstMailbox({ page }: { page: string }) {
 const firstRoutes = MAILBOX_PAGES.map((page) =>
   createRoute({ getParentRoute: () => root, path: `/${page}`, component: () => <FirstMailbox page={page} /> }),
 );
+// Gmail settings is a nav group: its own address opens its first page.
+const gmailRoute = createRoute({
+  getParentRoute: () => root,
+  path: '/m/$mailbox/gmail',
+  component: function GmailSettings() {
+    const { mailbox } = gmailRoute.useParams();
+    return <Navigate to={mailboxPath(mailbox, 'gmail/filters')} replace />;
+  },
+});
+// An address no page answers: the kit's page state, inside the shell.
+function NotFound() {
+  return <LumenPageState crumbs={[{ label: 'MailCellar', to: '/' }]} title="Page" icon={CircleHelpIcon} notFound="No page at this address." />;
+}
 const opsRoutes = [
   createRoute({ getParentRoute: () => root, path: '/backfill', component: BackfillPage }),
   createRoute({ getParentRoute: () => root, path: '/usage', component: UsagePage }),
 ];
 const router = createRouter({
-  routeTree: root.addChildren([...mailboxRoutes, ...firstRoutes, ...opsRoutes]),
+  routeTree: root.addChildren([...mailboxRoutes, gmailRoute, ...firstRoutes, ...opsRoutes]),
+  defaultNotFoundComponent: NotFound,
+  defaultErrorComponent: RouteError,
   // Real URLs, so refresh, Back and links work. The one-file prototype has no server to answer them.
   history: __SINGLE_FILE__ ? createMemoryHistory({ initialEntries: ['/'] }) : createBrowserHistory(),
 });

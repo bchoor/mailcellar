@@ -2,9 +2,10 @@
 // Cloudflare Access's job; the Worker reads the email Access vouches for.
 import { ErrorLine, IntegrationRow, KeyTestLine, LumenConfirm, TestBadge, useShell } from '@columenlabs/lumen-ui';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { AUTH_ERRORS, type AuthError, type Me } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { PlusIcon } from 'lucide-react';
+import { LogOutIcon, PlusIcon, RefreshCwIcon, ShieldAlertIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 /** The Access user and their Gmail accounts: null when Access sent no identity (the API answers 401). */
@@ -43,16 +44,29 @@ export function SettingsFromUrl() {
 /** Shown only if Cloudflare Access let a request through without its signed identity. */
 export function NoIdentity() {
   return (
-    <div className="mx-auto max-w-md p-8 text-sm text-muted-foreground">
-      Cloudflare Access didn’t pass your sign-in to MailCellar. Reload the page; if it keeps happening, sign out of Access at{' '}
-      <a className="underline" href="/cdn-cgi/access/logout">/cdn-cgi/access/logout</a> and back in.
-    </div>
+    <Empty className="min-h-[50vh]">
+      <EmptyHeader>
+        <EmptyMedia variant="icon"><ShieldAlertIcon /></EmptyMedia>
+        <EmptyTitle>Sign-in didn’t reach MailCellar</EmptyTitle>
+        <EmptyDescription>
+          Cloudflare Access didn’t pass your sign-in to MailCellar. Reload the page; if it keeps happening, sign out of Access and back in.
+        </EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <div className="flex gap-2">
+          <Button size="sm" onClick={() => window.location.reload()}><RefreshCwIcon />Reload</Button>
+          <Button size="sm" variant="outline" asChild>
+            <a href="/cdn-cgi/access/logout"><LogOutIcon />Sign out of Access</a>
+          </Button>
+        </div>
+      </EmptyContent>
+    </Empty>
   );
 }
 
 /** A green ✓ or a red ✗ for one kind of Gmail access. */
 const Mark = ({ ok }: { ok: boolean }) =>
-  ok ? <span className="text-green-600 dark:text-green-400">✓</span> : <span className="text-red-600 dark:text-red-400">✗</span>;
+  ok ? <span className="text-gain">✓</span> : <span className="text-loss">✗</span>;
 
 const added = (iso: string) => new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 
