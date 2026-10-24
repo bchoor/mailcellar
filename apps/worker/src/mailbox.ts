@@ -17,8 +17,16 @@ import {
   type UsageDay,
   type UsageMetric,
   type SyncState,
+  type SyncSummary,
+  type ScheduleRun,
+  type UserId,
+  asUserId,
+  nextRun,
+  syncStatus,
+  syncSummary,
 } from '@mailcellar/schema';
 import type { Env } from './env';
+import { accountMailbox, BasinNotReady, syncDeps } from './sync';
 
 /**
  * Ordered schema migrations for the mailbox's SQLite database. Each entry runs once,
@@ -308,20 +316,105 @@ export class MailboxDO extends DurableObject<Env> {
     throw new Error('unknown view');
   }
 
-  /** The schedules with the person's changes applied. Nothing runs them until phase 2's sync. */
+  /** The schedules with the person's changes applied, when Gmail sync next runs, and how it last went. */
   async schedules(): Promise<Schedule[]> {
-    const hasAccount = this.ctx.storage.sql.exec(`SELECT 1 FROM accounts LIMIT 1`).toArray().length > 0;
-    const saved = new Map(
-      this.ctx.storage.sql
-        .exec<{ id: string; change: string }>(`SELECT id, change FROM schedules`)
-        .toArray()
-        .map((r) => [r.id, JSON.parse(r.change)]),
-    );
-    return DEFAULT_SCHEDULES.map((s) => ({
+    return DEFAULT_SCHEDULES.map((s) => this.schedule(s.id)!);
+  }
+
+  private schedule(id: string): Schedule | null {
+    const base = DEFAULT_SCHEDULES.find((s) => s.id === id);
+    if (!base) return null;
+    const sql = this.ctx.storage.sql;
+    const change = sql.exec<{ change: string }>(`SELECT change FROM schedules WHERE id = ?`, id).toArray()[0];
+    const s: Schedule = { ...base, ...(change ? JSON.parse(change.change) : {}) };
+    if (id !== 'gmail-sync') return s;
+    const hasAccount = sql.exec(`SELECT 1 FROM accounts LIMIT 1`).toArray().length > 0;
+    const last = sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'last:gmail-sync'`).toArray()[0];
+    return {
       ...s,
-      ...saved.get(s.id),
-      waiting: s.id !== 'gmail-sync' ? null : hasAccount ? 'Not built yet: syncing starts when the backfill ships' : 'Add a Gmail account in Settings ▸ Accounts first',
-    }));
+      last: last ? (JSON.parse(last.value) as ScheduleRun) : null,
+      next: hasAccount ? (nextRun(s, new Date())?.toISOString() ?? null) : null,
+      waiting: !hasAccount ? 'Add a Gmail account in Settings ▸ Accounts first' : !this.env.BASIN_TOKEN ? 'Waiting for Basin write access' : null,
+    };
+  }
+
+  /** The user this mailbox belongs to, for the user's own mailbox (not one account's). */
+  private userId(): UserId | null {
+    const name = this.ctx.id.name;
+    return name?.endsWith(':default') ? asUserId(name.slice(0, -':default'.length)) : null;
+  }
+
+  /** Set the alarm for Gmail sync's next run, or clear it when sync is off or there's no account. */
+  private async armSync(): Promise<void> {
+    if (!this.userId()) return;
+    const next = this.schedule('gmail-sync')!.next;
+    if (next) await this.ctx.storage.setAlarm(Date.parse(next));
+    else if ((await this.ctx.storage.getAlarm()) !== null) await this.ctx.storage.deleteAlarm();
+  }
+
+  /** Gmail sync's scheduled run: start a sync for each account that isn't syncing already. */
+  async alarm(): Promise<void> {
+    const user = this.userId();
+    if (!user) return;
+    const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
+    if (ids.length && this.schedule('gmail-sync')!.on) {
+      let run: ScheduleRun;
+      if (!this.env.BASIN_TOKEN) run = { at: new Date().toISOString(), ok: false, detail: 'Waiting for Basin write access' };
+      else {
+        let started = 0;
+        let failed = 0;
+        for (const id of ids) {
+          try {
+            const r = await this.syncAccount(id, false);
+            if ('error' in r) failed++;
+            else if (r.status === 'started') started++;
+          } catch (e) {
+            console.error('scheduled sync', id, e);
+            failed++;
+          }
+        }
+        const already = ids.length - started - failed;
+        const parts = [`Started ${started} of ${ids.length}`];
+        if (already) parts.push(`${already} already syncing or waiting`);
+        if (failed) parts.push(`${failed} failed to start`);
+        run = { at: new Date().toISOString(), ok: !failed, detail: parts.join('; ') };
+      }
+      const { rowsWritten } = this.ctx.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('last:gmail-sync', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+        JSON.stringify(run),
+      );
+      this.count({ do_rows_written: rowsWritten });
+    }
+    await this.armSync();
+  }
+
+  /** One account's sync, as the app shows it. Null: not this user's account. */
+  async syncInfo(account: string): Promise<SyncSummary | null> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return null;
+    return syncSummary(await accountMailbox(this.env, user, account).syncState());
+  }
+
+  /**
+   * Start syncing an account unless a run is going or waiting to resume. Sync now (`manual`)
+   * also restarts a sync that stopped on an error; the schedule leaves those for the person.
+   */
+  async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return { error: 'not_found' };
+    const status = syncStatus(await accountMailbox(this.env, user, account).syncState());
+    if (status === 'running' || status === 'waiting' || (status === 'stopped' && !manual)) return { status };
+    try {
+      await syncDeps.start(this.env, user, account);
+    } catch (e) {
+      if (e instanceof BasinNotReady) return { error: 'basin_not_ready' };
+      throw e;
+    }
+    return { status: 'started' };
+  }
+
+  private hasAccount(id: string): boolean {
+    return this.ctx.storage.sql.exec(`SELECT 1 FROM accounts WHERE id = ?`, id).toArray().length > 0;
   }
 
   /** Save a change to one schedule; an unknown schedule or a change it can't take is refused. */
@@ -342,7 +435,8 @@ export class MailboxDO extends DurableObject<Env> {
       id, JSON.stringify(merged),
     );
     this.count({ do_rows_written: rowsWritten });
-    return { ok: true, schedule: (await this.schedules()).find((s) => s.id === id)! };
+    if (id === 'gmail-sync') await this.armSync();
+    return { ok: true, schedule: this.schedule(id)! };
   }
 
   /** Connect a Gmail account, or refresh its token and scopes if it is connected already. */
@@ -360,6 +454,7 @@ export class MailboxDO extends DurableObject<Env> {
         account.id, account.email, token, account.scopes.join(' '), new Date().toISOString(), new Date().toISOString(),
     );
     this.count({ do_rows_written: rowsWritten });
+    await this.armSync();
     return { ok: true };
   }
 
@@ -383,13 +478,18 @@ export class MailboxDO extends DurableObject<Env> {
   async disconnectAccount(id: string): Promise<string | null> {
     const sql = this.ctx.storage.sql;
     const row = sql.exec<{ refresh_token: string }>(`DELETE FROM accounts WHERE id = ? RETURNING refresh_token`, id).toArray()[0];
-    if (row) this.count({ do_rows_written: 1 });
+    if (row) {
+      this.count({ do_rows_written: 1 });
+      await this.armSync();
+    }
     return row?.refresh_token ?? null;
   }
 
   /** The Access user (passed in by the Worker) and the accounts the archive keeps. Never includes tokens. */
   async me(email: string): Promise<Me> {
     const sql = this.ctx.storage.sql;
+    // Mailboxes from before schedules ran have no alarm yet; the first visit sets it.
+    if ((await this.ctx.storage.getAlarm()) === null) await this.armSync();
     const accounts = sql
       .exec<{ id: string; email: string; scopes: string; added_at: string; tested_at: string; test_error: string | null }>(
         `SELECT id, email, scopes, added_at, tested_at, test_error FROM accounts ORDER BY added_at`,
