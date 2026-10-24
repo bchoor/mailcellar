@@ -66,6 +66,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox
     if (!token) return Response.json({ error: 'not_found' }, { status: 404 });
     return Response.json({ ok: true, revoked: await revoke(token) }, { headers: noStore });
   }
+  if (url.pathname === '/api/sync' && request.method === 'GET') return Response.json(await mailbox.syncAll(), { headers: noStore });
   const sync = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/sync$/);
   if (sync && request.method === 'GET') {
     const info = await mailbox.syncInfo(sync[1]);
