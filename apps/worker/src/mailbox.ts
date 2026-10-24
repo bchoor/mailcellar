@@ -649,12 +649,12 @@ export class MailboxDO extends DurableObject<Env> {
     return changed;
   }
 
-  /** Take months out of the queue (all of them when `months` is null). Mail already copied stays. Returns months changed. */
+  /** Take months out of the queue, failed ones included (all of them when `months` is null). Mail already copied stays. Returns months changed. */
   async unqueueMonths(months: string[] | null): Promise<number> {
     const sql = this.ctx.storage.sql;
     const cursor = months
-      ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running') AND month IN (SELECT value FROM json_each(?)) RETURNING month`, JSON.stringify(months))
-      : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running') RETURNING month`);
+      ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') AND month IN (SELECT value FROM json_each(?)) RETURNING month`, JSON.stringify(months))
+      : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') RETURNING month`);
     const changed = cursor.toArray().length;
     if (changed) this.count({ do_rows_written: cursor.rowsWritten });
     return changed;
@@ -966,9 +966,10 @@ export class MailboxDO extends DurableObject<Env> {
   async backfill(account: string, months: string[], label: string): Promise<{ job: number | null; status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' | 'paused' }> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return { error: 'not_found' };
-    if (this.isPaused()) return { error: 'paused' };
     if (!this.env.BASIN_TOKEN) return { error: 'basin_not_ready' };
     const job = await accountMailbox(this.env, user, account).queueMonths(months, label);
+    // Paused: the months wait in the queue and start when the person resumes.
+    if (this.isPaused()) return { job, status: 'idle' };
     const r = await this.syncAccount(account, true);
     // A sync already going: the new months get lanes now, up to MAX_LANES at once.
     if (!('error' in r) && r.status !== 'started') await launchLanes(this.env, user, account);

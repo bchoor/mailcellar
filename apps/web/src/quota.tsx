@@ -129,7 +129,8 @@ const levelBar = (m: LevelMeter): Bar => ({ label: m.label, used: m.used, limit:
 
 /** One Worker's CPU per request: the bar runs to its p99 against the cap, a tick marks its p50. */
 function CpuBar({ r, cap, color }: { r: CpuRow; cap: number; color: Colors }) {
-  const over = r.p99 > cap;
+  // Cloudflare lets single requests run past the cap; a Worker whose typical (p50) request does is the warning.
+  const over = r.p50 > cap;
   return (
     <div className={ROW}>
       <span className="min-w-0 sm:truncate">{r.mine ? 'MailCellar' : r.name}</span>
@@ -244,7 +245,7 @@ export function AccountLimits() {
         </Section>
       )}
       {cpu.length > 0 && (
-        <Section title={`CPU per request today · cap ${ms(data.cpu.limitMs)}`}>
+        <Section title={`CPU per request today · ${ms(data.cpu.limitMs)} limit, short bursts allowed`}>
           {cpu.map((r) => <CpuBar key={r.name} r={r} cap={data.cpu.limitMs} color={color} />)}
         </Section>
       )}

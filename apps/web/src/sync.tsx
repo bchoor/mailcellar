@@ -248,8 +248,10 @@ const PRESETS: { id: Preset; label: string }[] = [
 /** Queue months to copy; resolves to an error in words, or null. */
 async function queueBackfill(id: string, months: string[], label: string): Promise<string | null> {
   const res = await fetch(`/api/accounts/${id}/backfill`, { method: 'POST', body: JSON.stringify({ months, label }) });
-  if (res.status === 409) return 'Waiting for Basin write access';
-  return res.ok ? null : `Not queued (${res.status})`;
+  if (res.ok) return null;
+  const { error } = (await res.json().catch(() => ({}))) as { error?: string };
+  if (error === 'basin_not_ready') return 'Waiting for Basin write access';
+  return `Not queued (${error ?? res.status})`;
 }
 
 function censusHint(c: AccountCoverage | undefined): string | null {
@@ -288,7 +290,7 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
     setError(months.length ? null : 'Nothing to select: those months are copied, queued or empty.');
     setPreselect([{ row: id, months }]);
   };
-  const anyQueued = !!data?.months.some(busyMonth);
+  const anyQueued = !!data?.months.some((m) => busyMonth(m) || m.state === 'failed');
   return (
     <div className="flex flex-col gap-2">
       <LumenCoverageMap
@@ -451,7 +453,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
           <Button variant={paused ? 'default' : 'outline'} size="sm" disabled={!sync.data} onClick={() => void setPaused(!paused)}>
             {paused ? <PlayIcon /> : <PauseIcon />} {paused ? 'Resume' : 'Pause'}
           </Button>
-          {busy.length > 0 && (
+          {busy.length + failed.length > 0 && (
             <Button variant="outline" size="sm" onClick={() => void unqueue()}>
               <ListXIcon /> Clear queue
             </Button>
