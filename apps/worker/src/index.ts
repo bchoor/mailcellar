@@ -1,12 +1,8 @@
-import { ARCHIVE_VIEWS, asUserId, mailboxName, type ArchiveView, type Health } from '@mailcellar/schema';
+import { ARCHIVE_VIEWS, type ArchiveView, type Health } from '@mailcellar/schema';
+import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import type { Env } from './env';
-import type { MailboxDO } from './mailbox';
 
 export { MailboxDO } from './mailbox';
-
-// Until Google sign-in lands every visitor shares one mailbox, and it holds no mail.
-// (Its name is phase 1's, so the made-up sample it held is wiped when it next loads.)
-const SHARED_USER = asUserId('sample');
 
 // Static assets serve the app; only /api/* reaches this handler (run_worker_first).
 export default {
@@ -16,23 +12,59 @@ export default {
       const body: Health = { ok: true, service: 'mailcellar', version: env.APP_VERSION };
       return Response.json(body);
     }
-    if (url.pathname.startsWith('/api/archive/') || url.pathname.startsWith('/api/schedules') || url.pathname === '/api/usage') {
-      // Sign-in replaces this with the signed-in user's own mailbox.
-      const mailbox = env.MAILBOX.getByName(mailboxName(SHARED_USER));
-      const res = await mailboxApi(request, url, mailbox);
-      if (res) return res;
+    if (url.pathname === '/api/releases' && request.method === 'GET') return releases(request, env, url);
+    if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
+    // A change must come from this app's own pages; this refuses other sites' requests outright.
+    if (request.method !== 'GET' && request.headers.get('origin') !== url.origin)
+      return Response.json({ error: 'bad_origin' }, { status: 403 });
+    // Cloudflare Access names the person; everything below is their own mailbox, reached only through them.
+    const who = await identity(request, env);
+    if (!who) return Response.json({ error: 'no_identity' }, { status: 401, headers: noStore });
+    if (request.method === 'GET') {
+      if (url.pathname === '/api/accounts/connect') return connect(url, env);
+      if (url.pathname === '/api/auth/callback') return callback(request, env, url, who);
     }
-    if (url.pathname.startsWith('/api/')) {
-      return Response.json({ error: 'not_found' }, { status: 404 });
-    }
-    return env.ASSETS.fetch(request);
+    const res = await mailboxApi(request, env, url, who);
+    return res ?? Response.json({ error: 'not_found' }, { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
 
 const noStore = { 'cache-control': 'no-store' };
 
-/** The API a mailbox serves: its archive pages, schedules and usage. Null: not one of these. */
-async function mailboxApi(request: Request, url: URL, mailbox: DurableObjectStub<MailboxDO>): Promise<Response | null> {
+interface Release {
+  tag: string;
+  published_at: string;
+}
+
+/**
+ * GET /api/releases?limit=&before=: What's new in the status bar. The build writes
+ * releases.json from the PRs merged to main (scripts/changelog.mjs); this pages through it.
+ */
+async function releases(request: Request, env: Env, url: URL): Promise<Response> {
+  const res = await env.ASSETS.fetch(new Request(new URL('/releases.json', url), { headers: request.headers }));
+  if (!res.ok || !res.headers.get('content-type')?.includes('json')) return Response.json({ error: 'not_found' }, { status: 404 });
+  const all = ((await res.json()) as { releases: Release[] }).releases;
+  const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 20, 1), 100);
+  const before = url.searchParams.get('before');
+  const from = before ? all.findIndex((r) => r.published_at < before) : 0;
+  return Response.json({ releases: from < 0 ? [] : all.slice(from, from + limit) }, { headers: noStore });
+}
+
+/** The API a mailbox serves: who this is, accounts, archive pages, schedules and usage. Null: not one of these. */
+async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox }: Identity): Promise<Response | null> {
+  if (url.pathname === '/api/me' && request.method === 'GET') return Response.json(await mailbox.me(email), { headers: noStore });
+  const test = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/test$/);
+  if (test && request.method === 'POST') {
+    if (!(await testAccount(env, mailbox, test[1]))) return Response.json({ error: 'not_found' }, { status: 404 });
+    return Response.json((await mailbox.me(email)).accounts.find((a) => a.id === test[1]), { headers: noStore });
+  }
+  const account = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})$/);
+  if (account && request.method === 'DELETE') {
+    // Remove = disconnect here and revoke at Google. Archived mail stays; deleting it is a separate step.
+    const token = await mailbox.disconnectAccount(account[1]);
+    if (!token) return Response.json({ error: 'not_found' }, { status: 404 });
+    return Response.json({ ok: true, revoked: await revoke(token) }, { headers: noStore });
+  }
   const archive = url.pathname.match(/^\/api\/archive\/([a-z]+)$/);
   if (archive && request.method === 'GET' && ARCHIVE_VIEWS.includes(archive[1] as ArchiveView)) {
     const q = (url.searchParams.get('q') ?? '').slice(0, 200);

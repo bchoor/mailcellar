@@ -1,18 +1,16 @@
 import { asUserId, mailboxName, type LabelRow, type MessageRow, type MonthRow, type SenderRow } from '@mailcellar/schema';
-import { env, exports } from 'cloudflare:workers';
+import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
-import { seedSample } from './fixtures/sample';
+import { signIn } from './helpers';
 
-// The shared mailbox the API serves until sign-in, filled with the test fixture.
-const shared = env.MAILBOX.getByName(mailboxName(asUserId('sample')));
+const sampler = signIn('sampler@example.com', { sample: true });
 const get = async <T>(path: string) => {
-  if ((await shared.archive('months')).length === 0) await seedSample(shared);
-  const res = await exports.default.fetch(`https://mailcellar.icaruslab.dev${path}`);
+  const res = await (await sampler).api(path);
   expect(res.status).toBe(200);
   return (await res.json()) as T[];
 };
 
-describe('archive API (test fixture mailbox)', () => {
+describe('archive API (sample mailbox)', () => {
   it('serves rollups that add up to the sample', async () => {
     const months = await get<MonthRow>('/api/archive/months');
     expect(months.reduce((a, m) => a + m.n, 0)).toBe(2400);
@@ -43,7 +41,7 @@ describe('archive API (test fixture mailbox)', () => {
     const stub = env.MAILBOX.getByName(mailboxName(asUserId('highbit')));
     const m: MessageRow = {
       id: 'f00000000000000a', threadId: 't', ts: 1, fromAddr: 'x@y.example', fromName: 'X',
-      subject: 'zebracorn', snippet: '', size: 1, attachments: 0, labels: ['INBOX'],
+      subject: 'zebracorn', snippet: '', size: 1, attachments: 0, labels: ['INBOX'], state: 'live',
     };
     await stub.ingest([m]);
     const found = (await stub.archive('messages', 'zebracorn')) as MessageRow[];
@@ -51,7 +49,7 @@ describe('archive API (test fixture mailbox)', () => {
   });
 
   it('404s an unknown page', async () => {
-    const res = await exports.default.fetch('https://mailcellar.icaruslab.dev/api/archive/secrets');
+    const res = await (await sampler).api('/api/archive/secrets');
     expect(res.status).toBe(404);
   });
 });

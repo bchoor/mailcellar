@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
+import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
 import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
 import { BackfillPage, UsagePage } from './ops-pages';
 import './index.css';
@@ -60,16 +61,10 @@ function SchedulesSettings() {
       onRun={async (): Promise<ScheduleRun> => ({
         at: new Date().toISOString(),
         ok: false,
-        detail: 'Sync arrives with the backfill, in the next phase',
+        detail: 'Not built yet: syncing starts when the backfill ships',
       })}
     />
   );
-}
-
-// Accounts connect with Google sign-in (next PR). Until then there are none, and the
-// app never shows made-up ones.
-function AccountsSettings() {
-  return <p className="text-sm text-muted-foreground">No Gmail account is connected yet. Google sign-in, which connects one, comes next.</p>;
 }
 
 const nav = (
@@ -104,18 +99,27 @@ function CloseMenuOnNavigate() {
 }
 
 function Frame() {
+  const me = useMe();
+  if (me.isPending) return null;
+  if (me.data === null) return <NoIdentity />;
   return (
     <LumenShell
       app="mailcellar"
       appLabel="MailCellar"
       brand={<span className="px-2 font-semibold">MailCellar</span>}
       nav={<>{nav}{opsNav}</>}
+      user={me.data ? { email: me.data.user.email, name: null } : null}
+      // Signing out is Cloudflare Access's: it ends the Access session for this site.
+      signOutUrl="/cdn-cgi/access/logout"
+      // What's new: one entry per PR merged to main, generated at build time.
+      releases="/api/releases"
       settings={[
-        { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts this archive keeps', content: <AccountsSettings /> },
-        { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Work the archive runs on its own', content: <SchedulesSettings /> },
+        { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts MailCellar copies', content: <AccountsSettings /> },
+        { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },
       ]}
     >
       <CloseMenuOnNavigate />
+      <SettingsFromUrl />
       <Outlet />
     </LumenShell>
   );

@@ -63,7 +63,7 @@ export function EmptyState({ icon: Icon, title, children }: { icon: LucideIcon; 
 
 const NO_MAIL = (
   <EmptyState icon={MailIcon} title="No mail yet">
-    Add a Gmail account in Settings ▸ Accounts, and the archive fills as the backfill runs.
+    Add a Gmail account in Settings ▸ Accounts. Mail shows here once the backfill copies it.
   </EmptyState>
 );
 /** The empty state once a rollup has loaded with no rows; nothing while it loads or fails. */
@@ -120,7 +120,7 @@ const LABELS: ViewDomain<LabelRow> = {
   // A message carries several labels, so a sum across labels counts it more than once: no Total.
   fields: [
     { key: 'label', label: 'Label', icon: TagIcon, value: (r) => labelName(r), format: 'text', filterable: true, groupable: true },
-    { key: 'type', label: 'Kind', icon: TagIcon, value: (r) => (r.type === 'system' ? 'Gmail' : 'Yours'), format: 'text', filterable: true, groupable: true },
+    { key: 'type', label: 'Type', icon: TagIcon, value: (r) => (r.type === 'system' ? 'Built-in' : 'Yours'), format: 'text', filterable: true, groupable: true },
     { ...n, aggregate: undefined },
     { ...size, aggregate: undefined },
   ],
@@ -147,8 +147,8 @@ const SENDERS: ViewDomain<SenderRow> = {
     { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.addr.split('@')[1] ?? '', format: 'text', filterable: true, groupable: true },
     n,
     size,
-    { key: 'first', label: 'First', icon: CalendarIcon, value: (r) => day(r.firstTs), format: 'text', render: (r) => dayText(r.firstTs) },
-    { key: 'last', label: 'Latest', icon: CalendarIcon, value: (r) => day(r.lastTs), format: 'text', render: (r) => dayText(r.lastTs) },
+    { key: 'first', label: 'First email', icon: CalendarIcon, value: (r) => day(r.firstTs), format: 'text', render: (r) => dayText(r.firstTs) },
+    { key: 'last', label: 'Latest email', icon: CalendarIcon, value: (r) => day(r.lastTs), format: 'text', render: (r) => dayText(r.lastTs) },
   ],
 } as ViewDomain<SenderRow>;
 
@@ -262,7 +262,7 @@ export function MessagesPage() {
   return (
     <LumenLayout
       crumbs={[{ label: 'Messages' }]}
-      meta={loaded && rows.length ? <span className="text-xs text-muted-foreground">{q ? `${count(rows.length)} matching` : `Newest ${count(rows.length)}`}</span> : undefined}
+      meta={loaded && rows.length ? <span className="text-xs text-muted-foreground">{q ? `${count(rows.length)} matching` : `Newest ${count(rows.length)} shown`}</span> : undefined}
       domain={MESSAGES}
       config={config}
       rows={rows}

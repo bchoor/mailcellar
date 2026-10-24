@@ -3,6 +3,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env, exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import { MIGRATIONS } from '../src/mailbox';
+import { signIn } from './helpers';
 
 describe('api', () => {
   it('reports health', async () => {
@@ -12,16 +13,17 @@ describe('api', () => {
   });
 
   it('returns JSON 404 for unknown API routes', async () => {
-    const res = await exports.default.fetch('https://mailcellar.icaruslab.dev/api/nope');
+    const res = await (await signIn('nope@example.com')).api('/api/nope');
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'not_found' });
   });
 });
 
 describe('no made-up data', () => {
-  it('serves an empty archive until real mail arrives', async () => {
+  it('serves a new user an empty archive until real mail arrives', async () => {
+    const { api } = await signIn('newcomer@example.com');
     for (const view of ['months', 'labels', 'domains', 'senders', 'messages']) {
-      const res = await exports.default.fetch(`https://mailcellar.icaruslab.dev/api/archive/${view}`);
+      const res = await api(`/api/archive/${view}`);
       expect(await res.json(), view).toEqual([]);
     }
   });
@@ -69,5 +71,20 @@ describe('schema helpers', () => {
     expect(() => asUserId('../x')).toThrow();
     expect(() => asUserId('a@b.com')).toThrow();
     expect(() => r2Keys.attachment(asUserId('u'), 'nothex')).toThrow();
+  });
+});
+
+describe("what's new", () => {
+  it('lists merged PRs newest first, in pages', async () => {
+    const page = async (q: string) =>
+      ((await (await exports.default.fetch(`https://mailcellar.icaruslab.dev/api/releases?${q}`)).json()) as {
+        releases: { tag: string; published_at: string }[];
+      }).releases;
+    const first = await page('limit=2');
+    expect(first).toHaveLength(2);
+    expect(first[0].tag).toMatch(/^#\d+ · [0-9a-f]{7}$/);
+    expect(first[0].published_at >= first[1].published_at).toBe(true);
+    const next = await page(`limit=2&before=${encodeURIComponent(first[1].published_at)}`);
+    expect(next[0].published_at < first[1].published_at).toBe(true);
   });
 });

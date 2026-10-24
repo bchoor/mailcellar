@@ -5,6 +5,14 @@ export interface Env {
   MAILBOX: DurableObjectNamespace<MailboxDO>;
   ARCHIVE: R2Bucket;
   APP_VERSION: string;
+  /** Google OAuth client: Worker secrets in production, .dev.vars locally. Never in the repo. */
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
+  /** Cloudflare Access in front of the site: the team domain and this app's audience tag. */
+  ACCESS_TEAM_DOMAIN: string;
+  ACCESS_AUD: string;
+  /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
+  DEV_USER_EMAIL?: string;
 }
 
 // Types `env` and `exports` from cloudflare:workers (used by tests and future modules).
