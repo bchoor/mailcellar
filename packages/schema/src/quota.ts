@@ -236,6 +236,8 @@ export function quotaCost(l: QuotaLimit, used: number): number | null {
  * `since` until it's done stays at or under `cap`. The backfill pauses itself once spend plus
  * the next run would pass `stop`, which leaves room for what the meters can't see yet.
  * Everything is priced as billed: the account is past R2's free writes and storage already.
+ * R2 Data Catalog's own REST calls are not R2 operations and aren't counted here; the data and
+ * metadata files a Basin commit writes are (they go through the bucket).
  */
 export const SPEND = {
   since: '2026-10-24T21:11:00Z',

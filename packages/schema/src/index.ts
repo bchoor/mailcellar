@@ -21,6 +21,15 @@ export function mailboxName(user: UserId, mailbox = 'default'): string {
   return `${user}:${mailbox}`;
 }
 
+function accountPrefix(user: UserId, account: string): string {
+  if (!SAFE_ID.test(account)) throw new Error('invalid account');
+  return `u/${user}/a/${account}/`;
+}
+function safeMonth(month: string): string {
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new Error('invalid month');
+  return month;
+}
+
 /** R2 keys, all under the user's own prefix. */
 export const r2Keys = {
   prefix: (user: UserId) => `u/${user}/`,
@@ -34,6 +43,24 @@ export const r2Keys = {
     if (!SAFE_ID.test(account) || !SAFE_ID.test(batch)) throw new Error('invalid queue key');
     return `u/${user}/a/${account}/basin-queue/${batch}.json.gz`;
   },
+  /** One lane's progress copying a month (JSON): the copy path keeps its state here, not in a Durable Object. */
+  lane: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}lanes/${safeMonth(month)}.json`,
+  lanes: (user: UserId, account: string) => `${accountPrefix(user, account)}lanes/`,
+  /** One Gmail batch of raw mail, the messages end to end; Basin keeps each one's offset and length. */
+  pack: (user: UserId, account: string, month: string, name: string) => {
+    if (!SAFE_ID.test(name)) throw new Error('invalid pack name');
+    return `${accountPrefix(user, account)}packs/${safeMonth(month)}/${name}.raw`;
+  },
+  /** Basin rows a lane run copied, waiting for the account's committer (JSON). */
+  staged: (user: UserId, account: string, month: string, run: string) => {
+    if (!SAFE_ID.test(run)) throw new Error('invalid staged name');
+    return `${accountPrefix(user, account)}staged/${safeMonth(month)}_${run}.json`;
+  },
+  stagedPrefix: (user: UserId, account: string, month?: string) => `${accountPrefix(user, account)}staged/${month ? `${safeMonth(month)}_` : ''}`,
+  /** The message IDs a month has in Basin, written when it lands: what copying it again skips. */
+  copied: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}copied/${safeMonth(month)}.json`,
+  /** Which run is the account's Basin committer, and when it last checked in. */
+  committer: (user: UserId, account: string) => `${accountPrefix(user, account)}committer.json`,
   attachment: (user: UserId, sha256: string) => {
     if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error('invalid sha256');
     return `u/${user}/att/${sha256}`;

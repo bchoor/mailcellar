@@ -14,12 +14,13 @@ export interface FakeMessage {
 
 const tsOf = (m: FakeMessage) => m.ts ?? Date.UTC(2024, 0, 1) + Number.parseInt(m.id, 16) * 1000;
 
-/** The messages a search matches: only `after:` and `before:` in Unix seconds are understood. */
+/** The messages a search matches: only `after:` and `before:` in Unix seconds, and `larger:` in bytes, are understood. */
 function search(mail: FakeMessage[], q: string | null) {
   if (!q) return mail;
   const after = Number(q.match(/after:(\d+)/)?.[1] ?? -Infinity);
   const before = Number(q.match(/before:(\d+)/)?.[1] ?? Infinity);
-  return mail.filter((m) => tsOf(m) / 1000 > after && tsOf(m) / 1000 < before);
+  const larger = Number(q.match(/larger:(\d+)/)?.[1] ?? -1);
+  return mail.filter((m) => tsOf(m) / 1000 > after && tsOf(m) / 1000 < before && m.raw.length > larger);
 }
 
 export function fakeRaw(i: number, opts: { subject?: string; from?: string; attachments?: number; pad?: number } = {}) {
@@ -41,8 +42,11 @@ export function fakeRaw(i: number, opts: { subject?: string; from?: string; atta
 export const fakeMessages = (n: number, from = 1): FakeMessage[] =>
   Array.from({ length: n }, (_, k) => ({ id: (0x1000 + from + k).toString(16), raw: fakeRaw(from + k) }));
 
-/** Install the fake. `opts.fail` answers a batch part with that status, once per message ID. */
-export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; historyAdded?: string[]; failOnce?: Record<string, number>; tokenError?: string } = {}) {
+/**
+ * Install the fake. `opts.failOnce` answers a batch part with that status, once per message ID;
+ * a 403 says rateLimitExceeded, as Gmail's rate limit does, unless `refuse403` is set.
+ */
+export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; historyAdded?: string[]; failOnce?: Record<string, number>; tokenError?: string; refuse403?: boolean } = {}) {
   const calls: string[] = [];
   const failed = new Set<string>();
   const byId = new Map(mail.map((m) => [m.id, m]));
@@ -69,6 +73,7 @@ export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; histor
       return Response.json({ history: (opts.historyAdded ?? []).map((id) => ({ messagesAdded: [{ message: { id } }] })), historyId: '200' });
     if (u.pathname === '/batch/gmail/v1') {
       const ids = [...String(init?.body).matchAll(/messages\/([0-9a-f]+)\?format=(raw|minimal)/g)].map((m) => [m[1], m[2]]);
+      calls.push(`get ${ids[0]?.[1]} ${ids.length}`);
       const parts = ids.map(([id, format]) => {
         const m = byId.get(id);
         if (format === 'minimal')
@@ -81,7 +86,7 @@ export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; histor
         if (fail && !failed.has(id)) {
           failed.add(id);
           status = fail;
-          body = '{"error":{}}';
+          body = fail === 403 && !opts.refuse403 ? '{"error":{"code":403,"errors":[{"reason":"rateLimitExceeded"}]}}' : '{"error":{}}';
         }
         return `--batch_x\r\nContent-Type: application/http\r\nContent-ID: <response-${id}>\r\n\r\nHTTP/1.1 ${status} X\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${body}\r\n`;
       });

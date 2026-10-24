@@ -45,8 +45,11 @@ export interface SyncState {
   lanes?: string[];
 }
 
-/** Backfill months copied at once, each by its own chain of runs (Workers Free runs 100 Workflows at once per account). */
-export const MAX_LANES = 8;
+/**
+ * Backfill months copied at once, each by its own chain of runs. They share one Gmail rate, so
+ * more lanes don't copy faster; three keep it busy (backfill speed plan v4).
+ */
+export const MAX_LANES = 3;
 /** A lane that hasn't saved for this long has died, and is started again where it stood. */
 export const LANE_STALE_MS = 10 * 60_000;
 
@@ -97,8 +100,17 @@ export interface SyncParams {
    * them, since the analytics token can't.
    */
   names?: Record<string, string>;
-  /** Copy this backfill month: one lane of a parallel backfill (its state is the account DO's `lane:<month>`). */
+  /** Copy this backfill month: one lane of a parallel backfill (its progress is an R2 file, r2Keys.lane). */
   month?: string;
+  /** Commit what the account's lanes staged to Basin, and land the months that are all there. */
+  commit?: boolean;
+  /**
+   * Copy one month as a test: queue it and resume backfill, only if no other month of any of the
+   * user's accounts is waiting or being copied. The answer lists those months if there are any.
+   */
+  trial?: string;
+  /** Pause the user's backfill (as the person's pause). */
+  pause?: boolean;
   /** Build the search index for this month from Basin, once the month has landed there. */
   index?: string;
   /** Where an index build resumes: rows of the month already done. */
