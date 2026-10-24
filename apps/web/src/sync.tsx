@@ -182,7 +182,7 @@ const indexing = (m: MonthCoverage) => m.landed && m.indexed < m.inBasin;
 
 /** A month's state on the map: Copying while a lane copies it, then Indexing until search has it all. */
 function monthState(m: MonthCoverage, copying: string[]): CoverageFact['state'] {
-  if (copying.includes(m.month) || m.state === 'running') return 'running';
+  if (m.state === 'running' || (copying.includes(m.month) && m.state !== 'canceled')) return 'running';
   if (m.state === 'queued' || m.state === 'failed') return m.state;
   if (indexing(m)) return 'indexing';
   // Done, canceled or untouched: it shows by what is copied (a canceled month with nothing is Missing).
@@ -402,6 +402,8 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   /** The action in flight ('clear', 'pause', or a month), and what the last one did. */
   const [inFlight, setInFlight] = useState<string | null>(null);
   const [said, setSaid] = useState<string | null>(null);
+  /** Months stopped here that a lane may still hold; they show Stopping until it lets go. */
+  const [stopped, setStopped] = useState<string[]>([]);
   const act = async (key: string, fn: () => Promise<string | null>) => {
     setInFlight(key);
     setSaid(null);
@@ -418,6 +420,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
       await refresh();
       if (!res.ok) return null;
       const { changed } = (await res.json()) as { changed: number };
+      setStopped((s) => [...s, ...(months ?? copying)]);
       return months ? `${monthName(months[0])} taken out. Copied mail stays.` : `${fmt(changed)} month${changed === 1 ? '' : 's'} cleared. Copied mail stays.`;
     });
   const sync = useSync();
@@ -447,7 +450,14 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   if (!data) return <p className="text-sm text-muted-foreground">Loading…</p>;
   // Newest first, as the backfill copies them.
   const months = [...data.months].sort((a, b) => b.month.localeCompare(a.month));
-  const now = months.filter((m) => copying.includes(m.month) || m.state === 'running');
+  // A stopped month leaves Copying now once its lane lets go; until then it shows Stopping.
+  const stopping = (m: MonthCoverage) => m.state === 'canceled' || stopped.includes(m.month);
+  const held = months.filter((m) => copying.includes(m.month) || m.state === 'running');
+  const now = held.filter((m) => !stopping(m));
+  const halting = held.filter(stopping);
+  // Forget a stop once its lane let go, so the month can be queued and copied again.
+  const gone = stopped.filter((s) => !held.some((m) => m.month === s));
+  if (gone.length) setStopped((s) => s.filter((x) => !gone.includes(x)));
   const next = months.filter((m) => m.state === 'queued' && !copying.includes(m.month));
   const failed = months.filter((m) => m.state === 'failed');
   // Months finished today in the person's time zone, latest first.
@@ -457,7 +467,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
     .sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!));
   const busy = [...now, ...next];
   const toCopy = busy.reduce((n, m) => n + left(m), 0);
-  if (!busy.length && !failed.length && !done.length)
+  if (!busy.length && !halting.length && !failed.length && !done.length)
     return (
       <div className="flex flex-col gap-1 text-sm">
         {said && <span className="text-xs text-gain">{said}</span>}
@@ -498,10 +508,13 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
           ))}
         </BackfillSection>
       )}
-      {now.length > 0 && (
+      {held.length > 0 && (
         <BackfillSection title="Copying now" count={now.length}>
           {now.map((m) => (
             <BackfillRow key={m.month} m={m} note={each ? `${duration(left(m) / each)} left` : undefined} action={{ label: 'Stop', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) }} />
+          ))}
+          {halting.map((m) => (
+            <BackfillRow key={m.month} m={m} note="Stopping…" action={{ label: 'Stop', busy: true, run: () => {} }} />
           ))}
         </BackfillSection>
       )}
