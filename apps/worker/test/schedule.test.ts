@@ -193,6 +193,20 @@ describe('Backfill by month', () => {
     expect(await retry.json()).toEqual({ changed: 2 });
     expect((await api(`/api/accounts/${id}/jobs/999/cancel`, { method: 'POST' })).status).toBe(404);
   });
+
+  it('AC-UNQ1 takes picked months out of the queue, or clears it, and leaves done months alone', async () => {
+    const { api, id, user } = await withAccount();
+    const box = accountMailbox(env, user, id);
+    await box.queueMonths(['2024-01', '2024-02', '2024-03'], 'Picked months');
+    const post = (body: unknown) => api(`/api/accounts/${id}/backfill/cancel`, { method: 'POST', body: JSON.stringify(body) });
+    expect((await post({ months: ['2024-13'] })).status).toBe(400);
+    expect(await (await post({ months: ['2024-02'] })).json()).toMatchObject({ changed: 1 });
+    const left = (await (await api(`/api/accounts/${id}/coverage`)).json()) as AccountCoverage;
+    expect(left.months.filter((m) => m.state === 'queued').map((m) => m.month)).toEqual(['2024-01', '2024-03']);
+    expect(await (await post({})).json()).toMatchObject({ changed: 2 });
+    expect(await (await post({})).json()).toMatchObject({ changed: 0 });
+    expect((await api(`/api/accounts/a${'x'.repeat(22)}/backfill/cancel`, { method: 'POST', body: '{}' })).status).toBe(404);
+  });
 });
 
 describe('Pausing backfill', () => {

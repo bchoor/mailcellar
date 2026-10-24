@@ -1,19 +1,20 @@
 // The backfill: each Gmail account's sync (/api/sync), on the Backfill page and in the status bar,
 // and its coverage map: one line per year, one block per month, from Gmail's exact count for the
-// month (the census) and what MailCellar has copied. Pick months there, or a preset, to copy them.
+// month (the census) and what MailCellar has copied. Pick months there, or select them with a
+// preset, then Start backfill; picked queued months can be taken back out.
 // Everything shown is what the sync state says now; nothing is estimated.
 import {
   ErrorLine, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow,
-  type CoverageData, type CoveragePick, type FilterToken, type ScheduleRun,
+  type CoverageData, type CoverageFact, type CoveragePick, type FilterToken, type ScheduleRun,
 } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Progress } from '@columenlabs/lumen-ui/ui/progress';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
 import { addMonths, monthRange, type AccountCoverage, type BackfillJob, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListPlusIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, RefreshCwIcon, XIcon } from 'lucide-react';
 import { useState } from 'react';
 import { EmptyState } from './archive';
 import { AccountLimits, AccountLimitsTools } from './quota';
@@ -171,13 +172,33 @@ function useCoverage(id: string) {
     },
     refetchInterval: (q: { state: { data?: AccountCoverage } }) => {
       const d = q.state.data;
-      return d && (d.census.status === 'counting' || d.months.some((m) => m.state === 'queued' || m.state === 'running')) ? 15_000 : false;
+      return d && (d.census.status === 'counting' || d.months.some((m) => busyMonth(m) || indexing(m))) ? 15_000 : false;
     },
   };
 }
 
+/** A month copied to Basin whose search index is still being built from it. */
+const indexing = (m: MonthCoverage) => m.landed && m.indexed < m.inBasin;
+
+/** A month's state on the map: Copying while a lane copies it, then Indexing until search has it all. */
+function monthState(m: MonthCoverage, copying: string[]): CoverageFact['state'] {
+  if (copying.includes(m.month) || m.state === 'running') return 'running';
+  if (m.state === 'queued' || m.state === 'failed') return m.state;
+  if (indexing(m)) return 'indexing';
+  // Done, canceled or untouched: it shows by what is copied (a canceled month with nothing is Missing).
+  return undefined;
+}
+
+/** A backfill error in a few words for the map's tooltip; the Backfills list keeps the full text. */
+function shortError(e: string): string {
+  if (/HTTP 429|rate ?limit/i.test(e)) return 'Gmail rate limit';
+  if (/HTTP 403/.test(e)) return 'Gmail refused (403)';
+  if (/HTTP 5\d\d/.test(e)) return 'Gmail unavailable';
+  return e.length > 40 ? `${e.slice(0, 39)}…` : e;
+}
+
 /** Coverage as map facts: a month shows once Gmail's count for it is known or a backfill touched it. */
-const facts = (id: string, email: string) => (c: AccountCoverage): CoverageData => ({
+const facts = (id: string, email: string, copying: string[]) => (c: AccountCoverage): CoverageData => ({
   facts: c.months
     .filter((m) => m.gmail !== null || m.state)
     .map((m) => ({
@@ -185,13 +206,15 @@ const facts = (id: string, email: string) => (c: AccountCoverage): CoverageData 
       period: m.month,
       have: m.copied,
       expected: m.gmail ?? 0,
-      // A canceled month is missing again: it shows by what is copied, never as Canceled.
-      state: m.state === 'done' || m.state === 'canceled' || m.state === null ? undefined : m.state,
-      note: m.error ?? undefined,
+      state: monthState(m, copying),
+      note: [m.landed && m.indexed < m.copied ? `${fmt(m.indexed)} searchable` : null, m.error ? `Failed: ${shortError(m.error)}` : null].filter(Boolean).join(' · ') || undefined,
     })),
   rows: [{ row: id, label: email }],
   current: c.current,
 });
+
+/** The map's words for its states. */
+const STATE_LABELS = { running: 'Copying' } as const;
 
 const busyMonth = (m: MonthCoverage) => m.state === 'queued' || m.state === 'running';
 
@@ -239,21 +262,38 @@ function censusHint(c: AccountCoverage | undefined): string | null {
   return null;
 }
 
-/** One account's coverage map: pick months (click, shift-click a range) or a preset to copy them. */
-function AccountCoverageMap({ id, email, basin }: { id: string; email: string; basin: boolean }) {
+/**
+ * One account's coverage map: pick months (click, shift-click a range, or Select months), then
+ * Start backfill, or Remove from queue for queued ones. Nothing starts from a pick alone.
+ */
+function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; email: string; basin: boolean; rate: number | null; copying: string[] }) {
   const client = useQueryClient();
   const source = useCoverage(id);
   const { data } = useQuery(source);
   const [error, setError] = useState<string | null>(null);
-  const queue = async (months: string[], label: string) => {
-    if (!months.length) return setError('Nothing to queue: those months are copied, queued or empty.');
-    setError(await queueBackfill(id, months, label));
-    await Promise.all(['coverage', 'jobs', 'sync'].map((k) => client.invalidateQueries({ queryKey: k === 'sync' ? ['sync'] : [k, id] })));
+  const [preselect, setPreselect] = useState<CoveragePick>();
+  const refresh = () => Promise.all(['coverage', 'jobs', 'sync'].map((k) => client.invalidateQueries({ queryKey: k === 'sync' ? ['sync'] : [k, id] })));
+  const month = (key: string) => data?.months.find((x) => x.month === key);
+  const queue = async (months: string[]) => {
+    setError(await queueBackfill(id, months, 'Picked months'));
+    await refresh();
   };
+  /** Take months out of the queue, or every queued month. Mail already copied stays. */
+  const unqueue = async (months?: string[]) => {
+    const res = await fetch(`/api/accounts/${id}/backfill/cancel`, { method: 'POST', body: JSON.stringify(months ? { months } : {}) });
+    setError(res.ok ? null : `Not removed (${res.status})`);
+    await refresh();
+  };
+  const select = (months: string[]) => {
+    setError(months.length ? null : 'Nothing to select: those months are copied, queued or empty.');
+    setPreselect([{ row: id, months }]);
+  };
+  const anyQueued = !!data?.months.some(busyMonth);
   return (
     <div className="flex flex-col gap-2">
       <LumenCoverageMap
-        source={{ ...source, select: facts(id, email) }}
+        source={{ ...source, select: facts(id, email, copying) }}
+        stateLabels={STATE_LABELS}
         title={`${email} by month`}
         icon={CalendarRangeIcon}
         rows={{ title: 'Year' }}
@@ -261,26 +301,40 @@ function AccountCoverageMap({ id, email, basin }: { id: string; email: string; b
         unit="messages"
         summary={['complete', 'counts']}
         select={basin ? 'backfill' : undefined}
-        selectable={(_row, month) => {
-          const m = data?.months.find((x) => x.month === month);
+        selectable={(_row, key) => {
+          const m = month(key);
           return !!m && m.gmail !== null && m.gmail > 0 && !busyMonth(m);
         }}
-        onQueue={(pick: CoveragePick) => queue(pick.flatMap((p) => p.months), 'Picked months')}
-        hint={censusHint(data)}
+        onQueue={(pick: CoveragePick) => queue(pick.flatMap((p) => p.months))}
+        queueLabel="Start backfill"
+        pickNote={(pick: CoveragePick) => {
+          const n = pick.flatMap((p) => p.months).reduce((t, key) => t + (month(key) ? left(month(key)!) : 0), 0);
+          return `${fmt(n)} messages · ${rate ? `${duration(n / rate)} at ${fmt(Math.round(rate))} a minute` : 'time shows once copying runs'}`;
+        }}
+        removable={(_row, key) => {
+          const m = month(key);
+          return !!m && busyMonth(m);
+        }}
+        onRemove={(pick: CoveragePick) => unqueue(pick.flatMap((p) => p.months))}
+        preselect={preselect}
+        hint={censusHint(data) ?? 'Click a month, shift-click for a range. Nothing starts until Start backfill.'}
         tools={
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm" disabled={!basin || !data}>
-                <ListPlusIcon /> Queue backfill <ChevronDownIcon />
+                <ListTodoIcon /> Select months <ChevronDownIcon />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Copy</DropdownMenuLabel>
               {PRESETS.map((p) => (
-                <DropdownMenuItem key={p.id} onSelect={() => data && queue(presetMonths(data, p.id), p.label)}>
+                <DropdownMenuItem key={p.id} onSelect={() => data && select(presetMonths(data, p.id))}>
                   {p.label}
                 </DropdownMenuItem>
               ))}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={!anyQueued} onSelect={() => void unqueue()}>
+                <ListXIcon /> Clear queue
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         }
@@ -300,7 +354,7 @@ const JOB_STATUS: Record<BackfillJob['status'], { label: string; variant: 'defau
   running: { label: 'Copying', variant: 'default' },
   done: { label: 'Done', variant: 'secondary' },
   failed: { label: 'Failed', variant: 'destructive' },
-  canceled: { label: 'Canceled', variant: 'outline' },
+  canceled: { label: 'Removed', variant: 'outline' },
 };
 
 /** An account's latest backfills, with Cancel and Retry. */
@@ -320,7 +374,7 @@ function Jobs({ id }: { id: string }) {
     await Promise.all([client.invalidateQueries({ queryKey: ['jobs', id] }), client.invalidateQueries({ queryKey: ['coverage', id] }), client.invalidateQueries({ queryKey: ['sync'] })]);
   };
   if (error) return <ErrorLine error={error} />;
-  if (!data?.length) return <p className="text-sm text-muted-foreground">No backfills yet. Pick months on the map, or use Queue backfill.</p>;
+  if (!data?.length) return <p className="text-sm text-muted-foreground">No backfills yet. Pick months on the map, or use Select months.</p>;
   return (
     <ul className="flex flex-col divide-y text-sm">
       {data.map((j) => {
@@ -334,11 +388,13 @@ function Jobs({ id }: { id: string }) {
             <span className="tabular-nums text-muted-foreground">
               {fmt(j.months.done)} of {fmt(total)} months
               {j.months.failed ? ` · ${fmt(j.months.failed)} failed` : ''}
-              {j.months.canceled ? ` · ${fmt(j.months.canceled)} canceled` : ''}
+              {j.months.canceled ? ` · ${fmt(j.months.canceled)} removed` : ''}
             </span>
             <span className="ml-auto flex gap-2">
               {(j.months.queued > 0 || j.months.running > 0) && (
-                <Button variant="ghost" size="sm" onClick={() => act(j.id, 'cancel')}>Cancel</Button>
+                <Button variant="outline" size="sm" onClick={() => act(j.id, 'cancel')}>
+                  <XIcon /> Cancel
+                </Button>
               )}
               {(j.months.failed > 0 || j.months.canceled > 0) && (
                 <Button variant="outline" size="sm" onClick={() => act(j.id, 'retry')}>Retry</Button>
@@ -378,7 +434,7 @@ function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview[
       return Object.fromEntries(all);
     },
     refetchInterval: (q: { state: { data?: Record<string, AccountCoverage> } }) =>
-      Object.values(q.state.data ?? {}).some((c) => c.census.status === 'counting' || c.months.some(busyMonth)) ? 15_000 : false,
+      Object.values(q.state.data ?? {}).some((c) => c.census.status === 'counting' || c.months.some((m) => busyMonth(m) || indexing(m))) ? 15_000 : false,
   };
   return (
     <div className="flex flex-col gap-2">
@@ -386,7 +442,7 @@ function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview[
         source={{
           ...source,
           select: (all): CoverageData => {
-            const per = accounts.map((a) => (all[a.id] ? facts(a.id, a.email)(all[a.id]) : { facts: [], rows: [] }));
+            const per = accounts.map((a) => (all[a.id] ? facts(a.id, a.email, a.sync.months)(all[a.id]) : { facts: [], rows: [] }));
             return {
               facts: per.flatMap((p) => p.facts),
               rows: accounts.map((a) => ({
@@ -399,6 +455,7 @@ function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview[
           },
         }}
         title="All mailboxes by month"
+        stateLabels={STATE_LABELS}
         icon={CalendarRangeIcon}
         rows={{ title: 'Mailbox' }}
         block="month"
@@ -512,7 +569,7 @@ export function BackfillPage() {
                 id: 'map', title: 'By month', kind: 'own' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountCoverageMap key={a.id} id={a.id} email={a.email} basin={data.basin} />;
+                  return <AccountCoverageMap key={a.id} id={a.id} email={a.email} basin={data.basin} rate={a.sync.ratePerMin} copying={a.sync.months} />;
                 },
               },
               {

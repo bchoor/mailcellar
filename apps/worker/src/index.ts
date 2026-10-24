@@ -120,6 +120,23 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     if ('error' in r) return Response.json({ error: r.error }, { status: r.error === 'not_found' ? 404 : 409, headers: noStore });
     return Response.json({ ...r, jobs: await mailbox.jobs(backfill[1]) }, { headers: noStore });
   }
+  const unqueue = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/backfill\/cancel$/);
+  if (unqueue && request.method === 'POST') {
+    // Take months out of the queue: {"months": ["2024-01", ...]}, or {} for all of them.
+    const text = await request.text();
+    if (text.length > 16_384) return Response.json({ error: 'too_large' }, { status: 413 });
+    let body: { months?: unknown };
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      return Response.json({ error: 'bad_json' }, { status: 400 });
+    }
+    const months = body.months;
+    if (months !== undefined && (!Array.isArray(months) || months.length > 1000 || !months.every((m) => typeof m === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(m))))
+      return Response.json({ error: 'bad_months' }, { status: 400 });
+    const r = await mailbox.unqueue(unqueue[1], (months as string[] | undefined) ?? null);
+    return r ? Response.json({ ...r, jobs: await mailbox.jobs(unqueue[1]) }, { headers: noStore }) : Response.json({ error: 'not_found' }, { status: 404 });
+  }
   const jobs = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/jobs$/);
   if (jobs && request.method === 'GET') {
     const list = await mailbox.jobs(jobs[1]);
