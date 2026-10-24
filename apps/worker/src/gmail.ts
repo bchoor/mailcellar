@@ -82,12 +82,14 @@ export async function addedSince(token: string, startHistoryId: string) {
 /**
  * Get up to BATCH_SIZE messages in one request. Returns what came back and the IDs that
  * failed with a retryable status; a message deleted in the meantime (404) is dropped.
+ * `throttled` counts messages Gmail turned away for speed (retried, not a reason to slow down),
+ * and `reason` is the first one's message, to tell concurrency from quota.
  */
 export async function batchGet<F extends 'minimal' | 'raw'>(
   token: string,
   ids: string[],
   format: F,
-): Promise<{ messages: (F extends 'raw' ? RawMessage : MinimalMessage)[]; retry: string[]; throttled: boolean }> {
+): Promise<{ messages: (F extends 'raw' ? RawMessage : MinimalMessage)[]; retry: string[]; throttled: number; reason?: string }> {
   const boundary = `mc${crypto.randomUUID().replaceAll('-', '')}`;
   const body =
     ids
@@ -107,7 +109,8 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
   const messages = [];
   const got = new Set<string>();
   const retry: string[] = [];
-  let throttled = false;
+  let throttled = 0;
+  let reason: string | undefined;
   for (const p of parts) {
     const id = p.contentId?.replace(/^response-/, '');
     if (!id) continue;
@@ -115,13 +118,23 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
     if (p.status === 200) messages.push(JSON.parse(p.body));
     else if (p.status === 429 || (p.status === 403 && rateLimited(p.body))) {
       retry.push(id);
-      throttled = true;
+      throttled++;
+      reason ??= errorMessage(p.body);
     } else if (p.status >= 500) retry.push(id);
     else if (p.status !== 404) throw new GmailError(p.status, `Gmail message fetch failed (HTTP ${p.status})`);
   }
   for (const id of ids) if (!got.has(id)) retry.push(id);
-  return { messages, retry, throttled };
+  return { messages, retry, throttled, reason };
 }
+
+/** Gmail's error message from a JSON error body, else the body's start. */
+const errorMessage = (body: string): string => {
+  try {
+    return String(JSON.parse(body).error?.message ?? body).slice(0, 120);
+  } catch {
+    return body.slice(0, 120);
+  }
+};
 
 /** A 403 that is Gmail's rate limit (rateLimitExceeded, userRateLimitExceeded), not access refused. */
 export const rateLimited = (body: string) => /rate ?limit/i.test(body);

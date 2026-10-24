@@ -38,10 +38,12 @@ import {
   withRecent,
   LANE_STALE_MS,
   mailboxName,
+  r2Keys,
+  type SyncParams,
 } from '@mailcellar/schema';
 import type { Env } from './env';
 import { accountMailbox, accessToken, BasinNotReady, launchLanes, runDied, syncDeps } from './sync';
-import { BUCKET, freshLane, readLane, saveLane } from './copy';
+import { BUCKET, FLIGHT, freshLane, readLane, saveLane } from './copy';
 import { GmailError } from './gmail';
 import { accountQuota } from './quota';
 
@@ -361,6 +363,8 @@ export class MailboxDO extends DurableObject<Env> {
    * (copy.ts); this writes a row only when a month starts or ends. Returns each lane to start.
    */
   async claimLanes(user: UserId, account: string, max: number): Promise<{ month: string; runId: string }[]> {
+    this.laneUser = user;
+    this.laneAccount = account;
     const sql = this.ctx.storage.sql;
     const now = Date.now();
     const id = (month: string) => `${account}-${month}-${now.toString(36)}`;
@@ -419,6 +423,22 @@ export class MailboxDO extends DurableObject<Env> {
     return out;
   }
 
+  /** Whose account this object is, as lanes and the user's object tell it (to find lane files). */
+  private laneUser: UserId | null = null;
+  private laneAccount: string | null = null;
+  /** Workflow runs to start from the alarm: one started there begins a fresh request chain. */
+  private launches: { id: string; params: SyncParams }[] = [];
+
+  /**
+   * Start a run from this object's alarm instead of from the run before it. Workers counts a
+   * run started by a run as nested in it, and refuses R2 and DO calls about ten deep, so a chain
+   * of runs that start each other dies after about ten. Costs one alarm (a row write) a run.
+   */
+  async launchLater(id: string, params: SyncParams): Promise<void> {
+    this.launches.push({ id, params });
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
   /** Nothing is queued that a lane isn't copying; reset whenever a month is queued. */
   private noneQueued = false;
   /** Backfill months waiting or being copied, by state; read once, then kept with every change. */
@@ -428,7 +448,9 @@ export class MailboxDO extends DurableObject<Env> {
   /** Copy-rate samples (total copied over time), in memory only. */
   private samples: { at: string; copied: number }[] = [];
   /** Gmail pacing for this account, msgvault's way: a token bucket that halves on a rate limit and recovers. */
-  private bucket = { level: BUCKET.cap, at: 0, rate: BUCKET.rate, slowUntil: 0 };
+  private bucket = { level: BUCKET.cap, at: 0, rate: BUCKET.rate, calmAt: 0 };
+  /** Lanes with a batch in flight, until their next turn (or 30 s, if a run died mid-batch). */
+  private flight = new Map<string, number>();
   private access: { token: string; until: number } | null = null;
 
   private activeMonths(): Map<string, PartState> {
@@ -452,10 +474,10 @@ export class MailboxDO extends DurableObject<Env> {
     const b = this.bucket;
     if (throttled) {
       b.rate = Math.max(BUCKET.min, b.rate / 2);
-      b.slowUntil = now + BUCKET.slowMs;
-    } else if (b.rate < BUCKET.rate && now >= b.slowUntil) {
-      b.rate = Math.min(BUCKET.rate, b.rate * 2);
-      b.slowUntil = now + BUCKET.slowMs;
+      b.calmAt = now + BUCKET.calmMs;
+    } else if (b.rate < BUCKET.rate && now >= b.calmAt) {
+      b.rate = Math.min(BUCKET.rate, b.rate + BUCKET.step);
+      b.calmAt = now + BUCKET.calmMs;
     }
     b.level = Math.min(BUCKET.cap, b.level + (b.at ? ((now - b.at) / 1000) * b.rate : 0));
     b.at = now;
@@ -466,10 +488,16 @@ export class MailboxDO extends DurableObject<Env> {
   /**
    * A lane's turn before each Gmail batch, answered from memory: an access token, whether the
    * month is still queued, and how long to wait for Gmail's rate. It records what the lane has
-   * copied, for the page. Reads no rows (job months are read once, then kept).
+   * copied, for the page. Reads no rows (job months are read once, then kept). A turn ends the
+   * lane's last batch; one with units starts the next, unless FLIGHT batches are already out
+   * (then `busy`: ask again after waitMs).
    */
-  async laneTurn(t: { user: UserId; account: string; month: string; runId: string; units: number; throttled: boolean; copied: number; bytes: number }): Promise<{ token: string | null; active: boolean; waitMs: number; error?: string }> {
+  async laneTurn(t: { user: UserId; account: string; month: string; runId: string; units: number; throttled: boolean; copied: number; bytes: number }): Promise<{ token: string | null; active: boolean; waitMs: number; busy?: boolean; error?: string }> {
     const now = Date.now();
+    this.laneUser = t.user;
+    this.laneAccount = t.account;
+    this.flight.delete(t.month);
+    for (const [month, until] of this.flight) if (until < now) this.flight.delete(month);
     const active = this.activeMonths().get(t.month) === 'running';
     const before = this.live.get(t.month);
     this.live.set(t.month, { at: now, runId: t.runId, copied: t.copied, bytes: t.bytes });
@@ -485,6 +513,11 @@ export class MailboxDO extends DurableObject<Env> {
         throw e;
       }
     }
+    if (t.units && this.flight.size >= FLIGHT) {
+      if (t.throttled) this.pace(0, true, now);
+      return { token: this.access.token, active, waitMs: 250, busy: true };
+    }
+    if (t.units) this.flight.set(t.month, now + 30_000);
     return { token: this.access.token, active, waitMs: this.pace(t.units, t.throttled, now) };
   }
 
@@ -663,12 +696,48 @@ export class MailboxDO extends DurableObject<Env> {
   /** Each month's Gmail count, copied count and latest backfill state, oldest first. */
   async coverageMonths(): Promise<MonthCoverage[]> {
     const months = structuredClone(this.keep('coverage', () => this.readCoverage()));
+    await this.liveFromFiles();
     // Lanes report what they've copied from memory; a month shows it until it lands.
     for (const m of months) {
       const l = this.live.get(m.month);
       if (l) m.copied = Math.max(m.copied, m.inBasin + l.copied);
     }
     return months;
+  }
+
+  /** A lane not heard from since this object started (its run died, or the object restarted): its progress from its R2 file. */
+  private async liveFromFiles(): Promise<void> {
+    const user = this.laneUser;
+    if (!user) return;
+    for (const month of this.lanes().keys()) {
+      if (this.live.has(month)) continue;
+      const got = await readLane(this.env, user, this.laneAccount!, month);
+      this.live.set(month, { at: got ? Date.parse(got.p.updatedAt) : 0, runId: got?.p.runId ?? '', copied: got?.p.copied ?? 0, bytes: got?.p.bytes ?? 0 });
+    }
+  }
+
+  /**
+   * Take lanes off months that were stopped. What they copied is counted for the month (the
+   * committer still adds their staged rows to Basin), so a month queued again skips it.
+   */
+  private async stopLanes(months: string[]): Promise<void> {
+    const user = this.laneUser;
+    const stopped = months.filter((m) => this.lanes().has(m));
+    if (!stopped.length) return;
+    await this.liveFromFiles();
+    for (const month of stopped) {
+      const copied = this.live.get(month)?.copied ?? 0;
+      if (copied) {
+        const { rowsWritten } = this.ctx.storage.sql.exec(
+          `INSERT INTO basin_months (month, copied) VALUES (?, ?) ON CONFLICT (month) DO UPDATE SET copied = copied + excluded.copied`,
+          month, copied,
+        );
+        this.count({ do_rows_written: rowsWritten });
+      }
+      await this.endLane(month);
+      if (user) await this.env.ARCHIVE.delete(r2Keys.lane(user, this.laneAccount!, month));
+    }
+    this.kept.clear();
   }
 
   private readCoverage(): MonthCoverage[] {
@@ -764,10 +833,12 @@ export class MailboxDO extends DurableObject<Env> {
              AND month NOT IN (SELECT month FROM job_months WHERE state IN ('queued', 'running')) RETURNING month`,
             job,
           );
-    const changed = cursor.toArray().length;
+    const rows = cursor.toArray() as { month: string }[];
+    const changed = rows.length;
     if (changed) {
       this.changedMonths();
       this.count({ do_rows_written: cursor.rowsWritten });
+      if (action === 'cancel') await this.stopLanes(rows.map((r) => r.month));
     }
     return changed;
   }
@@ -778,10 +849,12 @@ export class MailboxDO extends DurableObject<Env> {
     const cursor = months
       ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') AND month IN (SELECT value FROM json_each(?)) RETURNING month`, JSON.stringify(months))
       : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') RETURNING month`);
-    const changed = cursor.toArray().length;
+    const rows = cursor.toArray() as { month: string }[];
+    const changed = rows.length;
     if (changed) {
       this.changedMonths();
       this.count({ do_rows_written: cursor.rowsWritten });
+      await this.stopLanes(rows.map((r) => r.month));
     }
     return changed;
   }
@@ -958,6 +1031,14 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** Gmail sync's scheduled run: start a sync for each account that isn't syncing already. */
   async alarm(): Promise<void> {
+    for (const l of this.launches.splice(0)) {
+      try {
+        await this.env.SYNC.create({ id: l.id, params: l.params });
+      } catch (e) {
+        // Already started (a retried hand-over): nothing to do.
+        if (!/already exists/i.test(String(e))) console.error('launch', l.id, e);
+      }
+    }
     const user = this.userId();
     if (!user) return;
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);

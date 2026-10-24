@@ -14,11 +14,18 @@ import { accountMailbox, basinRow, launchLanes, syncDeps } from './sync';
 
 /** Raw mail bigger than this is fetched alone; between MEDIUM and this, MEDIUM_BATCH at a time. */
 export const HUGE = 2 * 1024 * 1024;
+/** Raw mail a run copies before it stops fetching huge messages (the CPU budget may stop it sooner). */
+export const HUGE_RUN_BYTES = 60 * 1024 * 1024;
 export const MEDIUM = 128 * 1024;
-export const SMALL_BATCH = 50;
+export const SMALL_BATCH = 25;
 export const MEDIUM_BATCH = 8;
-/** Small batches fetched at once: two keep the bucket busy without crowding Gmail. */
-export const WAVE = 2;
+/**
+ * Small batches a lane fetches at once. Gmail runs a batch's gets side by side and turns away
+ * a user with too many at once, so one, and the mailbox lets FLIGHT run across its lanes.
+ */
+export const WAVE = 1;
+/** Batches in flight at once across an account's lanes (25 gets each; msgvault keeps 10 going). */
+export const FLIGHT = 2;
 /** Outside requests a lane run makes at most (Workers Free stops a run at 50). */
 export const LANE_CALLS = 40;
 /**
@@ -30,9 +37,10 @@ export const LANE_CPU_MS = 900;
 export const copyCpuMs = (bytes: number) => 0.8 + (bytes / 1024) * 0.01;
 /**
  * Gmail pacing per account, as msgvault does it: Gmail allows 250 units a second per user; the
- * bucket fills at 200 (40 messages a second), halves on a rate limit for a minute, then recovers.
+ * bucket fills at 200 (40 messages a second), halves on a rate limit, and after `calmMs` without
+ * one climbs back `step` at a time.
  */
-export const BUCKET = { cap: 250, rate: 200, min: 25, slowMs: 60_000 };
+export const BUCKET = { cap: 250, rate: 200, min: 25, step: 25, calmMs: 10_000 };
 /** Gmail quota units a message costs (messages.get). */
 export const UNITS = 5;
 /** A lane run's worst case, checked against the spend cap before it starts: every call a full batch of raw mail. */
@@ -121,7 +129,11 @@ export interface LaneStats {
   wallMs: number;
   gmailMs: number;
   waitMs: number;
+  /** Batches Gmail refused as a whole for speed: these slow the account down. */
   throttled: number;
+  /** Messages Gmail turned away inside a batch (retried in a later one), and the first one's reason. */
+  turnedAway: number;
+  reason?: string;
 }
 
 export interface LaneOptions {
@@ -162,7 +174,7 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
   const quota = accountQuota(env);
   if (await quota.overBudget(LANE_SPEND)) return stop('budget');
 
-  const stats: LaneStats = { month, copied: 0, bytes: 0, calls: 0, cpuEstMs: 0, wallMs: 0, gmailMs: 0, waitMs: 0, throttled: 0 };
+  const stats: LaneStats = { month, copied: 0, bytes: 0, calls: 0, cpuEstMs: 0, wallMs: 0, gmailMs: 0, waitMs: 0, throttled: 0, turnedAway: 0 };
   const turn = (units: number, throttled: boolean) =>
     mailbox.laneTurn({ user, account, month, runId, units, throttled, copied: p.copied + stats.copied, bytes: p.bytes + stats.bytes });
   const first = await turn(0, false);
@@ -202,25 +214,40 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
         putBack(p, wave.tier, wave.batches);
         break;
       }
-      const pace = await turn(UNITS * count, throttled);
+      let pace = await turn(UNITS * count, throttled);
       throttled = false;
+      // Other lanes have the account's batches in flight: wait for a free one (a while, then the next run).
+      for (let asks = 0; pace.active && pace.busy && asks < 40; asks++) {
+        stats.waitMs += pace.waitMs;
+        await scheduler.wait(pace.waitMs);
+        pace = await turn(UNITS * count, false);
+      }
       if (!pace.active) {
         putBack(p, wave.tier, wave.batches);
         return endUnqueued(env, user, account, p);
+      }
+      if (pace.busy) {
+        putBack(p, wave.tier, wave.batches);
+        break;
       }
       if (pace.waitMs) {
         stats.waitMs += pace.waitMs;
         await scheduler.wait(pace.waitMs);
       }
-      // A huge message is fetched alone and on its own, and noted first, so a run it kills doesn't repeat it.
+      // A huge message is fetched alone, and noted first, so a run it kills doesn't repeat it.
       if (wave.tier === 'huge') {
-        // Only as a run's first copy, so the note saved is the run's whole state: nothing copied is lost with it.
-        if (rows.length || stats.copied) {
+        if (stats.bytes >= HUGE_RUN_BYTES) {
           putBack(p, wave.tier, wave.batches);
           break;
         }
+        // Stage what the run copied so far, so the note saved is the run's whole state: nothing is lost with it.
+        if (rows.length) {
+          await env.ARCHIVE.put(r2Keys.staged(user, account, month, `${runId}-${p.packs}`), JSON.stringify(rows.splice(0)));
+          classA++;
+        }
         const id = wave.batches[0][0];
-        const marked = await saveLane(env, user, account, { ...p, huge: [id, ...p.huge], trying: id, updatedAt: new Date().toISOString() }, etag);
+        const note = { ...p, copied: p.copied + stats.copied, bytes: p.bytes + stats.bytes, huge: [id, ...p.huge], trying: id, updatedAt: new Date().toISOString() };
+        const marked = await saveLane(env, user, account, note, etag);
         if (!marked) return { ...none('replaced'), copied: stats.copied };
         etag = marked;
         classA++;
@@ -228,7 +255,7 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
       const t = Date.now();
       const results = await Promise.allSettled(
         wave.tier === 'huge'
-          ? [getRaw(token, wave.batches[0][0]).then((m) => ({ messages: m ? [m] : [], retry: [], throttled: false }))]
+          ? [getRaw(token, wave.batches[0][0]).then((m) => ({ messages: m ? [m] : [], retry: [], throttled: 0, reason: undefined }))]
           : wave.batches.map((ids) => batchGet(token, ids, 'raw')),
       );
       stats.gmailMs += Date.now() - t;
@@ -241,7 +268,8 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
           if (e instanceof GmailError && e.status === 429) throttled = true;
           continue;
         }
-        if (r.value.throttled) throttled = true;
+        stats.turnedAway += r.value.throttled;
+        stats.reason ??= r.value.reason;
         p.trying = null;
         putBack(p, wave.tier, [r.value.retry]);
         if (!r.value.messages.length) continue;
