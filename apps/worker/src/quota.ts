@@ -432,13 +432,15 @@ export class QuotaDO extends DurableObject<Env> {
   }
 
   /**
-   * Whether a batch costing `cost` fits under every hard limit's stop line. Null: go ahead. Else
-   * the first meter it would pass, and when that meter resets.
+   * Whether a batch costing `cost` fits under the stop line of each hard limit it uses. Null: go
+   * ahead. Else the first meter it would pass, and when that meter resets. A meter the batch
+   * doesn't use never stops it (copying uses no DO rows, so the DO's limits pause only indexing).
    */
   async reserve(cost: QuotaUse): Promise<{ metric: QuotaMetric; label: string; resumesAt: string } | null> {
     const now = new Date();
     await this.refresh(now);
     for (const m of metrics) {
+      if (!cost[m]) continue;
       const { limit, label, period, hard } = this.limits[m];
       if (hard && this.used(m, now).used + (cost[m] ?? 0) > limit * QUOTA_STOP)
         return { metric: m, label, resumesAt: quotaReset(period, now, this.billing(now)).toISOString() };
