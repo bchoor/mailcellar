@@ -99,6 +99,7 @@ describe('sync', () => {
     // The month landed: done, and its index build started.
     let [m] = await mailbox.coverageMonths();
     expect([m.state, m.inBasin, m.landed, m.indexed, m.copied]).toEqual(['done', 3, true, 0, 3]);
+    expect(Date.parse(m.finishedAt!)).toBeGreaterThan(Date.now() - 60_000);
     expect(launched.at(-1)).toMatchObject({ user, account, index: '2024-01' });
     expect(await runIndex(env, user, account, '2024-01')).toEqual({ indexed: 3, next: null, resumesAt: null });
     const rows = (await mailbox.archive('messages')) as { subject: string; labels: string[] }[];
@@ -250,6 +251,7 @@ describe('sync', () => {
     expect(await lane(user, account, '2024-01')).toMatchObject({ phase: 'error', more: false });
     const [m] = await mailbox.coverageMonths();
     expect([m.state, m.error]).toEqual(['failed', expect.stringMatching(/no longer accepts/)]);
+    expect(m.finishedAt).toEqual(expect.any(String));
     expect((await mailbox.jobList())[0].status).toBe('failed');
     expect(await mailbox.laneState('2024-01')).toBeNull();
   });

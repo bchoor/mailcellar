@@ -4,7 +4,7 @@
 // preset, then Start backfill; picked queued months can be taken back out.
 // Everything shown is what the sync state says now; nothing is estimated.
 import {
-  ErrorLine, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow,
+  ErrorLine, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow, usePrefs,
   type CoverageData, type CoverageFact, type CoveragePick, type FilterToken, type ScheduleRun,
 } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
@@ -353,7 +353,7 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
 const NEXT_SHOWN = 3;
 
 /** One month's row: its bar and messages copied, why it failed, and its one action. */
-function BackfillRow({ m, note, action }: { m: MonthCoverage; note?: string; action: { label: string; primary?: boolean; run: () => void } }) {
+function BackfillRow({ m, note, action }: { m: MonthCoverage; note?: string; action?: { label: string; primary?: boolean; run: () => void } }) {
   const total = m.gmail ?? 0;
   const pct = total ? Math.min(100, (m.copied / total) * 100) : 0;
   return (
@@ -366,9 +366,13 @@ function BackfillRow({ m, note, action }: { m: MonthCoverage; note?: string; act
           {note && <> · <span className={m.error ? 'text-loss' : undefined}>{note}</span></>}
         </span>
       </span>
-      <Button variant={action.primary ? 'default' : 'outline'} size="sm" className="w-full" onClick={action.run}>
-        {action.label}
-      </Button>
+      {action ? (
+        <Button variant={action.primary ? 'default' : 'outline'} size="sm" className="w-full" onClick={action.run}>
+          {action.label}
+        </Button>
+      ) : (
+        <span />
+      )}
     </li>
   );
 }
@@ -400,6 +404,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   };
   const sync = useSync();
   const paused = !!sync.data?.paused;
+  const { timeZone } = usePrefs();
   /** Pause or resume all backfill; nothing copies while paused. */
   const setPaused = async (to: boolean) => {
     const res = await fetch('/api/backfill/paused', { method: 'PUT', body: JSON.stringify({ paused: to }) });
@@ -418,9 +423,14 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   const now = months.filter((m) => copying.includes(m.month) || m.state === 'running');
   const next = months.filter((m) => m.state === 'queued' && !copying.includes(m.month));
   const failed = months.filter((m) => m.state === 'failed');
+  // Months finished today in the person's time zone, latest first.
+  const day = (iso: string) => new Date(iso).toLocaleDateString('en-CA', { timeZone });
+  const done = months
+    .filter((m) => m.state === 'done' && m.finishedAt && day(m.finishedAt) === day(new Date().toISOString()))
+    .sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!));
   const busy = [...now, ...next];
   const toCopy = busy.reduce((n, m) => n + left(m), 0);
-  if (!busy.length && !failed.length)
+  if (!busy.length && !failed.length && !done.length)
     return <p className="text-sm text-muted-foreground">Nothing queued. Pick months on the map, or use Select months.{paused ? ' Backfill is paused.' : ''}</p>;
   const each = rate && now.length ? rate / now.length : null;
   const rest = next.slice(NEXT_SHOWN);
@@ -475,6 +485,15 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
           )}
         </BackfillSection>
       )}
+      <BackfillSection title="Done today" count={done.length}>
+        {done.length ? (
+          done.map((m) => (
+            <BackfillRow key={m.month} m={m} note={new Date(m.finishedAt!).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone })} />
+          ))
+        ) : (
+          <li className="py-2 text-xs text-muted-foreground">No month finished yet today.</li>
+        )}
+      </BackfillSection>
       {problem && <ErrorLine error={new Error(problem)} />}
     </div>
   );
