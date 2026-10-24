@@ -105,7 +105,13 @@ export const MIGRATIONS: readonly string[] = [
   // paused; nothing copies until they resume it. A new mailbox starts unpaused.
   `INSERT INTO meta (key, value) SELECT 'backfill_paused', 'true' WHERE EXISTS (SELECT 1 FROM accounts)
    ON CONFLICT (key) DO NOTHING`,
+  // 8: the Senders and Domains pages sort by count; without an index each load read every row.
+  `CREATE INDEX senders_n ON senders (n);
+   CREATE INDEX domains_n ON domains (n);`,
 ];
+
+/** How long a kept page answer may lag the writes behind it, in ms. Tests set it to 0. */
+export const keepFor = { ms: 60_000 };
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -130,6 +136,24 @@ function tally(into: Tally, key: string, m: IndexedMessage, name = '') {
 
 /** One per user and mailbox (see mailboxName). Holds that user's index, rollups, sync state and schedule. */
 export class MailboxDO extends DurableObject<Env> {
+  /**
+   * Answers the Backfill page polls (coverage, jobs), kept in memory. The page asks every 15 s,
+   * and coverage reads every month row (~900 rows a call), which an open page turned into ~10M
+   * rows read a day. A kept answer is served until a write has happened and it is a minute old;
+   * queueing or changing a job drops them, so a click shows at once.
+   */
+  private kept = new Map<string, { at: number; writes: number; value: unknown }>();
+  /** Writes so far (rows written, as count() sees them), to tell whether a kept answer is still true. */
+  private writes = 0;
+
+  private keep<T>(key: string, read: () => T): T {
+    const k = this.kept.get(key);
+    if (k && (k.writes === this.writes || Date.now() - k.at < keepFor.ms)) return k.value as T;
+    const value = read();
+    this.kept.set(key, { at: Date.now(), writes: this.writes, value });
+    return value;
+  }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
@@ -510,6 +534,10 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** Each month's Gmail count, copied count and latest backfill state, oldest first. */
   async coverageMonths(): Promise<MonthCoverage[]> {
+    return structuredClone(this.keep('coverage', () => this.readCoverage()));
+  }
+
+  private readCoverage(): MonthCoverage[] {
     const sql = this.ctx.storage.sql;
     const by = new Map<string, MonthCoverage>();
     const at = (month: string) =>
@@ -558,6 +586,7 @@ export class MailboxDO extends DurableObject<Env> {
         .exec<{ id: number }>(`INSERT INTO jobs (created_at, label) VALUES (?, ?) RETURNING id`, new Date().toISOString(), label)
         .toArray()[0].id;
       for (const m of fresh) sql.exec(`INSERT INTO job_months (job, month, state) VALUES (?, ?, 'queued')`, job, m);
+      this.kept.clear();
       this.count({ do_rows_written: fresh.length + 1 });
       return job;
     });
@@ -565,6 +594,10 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** The latest backfill jobs, newest first. */
   async jobList(limit = 20): Promise<BackfillJob[]> {
+    return structuredClone(this.keep(`jobs:${limit}`, () => this.readJobs(limit)));
+  }
+
+  private readJobs(limit: number): BackfillJob[] {
     const sql = this.ctx.storage.sql;
     const jobs = sql
       .exec<{ id: number; created_at: string; label: string }>(`SELECT id, created_at, label FROM jobs ORDER BY id DESC LIMIT ?`, limit)
@@ -598,7 +631,10 @@ export class MailboxDO extends DurableObject<Env> {
             job,
           );
     const changed = cursor.toArray().length;
-    if (changed) this.count({ do_rows_written: cursor.rowsWritten });
+    if (changed) {
+      this.kept.clear();
+      this.count({ do_rows_written: cursor.rowsWritten });
+    }
     return changed;
   }
 
@@ -677,6 +713,8 @@ export class MailboxDO extends DurableObject<Env> {
    * so the meter never under-reports what the free tier counts.
    */
   private count(usage: Partial<Record<UsageMetric, number>>) {
+    // A call that only records reads changed nothing a kept answer shows.
+    if (Object.entries(usage).some(([m, v]) => m !== 'do_rows_read' && v)) this.writes++;
     const others = Object.entries(usage).filter(([m, v]) => m !== 'do_rows_written' && v);
     const written = (usage.do_rows_written ?? 0) + others.length + 1; // +1: the rows-written row itself
     const day = today();
