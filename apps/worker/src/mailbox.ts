@@ -656,7 +656,10 @@ export class MailboxDO extends DurableObject<Env> {
       ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') AND month IN (SELECT value FROM json_each(?)) RETURNING month`, JSON.stringify(months))
       : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') RETURNING month`);
     const changed = cursor.toArray().length;
-    if (changed) this.count({ do_rows_written: cursor.rowsWritten });
+    if (changed) {
+      this.kept.clear();
+      this.count({ do_rows_written: cursor.rowsWritten });
+    }
     return changed;
   }
 
