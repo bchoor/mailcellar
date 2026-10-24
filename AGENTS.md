@@ -26,5 +26,5 @@ Gmail archive on Cloudflare Workers (Free plan). Bun monorepo.
 - No sample or seeded data in the app. Fixtures live under `apps/worker/test/fixtures/` only.
 - DO schema changes are a new entry in `MIGRATIONS` (`apps/worker/src/mailbox.ts`); never edit a shipped one.
 - Refresh tokens stay in the Durable Object; no API response includes them.
-- What's new (status bar) lists PRs merged to main, built from git history by `scripts/changelog.mjs`. Keep it; never hand-write entries.
+- What's new (status bar) shows the SemVer version and deployed commit, and lists each release's Key takeaways and merged PRs, built by `scripts/changelog.mjs` from git history and `apps/web/changelog.json` (written only by `scripts/release.sh`). Keep it; never hand-write entries.
 - Deploys: Cloudflare Workers Builds deploys every push to `main`. CI and releases: `.github/workflows/`, [docs/releases.md](docs/releases.md).

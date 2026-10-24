@@ -116,7 +116,7 @@ function Frame() {
       user={me.data ? { email: me.data.user.email, name: null } : null}
       // Signing out is Cloudflare Access's: it ends the Access session for this site.
       signOutUrl="/cdn-cgi/access/logout"
-      // What's new: one entry per PR merged to main, generated at build time.
+      // What's new: each release's Key takeaways and merged PRs; the status bar shows the version.
       releases="/api/releases"
       statusEnd={<SyncStatus />}
       settings={[

@@ -1,12 +1,12 @@
 name: Release
 
-# Versioning: docs/releases.md. Copied from EdgeDesk's release workflow; runs
-# scripts/release.sh on OpenShip's self-hosted runner.
+# Versioning: docs/releases.md. Copied from columenlabs/edgedesk; runs scripts/release.sh
+# on OpenShip's self-hosted runner.
 # - push to main: one patch once RELEASE_EVERY merges (repo variable, default 10)
-#   landed since the last tag, or on the first merge 7 days after it. On by default;
-#   set the repo variable RELEASE_ON_MERGE to "false" to pause it. Its notes are key takeaways Claude
-#   writes (secret ANTHROPIC_API_KEY).
-# - Run workflow: patch (now, whatever the count), minor or notes, dry run by default.
+#   landed since the last tag, or on the first merge 7 days after it. On unless the repo
+#   variable RELEASE_ON_MERGE is "false". Its notes are key takeaways Claude writes
+#   (secret ANTHROPIC_API_KEY).
+# - Run workflow: patch (now, whatever the count), minor, notes or recut, dry run by default.
 # - Pull requests that change the release path: dry run only, in their own job
 #   with a read-only token, because they run the branch's own release.sh.
 
@@ -18,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: patch, minor, or notes (set the latest minor's notes from docs/releases)
+        description: patch, minor, notes (set the latest minor's notes from docs/releases), or recut (delete every release and tag, cut again over main's history)
         type: choice
-        options: [patch, minor, notes]
+        options: [patch, minor, notes, recut]
         default: patch
       dry_run:
         description: Print the releases without creating them
@@ -42,7 +42,7 @@ jobs:
       contents: read
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - name: List the releases it would cut
         env:
@@ -58,7 +58,7 @@ jobs:
       pull-requests: read # release notes read each PR's description
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - name: Install gh and jq
         run: |
