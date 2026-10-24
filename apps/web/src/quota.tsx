@@ -2,7 +2,7 @@
 // backfills pause before a hard daily limit. Shown on the Backfill and Usage pages.
 import { IconButton, NoteLine } from '@columenlabs/lumen-ui';
 import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-group';
-import { QUOTA_STOP, type CpuRow, type LevelMeter, type QuotaMeter, type QuotaOverview, type QuotaPart } from '@mailcellar/schema';
+import { quotaStop, type LevelMeter, type QuotaMeter, type QuotaOverview, type QuotaPart } from '@mailcellar/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CloudIcon, PauseIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useState, useSyncExternalStore } from 'react';
@@ -11,7 +11,6 @@ const fmt = (n: number) => n.toLocaleString('en-US');
 const usd = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
 const date = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 const time = (iso: string) => new Date(iso).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-const ms = (n: number) => `${n < 10 ? n.toFixed(1) : fmt(Math.round(n))} ms`;
 
 /** Bytes in the largest unit that keeps a whole number in front: 1.2 GB, 340 MB. */
 function bytes(n: number): string {
@@ -69,7 +68,6 @@ function legend(data: QuotaOverview): { keys: { name: string; color: string; min
   const rows: { parts: QuotaPart[]; scale: number }[] = [
     ...data.meters.map((m) => ({ parts: m.parts, scale: Math.max(m.limit, m.used) })),
     ...data.levels.map((m) => ({ parts: m.parts, scale: Math.max(m.limit, m.used) })),
-    ...data.cpu.rows.map((r) => ({ parts: [{ name: r.name, value: r.p99, mine: r.mine }], scale: Math.max(data.cpu.limitMs, r.p99) })),
   ];
   for (const r of rows)
     for (const p of r.parts) if (!p.mine && p.name !== 'Other') best.set(p.name, Math.max(best.get(p.name) ?? 0, p.value / r.scale));
@@ -91,8 +89,9 @@ interface Bar {
   used: number;
   limit: number;
   parts: QuotaPart[];
-  /** Backfills pause at QUOTA_STOP of it: a red line marks where. */
+  /** Backfills pause at `stop` of it: a red line marks where. */
   hard?: boolean;
+  stop?: number;
   cost: number | null;
   /** Figures: counts, bytes or (for cost) a month's bill. */
   unit: (n: number) => string;
@@ -105,7 +104,8 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
   // Over the allowance, the bar's end is the use and a line marks the allowance.
   const scale = Math.max(b.limit, used);
   const parts = show === 'mine' ? [{ name: 'mailcellar', value: mine, mine: true }] : b.parts.length ? b.parts : [{ name: 'Account', value: b.used, mine: false }];
-  const warn = b.hard ? pct >= QUOTA_STOP * 100 : pct > 100;
+  const stop = b.stop ?? 1;
+  const warn = b.hard ? pct >= stop * 100 : pct > 100;
   return (
     <div className={ROW}>
       <span className="min-w-0 sm:truncate">{b.label}</span>
@@ -113,7 +113,7 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
         {parts.map((p) => (
           <div key={p.name} className="h-full" style={{ width: `${(p.value / scale) * 100}%`, background: color(p) }} title={`${partName(p)}: ${b.unit(p.value)}`} />
         ))}
-        {b.hard && <div className="absolute inset-y-0 w-px bg-loss" style={{ left: `${QUOTA_STOP * 100}%` }} title={`Backfills pause at ${Math.round(QUOTA_STOP * 100)}%`} />}
+        {b.hard && <div className="absolute inset-y-0 w-px bg-loss" style={{ left: `${stop * 100}%` }} title={`Backfills pause at ${fmt(Math.round(b.limit * stop))}`} />}
         {used > b.limit && <div className="absolute inset-y-0 w-0.5 bg-foreground" style={{ left: `${(b.limit / scale) * 100}%` }} title="Free allowance" />}
       </div>
       <span className={`text-right tabular-nums ${warn ? 'text-loss' : 'text-muted-foreground'}`}>
@@ -124,26 +124,8 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
   );
 }
 
-const meterBar = (m: QuotaMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, hard: m.hard, cost: m.cost, unit: fmt, parts: m.parts.length ? m.parts : [{ name: 'mailcellar', value: m.ours, mine: true }, { name: 'Account', value: m.used - m.ours, mine: false }] });
+const meterBar = (m: QuotaMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, hard: m.hard, stop: quotaStop(m.metric), cost: m.cost, unit: fmt, parts: m.parts.length ? m.parts : [{ name: 'mailcellar', value: m.ours, mine: true }, { name: 'Account', value: m.used - m.ours, mine: false }] });
 const levelBar = (m: LevelMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, cost: m.cost, unit: m.unit === 'bytes' ? bytes : fmt, parts: m.parts });
-
-/** One Worker's CPU per request: the bar runs to its p99 against the cap, a tick marks its p50. */
-function CpuBar({ r, cap, color }: { r: CpuRow; cap: number; color: Colors }) {
-  // Cloudflare lets single requests run past the cap; a Worker whose typical (p50) request does is the warning.
-  const over = r.p50 > cap;
-  return (
-    <div className={ROW}>
-      <span className="min-w-0 sm:truncate">{r.mine ? 'MailCellar' : r.name}</span>
-      <div className="relative order-last col-span-2 flex h-2 overflow-hidden rounded-full bg-muted sm:order-none sm:col-span-1" role="img" aria-label={`${r.name}: p50 ${ms(r.p50)}, p99 ${ms(r.p99)}`}>
-        <div className="h-full" style={{ width: `${Math.min(1, r.p99 / cap) * 100}%`, background: color(r) }} title={`p99 ${ms(r.p99)}`} />
-        <div className="absolute inset-y-0 w-0.5 bg-foreground" style={{ left: `${Math.min(1, r.p50 / cap) * 100}%` }} title={`p50 ${ms(r.p50)}`} />
-      </div>
-      <span className={`text-right tabular-nums ${over ? 'text-loss' : 'text-muted-foreground'}`}>
-        p50 {ms(r.p50)} · p99 {ms(r.p99)}
-      </span>
-    </div>
-  );
-}
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -208,7 +190,7 @@ export function AccountLimitsTools() {
   );
 }
 
-/** Each limit against its allowance: what resets today, this month, what's held now, and CPU per request. */
+/** Each limit against its allowance: what resets today, this month, and what's held now. */
 export function AccountLimits() {
   const show = useShow();
   const { data, error } = useQuota();
@@ -217,7 +199,6 @@ export function AccountLimits() {
   const { keys, color } = legend(data);
   const daily = data.meters.filter((m) => m.period === 'day');
   const monthly = data.meters.filter((m) => m.period === 'month');
-  const cpu = data.cpu.rows.filter((r) => show === 'all' || r.mine);
   const workflows = data.readAt && !data.levels.some((l) => l.metric === 'workflows_running');
   const monthEnds = monthly[0] && `${date(monthly[0].resetsAt)}${data.billing ? '' : ' (calendar month)'}`;
   return (
@@ -225,8 +206,8 @@ export function AccountLimits() {
       {data.paused && (
         <NoteLine
           icon={PauseIcon}
-          title={`Backfills paused: ${data.paused.label} is past ${Math.round(QUOTA_STOP * 100)}% of its daily limit`}
-          note={`They resume ${time(data.paused.resumesAt)}, after the limit resets.`}
+          title={`${data.paused.metric === 'do_rows_written' ? 'Indexing' : 'Backfills'} paused: ${data.paused.label} is past ${fmt(Math.round((data.meters.find((m) => m.metric === data.paused!.metric)?.limit ?? 0) * quotaStop(data.paused.metric)))} today`}
+          note={`Resumes ${time(data.paused.resumesAt)}, after the limit resets.`}
         />
       )}
       {daily.length > 0 && (
@@ -244,11 +225,6 @@ export function AccountLimits() {
           {data.levels.map((m) => <BarRow key={m.metric} b={levelBar(m)} color={color} show={show} />)}
         </Section>
       )}
-      {cpu.length > 0 && (
-        <Section title={`CPU per request today · ${ms(data.cpu.limitMs)} limit, short bursts allowed`}>
-          {cpu.map((r) => <CpuBar key={r.name} r={r} cap={data.cpu.limitMs} color={color} />)}
-        </Section>
-      )}
       {show === 'all' && <Legend keys={keys} />}
       <NoteLine
         icon={CloudIcon}
@@ -258,7 +234,7 @@ export function AccountLimits() {
             ? `Every project on the account counts. ${
                 data.plan === 'paid'
                   ? 'On Workers Paid nothing pauses: use past the allowance is billed.'
-                  : `Backfills pause at ${Math.round(QUOTA_STOP * 100)}% of a daily limit. R2 is billed past its free tier, never paused.`
+                  : 'Backfills pause at the red line of a daily limit. R2 is billed past its free tier, never paused.'
               }${workflows ? ' Workflows running couldn’t be read.' : ''}${data.readError ? ` The last read failed: ${data.readError}` : ''}`
             : `${data.readError ?? 'Cloudflare’s figures aren’t read yet.'} Other projects on the account aren’t counted.`
         }
