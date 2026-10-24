@@ -22,10 +22,11 @@ commits like a sync step would.
 | Full body FTS, rollups per batch | 7.98 | 6,304 | 16.0 days | 1.26 GB |
 | Subject + from + snippet FTS | 7.98 | 930 | 16.0 days | 186 MB |
 | Same, contentless FTS | 7.98 | 635 | 16.0 days | 127 MB |
-| Same, `messages WITHOUT ROWID` | **6.98** | **635** | **14.0 days** | **127 MB** |
+| Same, `messages WITHOUT ROWID` | 6.98 | 635 | 14.0 days | 127 MB |
+| Same, every table `WITHOUT ROWID` (shipped in PR 3) | **5.56** | **590** | **11.1 days** | **118 MB** |
 
-Where the rows go, per message, in the last design: `messages` 2, `fts` 1, `senders` 2,
-`domains` 1.15, `months` 0.79, `labels` 0.03.
+Where the rows go, per message, in the shipped design: `messages` 2 (row and `ts` index), `fts` 1,
+`senders` 1, `domains` 0.86, `months` 0.67, `labels` 0.03.
 
 **Decisions**
 
@@ -34,13 +35,12 @@ Where the rows go, per message, in the last design: `messages` 2, `fts` 1, `send
   in the DO. This is the difference between 127 MB and 1.26 GB an mailbox.
 - **Roll up once a batch**, not once a message: it saves 2.4 rows a message, a third of the
   write budget, because a batch of 100 collapses to far fewer distinct months and labels.
-- `messages WITHOUT ROWID` saves another row a message: the primary key is the table.
-- `senders` costs 2 rows a message because nearly every message has a distinct sender and
-  its primary key is a second write. Worth keeping; it is what the Senders page reads.
+- **Every table `WITHOUT ROWID`**: the primary key is the table, so an insert or upsert writes
+  one row instead of a row plus its key index. That saves 2.4 rows a message across `messages`
+  and the rollups.
 
-**What this means.** A 200,000-mail backfill writes about 1.4M rows, so it needs **about
-14 days on Free** at 100k rows a day, or roughly a day and a half if Bikram ever moves to
-Paid. Phase 2's tracking UI has to make that pace visible and resumable rather than hide it.
+**What this means.** A 200,000-mail backfill writes about 1.1M rows, so it needs **about
+11 days on Free** at 100k rows a day, or about a day on Paid. Phase 2's tracking UI has to make that pace visible and resumable rather than hide it.
 
 **Caveat.** Rows are counted with `rowsWritten`, the same meter Cloudflare bills on, measured
 in local workerd. FTS5 keeps its index in shadow tables (`fts_data`, `fts_idx`, `fts_docsize`)
@@ -52,7 +52,7 @@ one exists.
 
 The open question was whether a 200k-mail index fits an object, given that Cloudflare's
 limits table says 5 GB an account while the FAQ says 1 GB an object. S4 measures the chosen
-design at **635 bytes a message, so 127 MB for 200,000 mails** — inside the smaller of the
+design at **590 bytes a message, so 118 MB for 200,000 mails** — inside the smaller of the
 two figures with 8x to spare. No sharding needed.
 
 Still worth confirming against a deployed object, since the number only matters if the 1 GB

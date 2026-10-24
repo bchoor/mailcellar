@@ -1,6 +1,6 @@
 // Shared names and shapes for the Worker, the mailbox Durable Object and the app.
 // Every store is keyed by the user, so one user's data is never addressable from
-// another's session (design doc, "Per-user storage layout"). PR 3 adds the tables.
+// another's session (design doc, "Per-user storage layout").
 
 /** Opaque, stable user ID (never an email address). */
 export type UserId = string & { readonly __brand: 'UserId' };
@@ -40,3 +40,6 @@ export interface Health {
   service: 'mailcellar';
   version: string;
 }
+
+export * from './mail';
+export * from './sample';

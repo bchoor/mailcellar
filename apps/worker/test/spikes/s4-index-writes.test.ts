@@ -53,14 +53,14 @@ function message(i: number, r: () => number) {
 type Msg = ReturnType<typeof message>;
 
 const BASE = [
-  `CREATE TABLE messages (id TEXT PRIMARY KEY, thread TEXT NOT NULL, ts INTEGER NOT NULL,
+  `CREATE TABLE s4_messages (id TEXT PRIMARY KEY, thread TEXT NOT NULL, ts INTEGER NOT NULL,
      from_addr TEXT NOT NULL, subject TEXT NOT NULL, snippet TEXT NOT NULL, size INTEGER NOT NULL,
      labels TEXT NOT NULL) STRICT`,
-  `CREATE INDEX messages_ts ON messages(ts)`,
-  `CREATE TABLE senders (addr TEXT PRIMARY KEY, n INTEGER NOT NULL, bytes INTEGER NOT NULL, last_ts INTEGER NOT NULL) STRICT`,
-  `CREATE TABLE domains (domain TEXT PRIMARY KEY, n INTEGER NOT NULL, bytes INTEGER NOT NULL) STRICT`,
-  `CREATE TABLE months (month TEXT PRIMARY KEY, n INTEGER NOT NULL, bytes INTEGER NOT NULL) STRICT`,
-  `CREATE TABLE labels (label TEXT PRIMARY KEY, n INTEGER NOT NULL) STRICT`,
+  `CREATE INDEX s4_messages_ts ON s4_messages(ts)`,
+  `CREATE TABLE s4_senders (addr TEXT PRIMARY KEY, n INTEGER NOT NULL, bytes INTEGER NOT NULL, last_ts INTEGER NOT NULL) STRICT`,
+  `CREATE TABLE s4_domains (domain TEXT PRIMARY KEY, n INTEGER NOT NULL, bytes INTEGER NOT NULL) STRICT`,
+  `CREATE TABLE s4_months (month TEXT PRIMARY KEY, n INTEGER NOT NULL, bytes INTEGER NOT NULL) STRICT`,
+  `CREATE TABLE s4_labels (label TEXT PRIMARY KEY, n INTEGER NOT NULL) STRICT`,
 ];
 
 interface Design {
@@ -69,20 +69,20 @@ interface Design {
   ftsInsert: string;
   ftsArgs: (m: Msg) => unknown[];
   rollups: 'per-message' | 'per-batch';
-  withoutRowid?: boolean;
+  withoutRowid?: 'messages' | 'all';
 }
 const full = {
-  fts: `CREATE VIRTUAL TABLE fts USING fts5(subject, from_addr, to_addr, body, tokenize='unicode61 remove_diacritics 1')`,
-  ftsInsert: `INSERT INTO fts(rowid, subject, from_addr, to_addr, body) VALUES (?, ?, ?, ?, ?)`,
+  fts: `CREATE VIRTUAL TABLE s4_fts USING fts5(subject, from_addr, to_addr, body, tokenize='unicode61 remove_diacritics 1')`,
+  ftsInsert: `INSERT INTO s4_fts(rowid, subject, from_addr, to_addr, body) VALUES (?, ?, ?, ?, ?)`,
   ftsArgs: (m: Msg) => [rowid(m), m.subject, m.from, m.to, m.body],
 };
 const slim = {
-  fts: `CREATE VIRTUAL TABLE fts USING fts5(subject, from_addr, snippet, tokenize='unicode61 remove_diacritics 1')`,
-  ftsInsert: `INSERT INTO fts(rowid, subject, from_addr, snippet) VALUES (?, ?, ?, ?)`,
+  fts: `CREATE VIRTUAL TABLE s4_fts USING fts5(subject, from_addr, snippet, tokenize='unicode61 remove_diacritics 1')`,
+  ftsInsert: `INSERT INTO s4_fts(rowid, subject, from_addr, snippet) VALUES (?, ?, ?, ?)`,
   ftsArgs: (m: Msg) => [rowid(m), m.subject, m.from, m.snippet],
 };
 const contentless = {
-  fts: `CREATE VIRTUAL TABLE fts USING fts5(subject, from_addr, snippet, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 1')`,
+  fts: `CREATE VIRTUAL TABLE s4_fts USING fts5(subject, from_addr, snippet, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 1')`,
   ftsInsert: slim.ftsInsert,
   ftsArgs: slim.ftsArgs,
 };
@@ -91,7 +91,8 @@ const DESIGNS: Design[] = [
   { name: 'full body FTS, rollups per batch', ...full, rollups: 'per-batch' },
   { name: 'subject+from+snippet FTS, rollups per batch', ...slim, rollups: 'per-batch' },
   { name: 'contentless subject+from+snippet, rollups per batch', ...contentless, rollups: 'per-batch' },
-  { name: 'same, messages WITHOUT ROWID', ...contentless, rollups: 'per-batch', withoutRowid: true },
+  { name: 'same, messages WITHOUT ROWID', ...contentless, rollups: 'per-batch', withoutRowid: 'messages' },
+  { name: 'same, every table WITHOUT ROWID (shipped)', ...contentless, rollups: 'per-batch', withoutRowid: 'all' },
 ];
 function rowid(m: Msg) {
   return parseInt(m.id.slice(1), 16) + 1;
@@ -99,17 +100,21 @@ function rowid(m: Msg) {
 const month = (ts: number) => new Date(ts).toISOString().slice(0, 7);
 
 function setup(sql: SqlStorage, d: Design) {
-  const base = d.withoutRowid ? BASE.map((q) => q.replace(/(labels TEXT NOT NULL\)) STRICT/, '$1 STRICT, WITHOUT ROWID')) : BASE;
+  const base = BASE.map((q) =>
+    d.withoutRowid === 'all' || (d.withoutRowid === 'messages' && q.includes('s4_messages ('))
+      ? q.replace(/\) STRICT$/, ') STRICT, WITHOUT ROWID')
+      : q,
+  );
   for (const q of [...base, d.fts]) sql.exec(q);
 }
 
 function loadBatch(sql: SqlStorage, d: Design, batch: Msg[], by: Record<string, number>) {
   const run = (q: string, ...args: unknown[]) => {
-    const k = q.match(/INTO (\w+)/)![1];
+    const k = q.match(/INTO s4_(\w+)/)![1];
     by[k] = (by[k] ?? 0) + sql.exec(q, ...args).rowsWritten;
   };
   for (const m of batch) {
-    run(`INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, m.id, m.thread, m.ts, m.from, m.subject, m.snippet, m.size, m.labels.join(','));
+    run(`INSERT INTO s4_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, m.id, m.thread, m.ts, m.from, m.subject, m.snippet, m.size, m.labels.join(','));
     run(d.ftsInsert, ...d.ftsArgs(m));
   }
   const groups = d.rollups === 'per-message' ? batch.map((m) => [m]) : [batch];
@@ -123,20 +128,20 @@ function loadBatch(sql: SqlStorage, d: Design, batch: Msg[], by: Record<string, 
       return t;
     };
     for (const [k, v] of tally((m) => [m.from]))
-      run(`INSERT INTO senders VALUES (?, ?, ?, ?) ON CONFLICT(addr) DO UPDATE SET n = n + excluded.n, bytes = bytes + excluded.bytes, last_ts = max(last_ts, excluded.last_ts)`, k, v.n, v.bytes, v.ts);
+      run(`INSERT INTO s4_senders VALUES (?, ?, ?, ?) ON CONFLICT(addr) DO UPDATE SET n = n + excluded.n, bytes = bytes + excluded.bytes, last_ts = max(last_ts, excluded.last_ts)`, k, v.n, v.bytes, v.ts);
     for (const [k, v] of tally((m) => [m.domain]))
-      run(`INSERT INTO domains VALUES (?, ?, ?) ON CONFLICT(domain) DO UPDATE SET n = n + excluded.n, bytes = bytes + excluded.bytes`, k, v.n, v.bytes);
+      run(`INSERT INTO s4_domains VALUES (?, ?, ?) ON CONFLICT(domain) DO UPDATE SET n = n + excluded.n, bytes = bytes + excluded.bytes`, k, v.n, v.bytes);
     for (const [k, v] of tally((m) => [month(m.ts)]))
-      run(`INSERT INTO months VALUES (?, ?, ?) ON CONFLICT(month) DO UPDATE SET n = n + excluded.n, bytes = bytes + excluded.bytes`, k, v.n, v.bytes);
+      run(`INSERT INTO s4_months VALUES (?, ?, ?) ON CONFLICT(month) DO UPDATE SET n = n + excluded.n, bytes = bytes + excluded.bytes`, k, v.n, v.bytes);
     for (const [k, v] of tally((m) => m.labels))
-      run(`INSERT INTO labels VALUES (?, ?) ON CONFLICT(label) DO UPDATE SET n = n + excluded.n`, k, v.n);
+      run(`INSERT INTO s4_labels VALUES (?, ?) ON CONFLICT(label) DO UPDATE SET n = n + excluded.n`, k, v.n);
   }
 }
 
 // FTS5 keeps its index in shadow tables, written at commit by its own statements.
 function shadowRows(sql: SqlStorage) {
   const out: Record<string, number> = {};
-  for (const { name } of sql.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'fts_%'`))
+  for (const { name } of sql.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 's4_fts_%'`))
     out[name] = Number(sql.exec(`SELECT count(*) AS n FROM "${name}"`).one().n);
   return out;
 }
@@ -164,7 +169,7 @@ describe('S4: index writes per message', () => {
         const written = Object.values(by).reduce((a, b) => a + b, 0);
         const bytes = state.storage.sql.databaseSize - before;
         // A search must still find a word only the body or snippet holds.
-        const hit = state.storage.sql.exec(`SELECT count(*) AS n FROM fts WHERE fts MATCH 'invoice'`).one();
+        const hit = state.storage.sql.exec(`SELECT count(*) AS n FROM s4_fts WHERE s4_fts MATCH 'invoice'`).one();
         expect(Number(hit.n)).toBeGreaterThan(0);
         const rowsPerMsg = written / MESSAGES;
         results.push({
