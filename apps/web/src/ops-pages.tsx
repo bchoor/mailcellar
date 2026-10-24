@@ -1,25 +1,24 @@
-import { LumenLayout, NoteLine, Tile, TileRow, type ViewDomain, useLumenLoad } from '@columenlabs/lumen-ui';
+import { LumenLayout, Tile, TileRow, type ViewDomain, useLumenLoad } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
-import { Progress } from '@columenlabs/lumen-ui/ui/progress';
 import { type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
 import { useQuery } from '@tanstack/react-query';
 import {
   ActivityIcon,
   CalendarIcon,
-  CloudIcon,
   GaugeIcon,
   HashIcon,
   HourglassIcon,
   PercentIcon,
 } from 'lucide-react';
 import { useState } from 'react';
-import { FREE_DAILY, type UsageDay } from '@mailcellar/schema';
+import { FREE_DAILY, PLAN_NAMES, type UsageDay } from '@mailcellar/schema';
 import { EmptyState } from './archive';
+import { AccountLimits, useQuota } from './quota';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 
-// Usage the mailbox measures itself (/api/usage). Account-wide figures for the other
-// services are not counted yet (no Analytics API token, by decision).
+// The table: usage the mailboxes measure themselves (/api/usage), per UTC day. The account's
+// limits above it are Cloudflare's own figures (quota.tsx).
 interface UsageRow {
   id: string;
   day: string;
@@ -74,40 +73,27 @@ const USAGE_VIEW: CustomViewConfig = {
 
 function LimitsCard({ days }: { days: UsageDay[] }) {
   const today = new Date().toISOString().slice(0, 10);
-  const rows = usageRows(days).filter((r) => r.day === today);
   const indexed = days.find((d) => d.day === today && d.metric === 'messages_indexed')?.value ?? 0;
-  const written = rows.find((r) => r.id.endsWith('do_rows_written'));
-  const left = written ? Math.max(0, written.allowance - written.used) : FREE_DAILY.do_rows_written;
+  const quota = useQuota().data;
+  const plan = quota?.plan;
   return (
     <div className="flex flex-col gap-4">
       <TileRow>
         <Tile className="lg:flex-1" label="Messages indexed today" value={fmt(indexed)} />
-        <Tile className="lg:flex-1" label="Rows written left today" value={fmt(left)} caption="the daily cap that limits the backfill" />
-        <Tile className="lg:flex-1" label="Plan" value="Workers Free" caption="usage past the caps is refused, not billed" />
+        <Tile
+          className="lg:flex-1"
+          label="Plan"
+          value={plan ? PLAN_NAMES[plan] : '…'}
+          caption={
+            quota && !quota.planReadAt
+              ? 'taken as Free until Cloudflare billing can be read'
+              : plan === 'paid'
+                ? 'use past the allowance is billed'
+                : 'daily limits refuse work past them'
+          }
+        />
       </TileRow>
-      <div className="grid gap-3">
-        {(Object.keys(FREE_DAILY) as (keyof typeof FREE_DAILY)[]).map((m) => {
-          const r = rows.find((x) => x.id.endsWith(m));
-          const pct = r?.pct ?? 0;
-          return (
-            <div key={m} className="grid grid-cols-[minmax(0,14rem)_1fr_auto] items-center gap-3 text-sm">
-              <span className="truncate">{METRICS[m]}</span>
-              <Progress
-                value={Math.min(pct, 100)}
-                className={pct > 100 ? 'h-2 [&>div]:bg-loss' : pct > 75 ? 'h-2 [&>div]:bg-amber-500' : 'h-2'}
-              />
-              <span className="tabular-nums text-muted-foreground">
-                {fmt(r?.used ?? 0)} / {fmt(FREE_DAILY[m])} · {pct}%
-              </span>
-            </div>
-          );
-        })}
-      </div>
-      <NoteLine
-        icon={CloudIcon}
-        title="Counted by MailCellar itself"
-        note="Only its own database reads and writes. Worker requests and R2 storage aren’t counted here yet."
-      />
+      <AccountLimits />
     </div>
   );
 }
@@ -127,7 +113,7 @@ export function UsagePage() {
     <LumenLayout
       crumbs={[{ label: 'Cloudflare usage' }]}
       meta={<span className="text-xs text-muted-foreground">Days run midnight to midnight UTC</span>}
-      lead={[{ id: 'limits', title: 'Against the free tier', icon: GaugeIcon, kind: 'widget', link: false, children: <LimitsCard days={query.data ?? []} /> }]}
+      lead={[{ id: 'limits', title: 'Account limits', icon: GaugeIcon, kind: 'widget', link: false, children: <LimitsCard days={query.data ?? []} /> }]}
       domain={USAGE_DOMAIN}
       config={config}
       rows={usageRows(query.data ?? [])}

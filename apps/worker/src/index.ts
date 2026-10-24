@@ -2,9 +2,11 @@ import { ARCHIVE_VIEWS, monthNow, type ArchiveView, type Health, type UsageDay }
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
+import { accountQuota } from './quota';
 import { accountMailbox } from './sync';
 
 export { MailboxDO } from './mailbox';
+export { QuotaDO } from './quota';
 export { SyncWorkflow } from './sync';
 
 // Static assets serve the app; only /api/* reaches this handler (run_worker_first).
@@ -143,6 +145,8 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     }
     return Response.json([...sum.values()].sort((a, b) => a.day.localeCompare(b.day) || a.metric.localeCompare(b.metric)), { headers: noStore });
   }
+  if (url.pathname === '/api/quota' && request.method === 'GET')
+    return Response.json(await accountQuota(env).overview(), { headers: noStore });
   if (url.pathname === '/api/schedules' && request.method === 'GET')
     return Response.json(await mailbox.schedules(), { headers: noStore });
   const schedule = url.pathname.match(/^\/api\/schedules\/([a-z-]{1,40})$/);
