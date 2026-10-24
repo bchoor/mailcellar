@@ -207,7 +207,7 @@ const facts = (id: string, email: string, copying: string[]) => (c: AccountCover
       have: m.copied,
       expected: m.gmail ?? 0,
       state: monthState(m, copying),
-      note: [m.landed && m.indexed < m.copied ? `${fmt(m.indexed)} searchable` : null, m.error ? `Failed: ${shortError(m.error)}` : null].filter(Boolean).join(' · ') || undefined,
+      note: [indexing(m) ? `${fmt(m.indexed)} of ${fmt(m.inBasin)} searchable` : null, m.error ? `Failed: ${shortError(m.error)}` : null].filter(Boolean).join(' · ') || undefined,
     })),
   rows: [{ row: id, label: email }],
   current: c.current,
