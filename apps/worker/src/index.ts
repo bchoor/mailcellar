@@ -1,6 +1,6 @@
 import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, messageFilters, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
-import { filters, subscriptions, withGmail } from './gmail-settings';
+import { filters, labelColors, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
 import { accountQuota } from './quota';
 import { accountMailbox } from './sync';
@@ -165,13 +165,13 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     return Response.json(page, { headers: noStore });
   }
   // One Gmail account's pages: its archive (its own mailbox DO) and its Gmail settings (read live).
-  const scoped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/(archive\/[a-z]+|filters|subscriptions)$/);
+  const scoped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/(archive\/[a-z]+|filters|subscriptions|label-colors)$/);
   if (scoped && request.method === 'GET') {
     const [, id, page] = scoped;
     const refreshToken = await mailbox.accountToken(id);
     if (!refreshToken) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
-    if (page === 'filters' || page === 'subscriptions') {
-      const body = await withGmail<object>(env, refreshToken, page === 'filters' ? filters : subscriptions);
+    if (page === 'filters' || page === 'subscriptions' || page === 'label-colors') {
+      const body = await withGmail<object>(env, refreshToken, page === 'filters' ? filters : page === 'label-colors' ? labelColors : subscriptions);
       return Response.json(body, { status: 'error' in body ? 502 : 200, headers: noStore });
     }
     const view = page.slice('archive/'.length) as ArchiveView;

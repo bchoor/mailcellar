@@ -1,6 +1,7 @@
 // The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
 // mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
 import { type FilterToken, LumenLayout, LumenSavedWidget, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
+import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
 import { CONTAINS_KEY, type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
@@ -8,6 +9,7 @@ import {
   type ArchiveRows,
   type ArchiveView,
   type DomainRow,
+  type LabelColors,
   type LabelRow,
   MESSAGE_PAGE_SIZES,
   type MessageFilter,
@@ -24,7 +26,9 @@ import {
   GlobeIcon,
   type LucideIcon,
   HardDriveIcon,
+  InboxIcon,
   MailIcon,
+  MailOpenIcon,
   PaperclipIcon,
   SearchIcon,
   TagIcon,
@@ -114,6 +118,58 @@ function useLabelNames() {
   return (ids: string[]) => ids.map((id) => names.get(id) ?? id);
 }
 
+/** Gmail's inbox tabs: a message is in one, Primary when it carries none of the other four. */
+const CATEGORIES = ['Promotions', 'Social', 'Updates', 'Forums'] as const;
+const CATEGORY_IDS = CATEGORIES.map((c) => `CATEGORY_${c.toUpperCase()}`);
+const categoryOf = (ids: string[]) => CATEGORIES.find((c) => ids.includes(`CATEGORY_${c.toUpperCase()}`)) ?? 'Primary';
+
+/** A message's own labels (the person's, not Gmail's built-in ones), each with its Gmail colours. */
+function useUserLabels() {
+  const id = useMailbox().account?.id ?? null;
+  const labels = useArchive('labels');
+  const colors = useQuery({
+    queryKey: ['label-colors', id],
+    queryFn: async (): Promise<LabelColors> => {
+      if (!id) return {};
+      const res = await fetch(`/api/accounts/${id}/label-colors`);
+      // No colours is fine: the chips show plain.
+      return res.ok ? res.json() : {};
+    },
+    staleTime: Infinity,
+  });
+  const mine = new Map((labels.data ?? []).filter((l) => l.type === 'user').map((l) => [l.id, l.name]));
+  return (ids: string[]): Chip[] => ids.filter((x) => mine.has(x)).map((x) => ({ name: mine.get(x)!, ...colors.data?.[x] }));
+}
+interface Chip {
+  name: string;
+  bg?: string;
+  fg?: string;
+}
+
+/** Label chips in their Gmail colours; past two, a +n with the rest on hover. */
+function Chips({ chips }: { chips: Chip[] }) {
+  if (!chips.length) return null;
+  const shown = chips.slice(0, 2);
+  const rest = chips.slice(2);
+  return (
+    <span className="flex max-w-56 items-center gap-1 overflow-hidden">
+      {shown.map((c) => (
+        <Badge key={c.name} variant={c.bg ? 'default' : 'secondary'} className="max-w-28 truncate" style={c.bg ? { background: c.bg, color: c.fg } : undefined} title={c.name}>
+          {c.name}
+        </Badge>
+      ))}
+      {rest.length > 0 && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="text-xs text-muted-foreground tabular-nums">+{rest.length}</span>
+          </TooltipTrigger>
+          <TooltipContent>{rest.map((c) => c.name).join(', ')}</TooltipContent>
+        </Tooltip>
+      )}
+    </span>
+  );
+}
+
 const view = (name: string, over: Record<string, unknown>): CustomViewConfig => ({
   name,
   ...customViewConfigSchema.parse(over),
@@ -189,7 +245,7 @@ function Clip({ text, w }: { text: string; w: string }) {
   );
 }
 
-type MessageView = MessageRow & { labelNames: string[]; period: string; day: string };
+type MessageView = MessageRow & { labelNames: string[]; chips: Chip[]; unread: boolean; important: boolean; category: string; period: string; day: string };
 const MESSAGES: ViewDomain<MessageView> = {
   id: 'messages',
   rowKey: (r) => r.id,
@@ -197,11 +253,30 @@ const MESSAGES: ViewDomain<MessageView> = {
   fields: [
     // The day in the person's time zone, like Period.
     { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.day, format: 'text', render: (r) => dayText(Date.parse(`${r.day}T00:00:00Z`)) },
-    { key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.fromAddr, format: 'text', filterable: true, groupable: true, render: (r) => <Clip text={r.fromAddr} w="14rem" /> },
+    {
+      key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.fromAddr, format: 'text', filterable: true, groupable: true,
+      // Unread: a dot and bold, as in Gmail.
+      render: (r) => (
+        <span className={`flex items-center gap-1.5 ${r.unread ? 'font-semibold' : ''}`}>
+          <span className={`size-2 shrink-0 rounded-full ${r.unread ? 'bg-primary' : ''}`} aria-label={r.unread ? 'Unread' : undefined} />
+          <Clip text={r.fromAddr} w="13rem" />
+        </span>
+      ),
+    },
     { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.fromAddr.split('@')[1] ?? '', format: 'text', filterable: true, groupable: true },
-    { key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text', render: (r) => <Clip text={r.subject} w="22rem" /> },
+    {
+      key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text',
+      render: (r) => (
+        <span className={`flex items-center gap-1 ${r.unread ? 'font-semibold' : ''}`}>
+          {r.important && <span className="text-warning" title="Important">★</span>}
+          <Clip text={r.subject} w="22rem" />
+        </span>
+      ),
+    },
+    { key: 'category', label: 'Category', icon: InboxIcon, value: (r) => r.category, format: 'text', filterable: true, groupable: true },
+    { key: 'is', label: 'Read', icon: MailOpenIcon, value: (r) => (r.unread ? 'Unread' : 'Read'), format: 'text', filterable: true, groupable: true },
     { key: 'period', label: 'Period', icon: CalendarClockIcon, value: (r) => r.period, format: 'text', filterable: true, groupable: true },
-    { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.labelNames.join(', '), values: (r) => r.labelNames, format: 'text', filterable: true, groupable: true, render: (r) => <Clip text={r.labelNames.join(', ')} w="12rem" /> },
+    { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.chips.map((c) => c.name).join(', '), values: (r) => r.chips.map((c) => c.name), format: 'text', filterable: true, groupable: true, render: (r) => <Chips chips={r.chips} /> },
     { key: 'size_kb', label: 'Size (KB)', icon: HardDriveIcon, value: (r) => Math.max(1, r.size / KB), format: 'rounded', aggregate: 'sum', filterable: true },
     { key: 'attachments', label: 'Attachments', icon: PaperclipIcon, value: (r) => r.attachments, format: 'rounded', aggregate: 'sum', filterable: true },
   ],
@@ -293,6 +368,19 @@ function toFilters(tokens: FilterToken[], list: Period[], tz: string): MessageFi
     const op = ts[0].op === 'gt' || ts[0].op === 'lt' || ts[0].op === 'between' ? ts[0].op : ts[0].op ? 'eq' : undefined;
     if (key === CONTAINS_KEY) out.push({ key: 'text', values, not });
     else if (key === 'from' || key === 'domain' || key === 'subject' || key === 'label') out.push({ key, values, not });
+    else if (key === 'is') {
+      // Read and unread are the UNREAD label's absence and presence; both together filter nothing.
+      const unread = values.some((v) => v.toLowerCase() === 'unread');
+      const read = values.some((v) => v.toLowerCase() === 'read');
+      if (unread !== read) out.push({ key: 'label', values: ['UNREAD'], not: read !== not });
+    } else if (key === 'category') {
+      // Categories are exclusive: Primary is having none of the other four.
+      const picked = CATEGORIES.filter((c) => values.some((v) => v.toLowerCase() === c.toLowerCase())).map((c) => `CATEGORY_${c.toUpperCase()}`);
+      const primary = values.some((v) => v.toLowerCase() === 'primary');
+      const others = CATEGORY_IDS.filter((x) => !picked.includes(x));
+      if (primary && others.length) out.push({ key: 'label', values: others, not: !not });
+      else if (!primary && picked.length) out.push({ key: 'label', values: picked, not });
+    }
     else if (key === 'period' || key === 'date') {
       const spans = values
         .map((v) => (key === 'period' ? periodSpan(list, v, tz) : daySpan(v, tz)))
@@ -312,6 +400,7 @@ export function MessagesPage() {
   const id = useMailbox().account?.id ?? null;
   const { timeZone } = usePrefs();
   const labelNames = useLabelNames();
+  const userLabels = useUserLabels();
   const [tokens, setTokens] = useState<FilterToken[]>([]);
   const [size, setSize] = useState(50);
   // Page n starts after cursors[n]; each page read adds the next one's.
@@ -345,9 +434,18 @@ export function MessagesPage() {
   }, [data, messages.isPlaceholderData, page]);
   const load = useLumenLoad(messages);
   const [config, setConfig] = useState(() =>
-    view('Messages', { columns: ['date', 'from', 'subject', 'label', 'size_kb', 'attachments'], sort: { key: 'date', desc: true } }),
+    view('Messages', { columns: ['date', 'from', 'subject', 'category', 'label', 'size_kb', 'attachments'], sort: { key: 'date', desc: true } }),
   );
-  const rows = (data?.rows ?? []).map((m) => ({ ...m, labelNames: labelNames(m.labels), period: periodOf(list, m.ts), day: localDay(m.ts, timeZone) }));
+  const rows = (data?.rows ?? []).map((m) => ({
+    ...m,
+    labelNames: labelNames(m.labels),
+    chips: userLabels(m.labels),
+    unread: m.labels.includes('UNREAD'),
+    important: m.labels.includes('IMPORTANT'),
+    category: categoryOf(m.labels),
+    period: periodOf(list, m.ts),
+    day: localDay(m.ts, timeZone),
+  }));
   const loaded = !!data && !messages.isPlaceholderData;
   const crumbs = useMailboxCrumbs('Messages');
   if (loaded && !rows.length && !filters.length && page === 0) return <EmptyPage title="Messages" />;

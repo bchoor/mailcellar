@@ -164,3 +164,6 @@ export function messageFilters(raw: string | null): MessageFilter[] | null {
   }
   return out;
 }
+
+/** A label's colours in Gmail, by label id (`#fb4c2f` style hex). */
+export type LabelColors = Record<string, { bg: string; fg: string }>;
