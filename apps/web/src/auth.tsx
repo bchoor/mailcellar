@@ -79,7 +79,9 @@ export function AccountsSettings() {
           >
             <div className="flex flex-col gap-3">
               <p className="text-sm text-muted-foreground">
-                MailCellar copies all mail from this account. Modify lets it remove mail from Gmail when you archive it.
+                {a.modify
+                  ? 'MailCellar copies all mail from this account, and removes it from Gmail when you archive it.'
+                  : 'MailCellar copies all mail from this account.'}
               </p>
               {a.read && !a.modify && (
                 <p className="text-sm text-amber-600 dark:text-amber-400">Read only: archiving and deleting in Gmail aren’t available.</p>
