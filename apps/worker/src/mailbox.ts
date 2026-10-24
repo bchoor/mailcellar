@@ -380,7 +380,7 @@ export class MailboxDO extends DurableObject<Env> {
           test: {
             at: a.tested_at,
             ok: !a.test_error && read,
-            detail: null,
+            detail: a.test_error ? null : modify ? 'read and modify' : 'read only',
             error: a.test_error,
           },
         };
