@@ -292,12 +292,23 @@ export class MailboxDO extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const by = new Map<string, MonthCoverage>();
     const at = (month: string) => by.get(month) ?? by.set(month, { month, gmail: null, copied: 0, state: null, error: null }).get(month)!;
-    for (const r of sql.exec<{ month: string; n: number }>(`SELECT month, n FROM gmail_months`)) at(r.month).gmail = r.n;
-    for (const r of sql.exec<{ month: string; n: number }>(`SELECT month, n FROM months`)) at(r.month).copied = r.n;
-    // The latest job to touch a month decides its state.
-    for (const r of sql.exec<{ month: string; state: PartState; error: string | null }>(
-      `SELECT month, state, error FROM job_months j WHERE job = (SELECT max(job) FROM job_months WHERE month = j.month)`,
+    // The latest job to touch a month decides its state. One pass over job_months: the old
+    // correlated max(job) per row scanned the table once a row (~70k rows read a call at 265 months).
+    let read = 0;
+    const each = <T>(query: string) => {
+      const cursor = sql.exec<T & Record<string, SqlStorageValue>>(query);
+      const rows = cursor.toArray();
+      read += cursor.rowsRead;
+      return rows;
+    };
+    for (const r of each<{ month: string; n: number }>(`SELECT month, n FROM gmail_months`)) at(r.month).gmail = r.n;
+    for (const r of each<{ month: string; n: number }>(`SELECT month, n FROM months`)) at(r.month).copied = r.n;
+    for (const r of each<{ month: string; state: PartState; error: string | null }>(
+      `SELECT month, state, error FROM (
+         SELECT month, state, error, row_number() OVER (PARTITION BY month ORDER BY job DESC) AS latest FROM job_months
+       ) WHERE latest = 1`,
     )) Object.assign(at(r.month), { state: r.state, error: r.error });
+    this.count({ do_rows_read: read });
     return [...by.values()].sort((a, b) => a.month.localeCompare(b.month));
   }
 
