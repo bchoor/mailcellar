@@ -49,11 +49,13 @@ export async function labels(token: string): Promise<MailLabel[]> {
 }
 
 /** One page of message IDs, newest first. */
-export async function listPage(token: string, pageToken?: string, max = 500) {
+/** One page of message IDs, newest first; `search` is a Gmail search such as `after:2026/09/24`. */
+export async function listPage(token: string, pageToken?: string, max = 500, search?: string) {
   const q = new URLSearchParams({ maxResults: String(max) });
   if (pageToken) q.set('pageToken', pageToken);
-  const body = await call<{ messages?: { id: string }[]; nextPageToken?: string }>(token, `/messages?${q}`);
-  return { ids: (body.messages ?? []).map((m) => m.id), next: body.nextPageToken ?? null };
+  if (search) q.set('q', search);
+  const body = await call<{ messages?: { id: string }[]; nextPageToken?: string; resultSizeEstimate?: number }>(token, `/messages?${q}`);
+  return { ids: (body.messages ?? []).map((m) => m.id), next: body.nextPageToken ?? null, estimate: body.resultSizeEstimate ?? null };
 }
 
 /** Messages added since a history ID. Gmail answers 404 when the ID is too old to replay. */

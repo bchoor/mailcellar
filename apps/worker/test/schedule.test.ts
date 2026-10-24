@@ -1,4 +1,4 @@
-import { DEFAULT_SCHEDULES, nextRun, syncStatus, type Schedule, type SyncOverview, type SyncState, type SyncSummary } from '@mailcellar/schema';
+import { DEFAULT_SCHEDULES, nextRun, syncStatus, type AccountCoverage, type BackfillJob, type Schedule, type SyncOverview, type SyncState, type SyncSummary } from '@mailcellar/schema';
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -61,7 +61,8 @@ async function withAccount() {
 }
 
 const realStart = syncDeps.start;
-afterEach(() => void (syncDeps.start = realStart));
+const realCensus = syncDeps.census;
+afterEach(() => void Object.assign(syncDeps, { start: realStart, census: realCensus }));
 
 describe('Sync now', () => {
   it("lists every account's sync, and whether Basin can be written", async () => {
@@ -108,6 +109,48 @@ describe('Sync now', () => {
     expect(await mailbox.syncAccount(id, false)).toEqual({ status: 'stopped' });
     expect(await mailbox.syncAccount(id, true)).toEqual({ status: 'started' });
     expect((await api(`/api/accounts/a${'x'.repeat(22)}/sync`, { method: 'POST' })).status).toBe(404);
+  });
+});
+
+describe('Backfill by month', () => {
+  it('starts the census when the map is first opened, and not again while it counts', async () => {
+    const { api, id, user } = await withAccount();
+    const started: string[] = [];
+    syncDeps.census = async (e, u, account, mode) => {
+      started.push(mode);
+      const now = new Date().toISOString();
+      await accountMailbox(e, u, account).saveCensus({ runId: 'c1', month: '2026-10', pageToken: null, n: 0, empty: 0, mode, startedAt: now, updatedAt: now, finishedAt: null, error: null });
+      return 'c1';
+    };
+    const first = (await (await api(`/api/accounts/${id}/coverage`)).json()) as AccountCoverage;
+    expect(first).toMatchObject({ months: [], census: { status: 'counting', month: '2026-10' } });
+    await api(`/api/accounts/${id}/coverage`);
+    expect(started).toEqual(['full']);
+    await accountMailbox(env, user, id).putMonthCount('2026-09', 12);
+    const second = (await (await api(`/api/accounts/${id}/coverage`)).json()) as AccountCoverage;
+    expect(second.months).toEqual([{ month: '2026-09', gmail: 12, copied: 0, state: null, error: null }]);
+    expect((await api(`/api/accounts/a${'x'.repeat(22)}/coverage`)).status).toBe(404);
+  });
+
+  it('checks the months asked for, and waits for Basin like Sync now', async () => {
+    const { api, id } = await withAccount();
+    const post = (body: unknown) => api(`/api/accounts/${id}/backfill`, { method: 'POST', body: JSON.stringify(body) });
+    for (const bad of [{}, { months: [] }, { months: ['2024-13'] }, { months: ['2999-01'] }, { months: [202401] }])
+      expect((await post(bad)).status).toBe(400);
+    const res = await post({ months: ['2024-01'] });
+    expect([res.status, await res.json()]).toEqual([409, { error: 'basin_not_ready' }]);
+  });
+
+  it('lists jobs, and cancels or retries one', async () => {
+    const { api, id, user } = await withAccount();
+    const job = (await accountMailbox(env, user, id).queueMonths(['2024-01', '2024-02'], 'Last 3 months'))!;
+    const jobs = (await (await api(`/api/accounts/${id}/jobs`)).json()) as BackfillJob[];
+    expect(jobs).toEqual([expect.objectContaining({ id: job, label: 'Last 3 months', status: 'queued', from: '2024-01', to: '2024-02' })]);
+    const cancel = await api(`/api/accounts/${id}/jobs/${job}/cancel`, { method: 'POST' });
+    expect(await cancel.json()).toEqual({ changed: 2 });
+    const retry = await api(`/api/accounts/${id}/jobs/${job}/retry`, { method: 'POST' });
+    expect(await retry.json()).toEqual({ changed: 2 });
+    expect((await api(`/api/accounts/${id}/jobs/999/cancel`, { method: 'POST' })).status).toBe(404);
   });
 });
 

@@ -1,13 +1,19 @@
-// The backfill: each Gmail account's sync (/api/sync), on the Backfill page and in the status bar.
+// The backfill: each Gmail account's sync (/api/sync), on the Backfill page and in the status bar,
+// and its coverage map: one line per year, one block per month, from Gmail's exact count for the
+// month (the census) and what MailCellar has copied. Pick months there, or a preset, to copy them.
 // Everything shown is what the sync state says now; nothing is estimated.
-import { ErrorLine, LumenLayout, NoteLine, StatusItem, Tile, TileRow, type ScheduleRun } from '@columenlabs/lumen-ui';
+import {
+  ErrorLine, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow,
+  type CoverageData, type CoveragePick, type FilterToken, type ScheduleRun,
+} from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Progress } from '@columenlabs/lumen-ui/ui/progress';
-import type { SyncOverview, SyncSummary } from '@mailcellar/schema';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
+import { addMonths, monthRange, type AccountCoverage, type BackfillJob, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { DatabaseIcon, HourglassIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, ChevronDownIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListPlusIcon, RefreshCwIcon } from 'lucide-react';
 import { useState } from 'react';
 import { EmptyState } from './archive';
 
@@ -29,6 +35,8 @@ export function useSync() {
   });
 }
 
+const monthName = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', year: 'numeric', timeZone: 'UTC' });
+
 /** Start a sync for one account. Resolves to what happened, in words. */
 async function syncNow(id: string): Promise<{ ok: boolean; detail: string }> {
   const res = await fetch(`/api/accounts/${id}/sync`, { method: 'POST' });
@@ -40,7 +48,7 @@ async function syncNow(id: string): Promise<{ ok: boolean; detail: string }> {
 
 /** Schedules ▸ Gmail sync ▸ Run now: Sync now for every account. */
 export async function syncAllNow(ids: string[]): Promise<ScheduleRun> {
-  const results = await Promise.all(ids.map(syncNow));
+  const results = await Promise.all(ids.map((id) => syncNow(id)));
   const started = results.filter((r) => r.detail === 'Started').length;
   const failed = results.filter((r) => !r.ok);
   return {
@@ -62,15 +70,15 @@ function headline(s: SyncSummary): string | null {
   if (s.phase === null || s.status === 'stopped') return null;
   if (s.phase === 'paused' && s.resumesAt) return `Paused at today's free limit. Resumes ${when(s.resumesAt)}.`;
   if (s.status === 'waiting' && s.resumesAt) return `Trying again ${when(s.resumesAt)}.`;
-  if (s.phase === 'live') return 'Backfill done. New mail is copied on each sync.';
-  if (s.status === 'running') return 'Copying existing mail.';
+  if (s.phase === 'live') return 'New mail is copied on each sync. Pick months below to copy older mail.';
+  if (s.status === 'running') return s.month ? `Copying ${monthName(s.month)}.` : 'Copying.';
   return 'Not running. Sync now or the next scheduled run continues it.';
 }
 
 /** The badge: what the sync is doing now. */
 function badge(s: SyncSummary): { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' } {
   if (s.phase === null) return { label: 'Not started', variant: 'outline' };
-  if (s.phase === 'live' && s.status !== 'running') return { label: 'Up to date', variant: 'secondary' };
+  if (s.phase === 'live' && s.status !== 'running') return { label: 'Live', variant: 'secondary' };
   return STATUS[s.status];
 }
 
@@ -80,7 +88,6 @@ function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; ba
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
-  const done = s.phase === 'live';
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -107,9 +114,9 @@ function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; ba
       </div>
       {s.total !== null && (
         <div className="grid grid-cols-[1fr_auto] items-center gap-3 text-sm">
-          <Progress value={done ? 100 : pct(s)} className="h-2" />
+          <Progress value={pct(s)} className="h-2" />
           <span className="tabular-nums text-muted-foreground">
-            {fmt(s.copied)} / {fmt(s.total)} · {done ? 100 : pct(s)}%
+            {fmt(s.copied)} of {fmt(s.total)} in Gmail · {pct(s)}%
           </span>
         </div>
       )}
@@ -126,9 +133,296 @@ function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; ba
   );
 }
 
+/** An account's coverage: polls every 15 seconds while the census counts or a month is copying. */
+function useCoverage(id: string) {
+  return {
+    queryKey: ['coverage', id],
+    queryFn: async (): Promise<AccountCoverage> => {
+      const res = await fetch(`/api/accounts/${id}/coverage`);
+      if (!res.ok) throw new Error(`Couldn't load the coverage (${res.status})`);
+      return res.json();
+    },
+    refetchInterval: (q: { state: { data?: AccountCoverage } }) => {
+      const d = q.state.data;
+      return d && (d.census.status === 'counting' || d.months.some((m) => m.state === 'queued' || m.state === 'running')) ? 15_000 : false;
+    },
+  };
+}
+
+/** Coverage as map facts: a month shows once Gmail's count for it is known or a backfill touched it. */
+const facts = (id: string, email: string) => (c: AccountCoverage): CoverageData => ({
+  facts: c.months
+    .filter((m) => m.gmail !== null || m.state)
+    .map((m) => ({
+      row: id,
+      period: m.month,
+      have: m.copied,
+      expected: m.gmail ?? 0,
+      state: m.state === 'done' || m.state === null ? undefined : m.state,
+      note: m.error ?? undefined,
+    })),
+  rows: [{ row: id, label: email }],
+  current: c.current,
+});
+
+const busyMonth = (m: MonthCoverage) => m.state === 'queued' || m.state === 'running';
+
+/** The months a preset copies. Months Gmail counted as empty are left out. */
+function presetMonths(c: AccountCoverage, preset: Preset): string[] {
+  const by = new Map(c.months.map((m) => [m.month, m]));
+  const worth = (month: string) => {
+    const m = by.get(month);
+    return !m || ((m.gmail === null || m.gmail > 0) && !busyMonth(m));
+  };
+  switch (preset) {
+    case 'missing':
+      return c.months.filter((m) => m.gmail !== null && m.gmail > m.copied && !busyMonth(m)).map((m) => m.month);
+    case '3m':
+      return monthRange(addMonths(c.current, -2), c.current).filter(worth);
+    case '12m':
+      return monthRange(addMonths(c.current, -11), c.current).filter(worth);
+    case 'all':
+      return c.months.filter((m) => m.gmail !== null && m.gmail > 0 && !busyMonth(m)).map((m) => m.month);
+  }
+}
+
+type Preset = 'missing' | '3m' | '12m' | 'all';
+const PRESETS: { id: Preset; label: string }[] = [
+  { id: 'missing', label: 'Missing months' },
+  { id: '3m', label: 'Last 3 months' },
+  { id: '12m', label: 'Last 12 months' },
+  { id: 'all', label: 'All months' },
+];
+
+/** Queue months to copy; resolves to an error in words, or null. */
+async function queueBackfill(id: string, months: string[], label: string): Promise<string | null> {
+  const res = await fetch(`/api/accounts/${id}/backfill`, { method: 'POST', body: JSON.stringify({ months, label }) });
+  if (res.status === 409) return 'Waiting for Basin write access';
+  return res.ok ? null : `Not queued (${res.status})`;
+}
+
+function censusHint(c: AccountCoverage | undefined): string | null {
+  if (!c) return null;
+  const { census } = c;
+  if (census.status === 'counting')
+    return census.month ? `Counting Gmail by month: ${monthName(census.month)} next.` : 'Counting Gmail by month.';
+  if (census.status === 'stopped') return `Counting stopped: ${census.error}. It resumes when you open this page.`;
+  if (census.finishedAt) return `Gmail counted ${when(census.finishedAt)}. Recent months are recounted every 6 hours.`;
+  return null;
+}
+
+/** One account's coverage map: pick months (click, shift-click a range) or a preset to copy them. */
+function AccountCoverageMap({ id, email, basin }: { id: string; email: string; basin: boolean }) {
+  const client = useQueryClient();
+  const source = useCoverage(id);
+  const { data } = useQuery(source);
+  const [error, setError] = useState<string | null>(null);
+  const queue = async (months: string[], label: string) => {
+    if (!months.length) return setError('Nothing to queue: those months are copied, queued or empty.');
+    setError(await queueBackfill(id, months, label));
+    await Promise.all(['coverage', 'jobs', 'sync'].map((k) => client.invalidateQueries({ queryKey: k === 'sync' ? ['sync'] : [k, id] })));
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <LumenCoverageMap
+        source={{ ...source, select: facts(id, email) }}
+        title={`${email} by month`}
+        icon={CalendarRangeIcon}
+        rows={{ title: 'Year' }}
+        layout="months"
+        unit="messages"
+        summary={['complete', 'rows']}
+        select={basin ? 'backfill' : undefined}
+        selectable={(_row, month) => {
+          const m = data?.months.find((x) => x.month === month);
+          return !!m && m.gmail !== null && m.gmail > 0 && !busyMonth(m);
+        }}
+        onQueue={(pick: CoveragePick) => queue(pick.flatMap((p) => p.months), 'Picked months')}
+        hint={censusHint(data)}
+        tools={
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" disabled={!basin || !data}>
+                <ListPlusIcon /> Queue backfill <ChevronDownIcon />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel>Copy</DropdownMenuLabel>
+              {PRESETS.map((p) => (
+                <DropdownMenuItem key={p.id} onSelect={() => data && queue(presetMonths(data, p.id), p.label)}>
+                  {p.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        }
+        empty={
+          <p className="py-6 text-center text-muted-foreground">
+            {data?.census.status === 'stopped' ? 'Counting stopped. It resumes when you open this page.' : 'Counting Gmail by month. Months show here as they are counted.'}
+          </p>
+        }
+      />
+      {error && <ErrorLine error={new Error(error)} />}
+    </div>
+  );
+}
+
+const JOB_STATUS: Record<BackfillJob['status'], { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
+  queued: { label: 'Queued', variant: 'outline' },
+  running: { label: 'Copying', variant: 'default' },
+  done: { label: 'Done', variant: 'secondary' },
+  failed: { label: 'Failed', variant: 'destructive' },
+  canceled: { label: 'Canceled', variant: 'outline' },
+};
+
+/** An account's latest backfills, with Cancel and Retry. */
+function Jobs({ id }: { id: string }) {
+  const client = useQueryClient();
+  const { data, error } = useQuery({
+    queryKey: ['jobs', id],
+    queryFn: async (): Promise<BackfillJob[]> => {
+      const res = await fetch(`/api/accounts/${id}/jobs`);
+      if (!res.ok) throw new Error(`Couldn't load the backfills (${res.status})`);
+      return res.json();
+    },
+    refetchInterval: (q) => (q.state.data?.some((j) => j.status === 'queued' || j.status === 'running') ? 15_000 : false),
+  });
+  const act = async (job: number, action: 'cancel' | 'retry') => {
+    await fetch(`/api/accounts/${id}/jobs/${job}/${action}`, { method: 'POST' });
+    await Promise.all([client.invalidateQueries({ queryKey: ['jobs', id] }), client.invalidateQueries({ queryKey: ['coverage', id] }), client.invalidateQueries({ queryKey: ['sync'] })]);
+  };
+  if (error) return <ErrorLine error={error} />;
+  if (!data?.length) return <p className="text-sm text-muted-foreground">No backfills yet. Pick months on the map, or use Queue backfill.</p>;
+  return (
+    <ul className="flex flex-col divide-y text-sm">
+      {data.map((j) => {
+        const total = Object.values(j.months).reduce((a, b) => a + b, 0);
+        const span = j.from === j.to ? monthName(j.from) : `${monthName(j.from)} to ${monthName(j.to)}`;
+        return (
+          <li key={j.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
+            <Badge variant={JOB_STATUS[j.status].variant}>{JOB_STATUS[j.status].label}</Badge>
+            <span className="font-medium">{j.label}</span>
+            <span className="text-muted-foreground">{span}</span>
+            <span className="tabular-nums text-muted-foreground">
+              {fmt(j.months.done)} of {fmt(total)} months
+              {j.months.failed ? ` · ${fmt(j.months.failed)} failed` : ''}
+              {j.months.canceled ? ` · ${fmt(j.months.canceled)} canceled` : ''}
+            </span>
+            <span className="ml-auto flex gap-2">
+              {(j.months.queued > 0 || j.months.running > 0) && (
+                <Button variant="ghost" size="sm" onClick={() => act(j.id, 'cancel')}>Cancel</Button>
+              )}
+              {(j.months.failed > 0 || j.months.canceled > 0) && (
+                <Button variant="outline" size="sm" onClick={() => act(j.id, 'retry')}>Retry</Button>
+              )}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** How fresh a mailbox's copy is: when its sync last saved, in words. */
+function freshness(s: SyncSummary, now = Date.now()): string {
+  if (!s.updatedAt) return 'Never synced';
+  const min = Math.round((now - Date.parse(s.updatedAt)) / 60_000);
+  const ago = min < 1 ? 'just now' : min < 60 ? `${min} min ago` : min < 48 * 60 ? `${Math.round(min / 60)} h ago` : `${Math.round(min / 1440)} days ago`;
+  return `Synced ${ago}`;
+}
+
+/**
+ * Every mailbox on one map: one row each, one column per month (or quarter, or year), and how
+ * fresh each copy is. Picks queue a backfill in each mailbox picked.
+ */
+function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string | null; onPick: (email: string) => void }) {
+  const ids = accounts.map((a) => a.id);
+  const source = {
+    queryKey: ['coverage-all', ids],
+    queryFn: async (): Promise<Record<string, AccountCoverage>> => {
+      const all = await Promise.all(
+        ids.map(async (id) => {
+          const res = await fetch(`/api/accounts/${id}/coverage`);
+          if (!res.ok) throw new Error(`Couldn't load the coverage (${res.status})`);
+          return [id, (await res.json()) as AccountCoverage] as const;
+        }),
+      );
+      return Object.fromEntries(all);
+    },
+    refetchInterval: (q: { state: { data?: Record<string, AccountCoverage> } }) =>
+      Object.values(q.state.data ?? {}).some((c) => c.census.status === 'counting' || c.months.some(busyMonth)) ? 15_000 : false,
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <LumenCoverageMap
+        source={{
+          ...source,
+          select: (all): CoverageData => {
+            const per = accounts.map((a) => (all[a.id] ? facts(a.id, a.email)(all[a.id]) : { facts: [], rows: [] }));
+            return {
+              facts: per.flatMap((p) => p.facts),
+              rows: accounts.map((a) => ({
+                row: a.id,
+                label: a.email,
+                sub: `${badge(a.sync).label} · ${freshness(a.sync)}`,
+              })),
+              current: Object.values(all)[0]?.current,
+            };
+          },
+        }}
+        title="All mailboxes by month"
+        icon={CalendarRangeIcon}
+        rows={{ title: 'Mailbox' }}
+        block="month"
+        zoom={['month', 'quarter', 'year']}
+        unit="messages"
+        summary={['complete']}
+        select="drill"
+        drilled={null}
+        onDrill={(row) => {
+          const a = accounts.find((x) => x.id === row);
+          if (a) onPick(a.email);
+        }}
+        hint="Tap a row to show that mailbox below."
+      />
+    </div>
+  );
+}
+
+/** Every mailbox, one line each: tap one to show it in the cards below. */
+function MailboxList({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string; onPick: (email: string) => void }) {
+  return (
+    <ul className="flex flex-col gap-1 text-sm">
+      {accounts.map((a) => (
+        <li key={a.id}>
+          <Button
+            variant={a.email === picked ? 'secondary' : 'ghost'}
+            className="h-auto w-full justify-start gap-3 py-2"
+            aria-pressed={a.email === picked}
+            onClick={() => onPick(a.email)}
+          >
+            <span className="min-w-0 flex-1 truncate text-left font-medium">{a.email}</span>
+            <Badge variant={badge(a.sync).variant}>{badge(a.sync).label}</Badge>
+            <span className="hidden text-muted-foreground sm:inline">{freshness(a.sync)}</span>
+            <span className="w-14 text-right tabular-nums text-muted-foreground">{a.sync.total ? `${pct(a.sync)}%` : '—'}</span>
+          </Button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The mailbox a card follows: the mailbox chip of its colour, else the first mailbox. */
+function followed(accounts: SyncOverview['accounts'], follows: FilterToken[]) {
+  const email = follows.find((t) => t.key === 'mailbox')?.value;
+  return accounts.find((a) => a.email === email) ?? accounts[0];
+}
+
 export function BackfillPage() {
   const query = useSync();
   const data = query.data;
+  const [picked, setPicked] = useState<string | null>(null);
+  const shown = data?.accounts.find((a) => a.email === picked) ?? data?.accounts[0];
   const running = data?.accounts.filter((a) => a.sync.status === 'running').length ?? 0;
   return (
     <LumenLayout
@@ -158,10 +452,47 @@ export function BackfillPage() {
               ),
             }]
           : []),
-        ...(data?.accounts ?? []).map((a) => ({
-          id: a.id, title: a.email, icon: HourglassIcon, kind: 'widget' as const, link: false as const, w: 6,
-          children: <AccountSync id={a.id} sync={a.sync} basin={data!.basin} />,
-        })),
+        // The mailbox map picks the mailbox: its chip goes to every card of its colour (Lumen's
+        // linked cards), and the cards below show the mailbox they follow.
+        // Picking a mailbox shares its chip with every card of the same colour (Lumen's linked
+        // cards); the cards below show the mailbox they follow.
+        ...(data && data.accounts.length
+          ? [
+              {
+                id: 'mailboxes', title: 'Mailboxes', icon: MailIcon, kind: 'widget' as const, color: 'teal' as const, w: 6,
+                publishes: [{ key: 'mailbox', value: shown!.email }],
+                children: <MailboxList accounts={data.accounts} picked={shown!.email} onPick={setPicked} />,
+              },
+              ...(data.accounts.length > 1
+                ? [{
+                    id: 'all', title: 'All mailboxes by month', kind: 'own' as const, w: 6,
+                    children: <AllMailboxesMap accounts={data.accounts} picked={shown!.email} onPick={setPicked} />,
+                  }]
+                : []),
+            ]
+          : []),
+        ...(data && data.accounts.length
+          ? [
+              {
+                id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                children: (f: FilterToken[]) => {
+                  const a = followed(data.accounts, f);
+                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} />;
+                },
+              },
+              {
+                id: 'map', title: 'By month', kind: 'own' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                children: (f: FilterToken[]) => {
+                  const a = followed(data.accounts, f);
+                  return <AccountCoverageMap key={a.id} id={a.id} email={a.email} basin={data.basin} />;
+                },
+              },
+              {
+                id: 'jobs', title: 'Backfills', icon: ListChecksIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                children: (f: FilterToken[]) => <Jobs key={followed(data.accounts, f).id} id={followed(data.accounts, f).id} />,
+              },
+            ]
+          : []),
       ]}
     />
   );
@@ -179,7 +510,7 @@ export function SyncStatus() {
     : syncs.some((s) => s.status === 'stopped')
       ? 'Stopped'
       : syncs.every((s) => s.phase === 'live')
-        ? 'Up to date'
+        ? 'Live'
         : syncs.some((s) => s.status === 'running') && total
           ? `${Math.floor((copied / total) * 100)}%`
           : syncs.every((s) => s.phase === null)

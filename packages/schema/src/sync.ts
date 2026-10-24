@@ -35,6 +35,15 @@ export interface SyncState {
   /** When a paused sync resumes. */
   resumesAt: string | null;
   error: string | null;
+  /** The month the backfill is copying now (listing it with `pageToken`), and the backfill job it belongs to. */
+  part?: SyncPart | null;
+}
+
+/** One month of one backfill job: the unit a backfill copies. */
+export interface SyncPart {
+  job: number;
+  /** YYYY-MM, UTC. */
+  month: string;
 }
 
 /** What starts a sync Workflow run. */
@@ -43,6 +52,8 @@ export interface SyncParams {
   account: string;
   /** Instead of syncing, write one made-up row to the Basin check table (basin.ts, basinCheck). */
   check?: boolean;
+  /** Instead of syncing, count the account's messages by month (the census). */
+  census?: boolean;
 }
 
 /** Where an account's sync stands: a run is going, it's waiting to resume, it stopped on an error, or it can start. */
@@ -71,6 +82,8 @@ export interface SyncSummary {
   updatedAt: string | null;
   resumesAt: string | null;
   error: string | null;
+  /** The month being copied now, if any. */
+  month: string | null;
 }
 
 export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary {
@@ -84,6 +97,7 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
     updatedAt: s?.updatedAt ?? null,
     resumesAt: s?.resumesAt ?? null,
     error: s?.error ?? null,
+    month: s?.part?.month ?? null,
   };
 }
 
@@ -91,4 +105,102 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
 export interface SyncOverview {
   basin: boolean;
   accounts: { id: string; email: string; sync: SyncSummary }[];
+}
+
+/** The first month Gmail had mail (April 2004). The census looks further back only if Gmail has older mail. */
+export const GMAIL_FIRST_MONTH = '2004-04';
+
+/** A month's bounds in Unix seconds, for Gmail's `after:` and `before:` (exact, in UTC). */
+export function monthBounds(month: string): { after: number; before: number } {
+  const [y, m] = month.split('-').map(Number);
+  return { after: Date.UTC(y, m - 1, 1) / 1000, before: Date.UTC(y, m, 1) / 1000 };
+}
+
+/** Gmail's search for one month: messages from its first second to the next month's. */
+export const monthQuery = (month: string) => {
+  const { after, before } = monthBounds(month);
+  // `after:` is exclusive, so it starts one second early.
+  return `after:${after - 1} before:${before}`;
+};
+
+/** The month before (`delta` -1) or after (+1) a YYYY-MM month. */
+export function addMonths(month: string, delta: number): string {
+  const [y, m] = month.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1 + delta, 1)).toISOString().slice(0, 7);
+}
+
+/** Every month from `from` to `to`, oldest first. */
+export function monthRange(from: string, to: string): string[] {
+  const out: string[] = [];
+  for (let m = from; m <= to; m = addMonths(m, 1)) out.push(m);
+  return out;
+}
+
+/** The month a time falls in, UTC. */
+export const monthNow = (now = new Date()) => now.toISOString().slice(0, 7);
+
+/**
+ * The census: Gmail's message count for each month, counted exactly by listing message IDs
+ * (never the mail itself). It runs newest month first, so the map fills from today back.
+ */
+export interface CensusState {
+  runId: string;
+  /** The month counted next; null when finished. */
+  month: string | null;
+  pageToken: string | null;
+  /** IDs counted so far in `month`. */
+  n: number;
+  /** Months in a row with no mail, counting back; a long run ends the census. */
+  empty: number;
+  /** `full` counts back to the first mail; `refresh` stops at the first month counted after it ended. */
+  mode: 'full' | 'refresh';
+  startedAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+/** A backfill month's state. Copied months are `done`. */
+export type PartState = 'queued' | 'running' | 'done' | 'failed' | 'canceled';
+
+/** One month on the coverage map. */
+export interface MonthCoverage {
+  month: string;
+  /** Messages Gmail has that month (the census); null until counted. */
+  gmail: number | null;
+  /** Messages MailCellar has that month. */
+  copied: number;
+  /** The latest backfill's state for this month, if one touched it. */
+  state: PartState | null;
+  /** Why that backfill failed. */
+  error: string | null;
+}
+
+/** GET /api/accounts/:id/coverage. */
+export interface AccountCoverage {
+  months: MonthCoverage[];
+  census: { status: 'counting' | 'done' | 'stopped' | 'not_started'; month: string | null; finishedAt: string | null; error: string | null };
+  /** The month still running (YYYY-MM): its count can still grow. */
+  current: string;
+}
+
+/** A backfill: months queued together, copied newest first. */
+export interface BackfillJob {
+  id: number;
+  createdAt: string;
+  label: string;
+  status: 'queued' | 'running' | 'done' | 'failed' | 'canceled';
+  months: Record<PartState, number>;
+  /** First and last month it covers. */
+  from: string;
+  to: string;
+}
+
+/** A job's status from its months' states: running beats queued beats failed beats canceled. */
+export function jobStatus(months: Record<PartState, number>): BackfillJob['status'] {
+  if (months.running) return 'running';
+  if (months.queued) return 'queued';
+  if (months.failed) return 'failed';
+  if (months.canceled) return 'canceled';
+  return 'done';
 }
