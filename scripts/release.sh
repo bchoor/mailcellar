@@ -9,6 +9,9 @@
 #   scripts/release.sh minor    tag main as the next minor; its notes are the
 #                               hand-written docs/releases/v0.X.0.md (required)
 #   scripts/release.sh notes    set the latest minor release's notes from its file again
+#   scripts/release.sh recut    delete every v0.* release and tag, then cut them again over
+#                               main's history: v0.0.0 at the first commit, one patch per
+#                               RELEASE_EVERY merges (Bikram, 2026-10-24)
 #   DRY_RUN=1 scripts/release.sh  print the releases it would cut, create nothing
 # .github/workflows/release.yml runs it on each merge to main (OpenShip's self-hosted
 # runner). With no v0.* tag yet, it first tags the first commit v0.0.0.
@@ -23,6 +26,21 @@ RELEASE_EVERY=${RELEASE_EVERY:-10}
 MODEL=claude-sonnet-5-5
 REPO=${GITHUB_REPOSITORY:-bchoor/mailcellar}
 git fetch -q origin main --tags
+if [ "$BUMP" = recut ]; then
+  for t in $(git tag --list 'v0.*'); do
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "would delete $t"
+    else
+      id=$(gh api "repos/$REPO/releases/tags/$t" --jq .id 2> /dev/null) \
+        && gh api -X DELETE "repos/$REPO/releases/$id" --silent
+      gh api -X DELETE "repos/$REPO/git/refs/tags/$t" --silent
+      echo "deleted $t"
+    fi
+    git tag -d "$t" > /dev/null
+  done
+  BUMP=patch
+  FORCE=0 # only whole batches: the merges after the last one wait for the next release
+fi
 LATEST=$(git tag --list 'v0.*' --sort=-v:refname | head -1)
 if [ -z "$LATEST" ]; then
   # First run: tag the first commit v0.0.0, so the count of merges starts there.

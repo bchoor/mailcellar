@@ -6,7 +6,7 @@ name: Release
 #   landed since the last tag, or on the first merge 7 days after it. On unless the repo
 #   variable RELEASE_ON_MERGE is "false". Its notes are key takeaways Claude writes
 #   (secret ANTHROPIC_API_KEY).
-# - Run workflow: patch (now, whatever the count), minor or notes, dry run by default.
+# - Run workflow: patch (now, whatever the count), minor, notes or recut, dry run by default.
 # - Pull requests that change the release path: dry run only, in their own job
 #   with a read-only token, because they run the branch's own release.sh.
 
@@ -18,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: patch, minor, or notes (set the latest minor's notes from docs/releases)
+        description: patch, minor, notes (set the latest minor's notes from docs/releases), or recut (delete every release and tag, cut again over main's history)
         type: choice
-        options: [patch, minor, notes]
+        options: [patch, minor, notes, recut]
         default: patch
       dry_run:
         description: Print the releases without creating them
