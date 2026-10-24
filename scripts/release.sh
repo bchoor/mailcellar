@@ -12,7 +12,7 @@
 # .github/workflows/release.yml runs it on each merge to main. Needs gh with REST
 # access to the repo, and jq. A patch's notes are key takeaways Claude writes from the
 # batch's PRs (ANTHROPIC_API_KEY), then the list of those PRs; without a key they are
-# GitHub's generated PR list.
+# GitHub's generated PR list. With no v0.* tag yet, it first tags the first commit v0.0.0.
 set -euo pipefail
 BUMP=${1:-patch}
 DRY_RUN=${DRY_RUN:-0}
@@ -23,8 +23,17 @@ REPO=${GITHUB_REPOSITORY:-bchoor/mailcellar}
 git fetch -q origin main --tags
 LATEST=$(git tag --list 'v0.*' --sort=-v:refname | head -1)
 if [ -z "$LATEST" ]; then
-  echo "no v0.* tag yet: tag the first commit v0.0.0 (docs/releases.md)" >&2
-  [ "$DRY_RUN" = 1 ] && exit 0 || exit 1
+  # First run: tag the first commit v0.0.0, so the count of merges starts there.
+  ROOT=$(git rev-list --max-parents=0 origin/main | tail -1)
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "would tag v0.0.0 at $(git log -1 --format='%h %s' "$ROOT")"
+  else
+    gh api -X POST "repos/$REPO/git/refs" -f ref=refs/tags/v0.0.0 -f sha="$ROOT" --silent
+    git fetch -q origin --tags
+    echo "tagged v0.0.0 at $(git log -1 --format='%h %s' "$ROOT")"
+  fi
+  git tag -f v0.0.0 "$ROOT" > /dev/null
+  LATEST=v0.0.0
 fi
 IFS=. read -r _ MINOR PATCH <<< "${LATEST#v}"
 
