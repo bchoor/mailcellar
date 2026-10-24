@@ -30,7 +30,7 @@ export function BackfillPage() {
           id: 'progress', title: 'Backfill progress', icon: HourglassIcon, kind: 'widget', link: false, w: 6,
           children: (
             <EmptyState icon={HourglassIcon} title="No backfill yet">
-              It starts once a Gmail account is connected and the sync is built. On the free tier it archives about
+              It starts once you add a Gmail account in Settings ▸ Accounts and the sync is built. On the free tier it archives about
               18,000 messages a day. Progress and each sync run show here.
             </EmptyState>
           ),

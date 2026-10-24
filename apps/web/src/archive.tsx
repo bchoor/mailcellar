@@ -63,7 +63,7 @@ export function EmptyState({ icon: Icon, title, children }: { icon: LucideIcon; 
 
 const NO_MAIL = (
   <EmptyState icon={MailIcon} title="No mail yet">
-    Connect a Gmail account and the archive fills as the backfill runs.
+    Add a Gmail account in Settings ▸ Accounts, and the archive fills as the backfill runs.
   </EmptyState>
 );
 /** The empty state once a rollup has loaded with no rows; nothing while it loads or fails. */
