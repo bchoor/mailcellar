@@ -1103,8 +1103,8 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
-   * Copy one month as a test of the copy engine: queue it and resume backfill, but only when no
-   * other month of any account is waiting or being copied (so nothing else starts with it).
+   * Copy one month as a test of the copy engine: queue it (unless it is already) and resume
+   * backfill, but only when no other month of any account is waiting or being copied.
    */
   async trial(account: string, month: string): Promise<{ started: boolean; active: { account: string; months: string[] }[]; job?: number | null }> {
     const user = this.userId();
@@ -1112,7 +1112,8 @@ export class MailboxDO extends DurableObject<Env> {
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
     const active = [];
     for (const id of ids) {
-      const months = await accountMailbox(this.env, user, id).activeList();
+      // The test month itself may already be queued (or part copied): that's the month that runs.
+      const months = (await accountMailbox(this.env, user, id).activeList()).filter((m) => id !== account || m !== month);
       if (months.length) active.push({ account: id, months });
     }
     if (active.length) return { started: false, active };

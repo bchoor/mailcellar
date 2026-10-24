@@ -266,6 +266,9 @@ describe('copy engine', () => {
     await owner.setBackfillPaused(true);
     syncDeps.start = async () => 'main';
     expect(await owner.trial(account, '2024-01')).toEqual({ started: false, active: [{ account, months: ['2023-05'] }] });
+    // The test month itself being queued already is fine.
+    expect(await owner.trial(account, '2023-05')).toMatchObject({ started: true, job: null });
+    await owner.setBackfillPaused(true);
     expect((await owner.syncAll()).paused).toBe(true);
     await mailbox.unqueueMonths(null);
     expect(await owner.trial(account, '2024-01')).toMatchObject({ started: true, job: expect.any(Number) });
