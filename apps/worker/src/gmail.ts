@@ -127,6 +127,20 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
 export const rateLimited = (body: string) => /rate ?limit/i.test(body);
 
 /**
+ * Get one message as raw, without the batch endpoint: for huge mail, so the answer is parsed
+ * once, with no multipart text copy beside it. Null: the message is gone (404).
+ */
+export async function getRaw(token: string, id: string): Promise<RawMessage | null> {
+  const res = await fetch(`${API}/messages/${id}?format=raw`, { headers: { authorization: `Bearer ${token}` } });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new GmailError(res.status === 403 && rateLimited(text) ? 429 : res.status, `Gmail message fetch failed (HTTP ${res.status})`);
+  }
+  return (await res.json()) as RawMessage;
+}
+
+/**
  * Group messages into raw batches of at most BATCH_SIZE messages and `maxBytes` together,
  * so a batch answer fits in a Worker's 128 MB. A message bigger than that goes alone.
  */

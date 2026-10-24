@@ -8,7 +8,7 @@
 import { mailboxName, monthQuery, r2Keys, type SyncPart, type UserId } from '@mailcellar/schema';
 import type { BasinRow } from './basin';
 import type { Env } from './env';
-import { b64urlBytes, batchGet, GmailError, listPage, type RawMessage } from './gmail';
+import { b64urlBytes, batchGet, getRaw, GmailError, listPage, type RawMessage } from './gmail';
 import { accountQuota } from './quota';
 import { accountMailbox, basinRow, launchLanes, syncDeps } from './sync';
 
@@ -63,6 +63,13 @@ export interface LaneProgress {
   runs: number;
   startedAt: string;
   updatedAt: string;
+  /**
+   * A huge message being fetched now. A run that finds it still set died fetching it (most
+   * likely out of memory), so the message goes to `tooBig` instead of killing every run after.
+   */
+  trying: string | null;
+  /** Messages too big to copy in a Worker; the month lands without them, and they're listed. */
+  tooBig: string[];
   /** The lane stopped because backfill was paused: resuming starts it again at once. */
   stopped: 'paused' | null;
   error: string | null;
@@ -72,7 +79,7 @@ export const freshLane = (part: SyncPart, runId: string, prior: boolean): LanePr
   const at = new Date().toISOString();
   return {
     runId, prev: null, job: part.job, month: part.month, list: 'huge', pageToken: null, huge: [], medium: [], small: [], all: [],
-    prior, copied: 0, bytes: 0, copiedIds: [], packs: 0, runs: 0, startedAt: at, updatedAt: at, stopped: null, error: null,
+    prior, copied: 0, bytes: 0, copiedIds: [], packs: 0, runs: 0, startedAt: at, updatedAt: at, trying: null, tooBig: [], stopped: null, error: null,
   };
 };
 
@@ -82,12 +89,12 @@ export async function readLane(env: Env, user: UserId, account: string, month: s
   return obj ? { p: (await obj.json()) as LaneProgress, etag: obj.etag } : null;
 }
 
-/** Save a lane's progress only if nobody saved it since `etag` (null: only if there is none). */
-export async function saveLane(env: Env, user: UserId, account: string, p: LaneProgress, etag: string | null): Promise<boolean> {
+/** Save a lane's progress only if nobody saved it since `etag` (null: only if there is none). Returns the new etag, or null. */
+export async function saveLane(env: Env, user: UserId, account: string, p: LaneProgress, etag: string | null): Promise<string | null> {
   const put = await env.ARCHIVE.put(r2Keys.lane(user, account, p.month), JSON.stringify(p), {
     onlyIf: etag ? { etagMatches: etag } : { etagDoesNotMatch: '*' },
   });
-  return put !== null;
+  return put?.etag ?? null;
 }
 
 const nextId = (account: string, month: string) => `${account}-${month}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
@@ -131,7 +138,15 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
   const none = (stopped: LaneResult['stopped']): LaneResult => ({ copied: 0, more: false, nextId: null, resumesAt: null, stopped });
   const got = await readLane(env, user, account, month);
   if (!got) return none('replaced');
-  const { p, etag } = got;
+  const { p } = got;
+  let etag = got.etag;
+  p.tooBig ??= [];
+  // The run before died fetching this huge message: set it aside and go on.
+  if (p.trying) {
+    p.huge = p.huge.filter((id) => id !== p.trying);
+    p.tooBig.push(p.trying);
+    p.trying = null;
+  }
   // A retry of a run that already saved and handed over: hand over again.
   if (p.prev === runId && p.runId) return { copied: 0, more: true, nextId: p.runId, resumesAt: null };
   if (p.runId !== runId) return none('replaced');
@@ -197,8 +212,25 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
         stats.waitMs += pace.waitMs;
         await scheduler.wait(pace.waitMs);
       }
+      // A huge message is fetched alone and on its own, and noted first, so a run it kills doesn't repeat it.
+      if (wave.tier === 'huge') {
+        // Only as a run's first copy, so the note saved is the run's whole state: nothing copied is lost with it.
+        if (rows.length || stats.copied) {
+          putBack(p, wave.tier, wave.batches);
+          break;
+        }
+        const id = wave.batches[0][0];
+        const marked = await saveLane(env, user, account, { ...p, huge: [id, ...p.huge], trying: id, updatedAt: new Date().toISOString() }, etag);
+        if (!marked) return { ...none('replaced'), copied: stats.copied };
+        etag = marked;
+        classA++;
+      }
       const t = Date.now();
-      const results = await Promise.allSettled(wave.batches.map((ids) => batchGet(token, ids, 'raw')));
+      const results = await Promise.allSettled(
+        wave.tier === 'huge'
+          ? [getRaw(token, wave.batches[0][0]).then((m) => ({ messages: m ? [m] : [], retry: [], throttled: false }))]
+          : wave.batches.map((ids) => batchGet(token, ids, 'raw')),
+      );
       stats.gmailMs += Date.now() - t;
       stats.calls += wave.batches.length;
       for (const [i, r] of results.entries()) {
@@ -210,6 +242,7 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
           continue;
         }
         if (r.value.throttled) throttled = true;
+        p.trying = null;
         putBack(p, wave.tier, [r.value.retry]);
         if (!r.value.messages.length) continue;
         const packed = pack(account, r.value.messages, r2Keys.pack(user, account, month, `${runId}-${p.packs}`), syncedAt);
@@ -239,7 +272,7 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
   const done = !p.list && !p.huge.length && !p.medium.length && !p.small.length;
   const next = done ? '' : nextId(account, month);
   const saved: LaneProgress = {
-    ...p, runId: next, prev: runId, copied: p.copied + stats.copied, bytes: p.bytes + stats.bytes, runs: p.runs + 1,
+    ...p, trying: null, runId: next, prev: runId, copied: p.copied + stats.copied, bytes: p.bytes + stats.bytes, runs: p.runs + 1,
     updatedAt: new Date().toISOString(), stopped: null, error: resumesAt ? p.error : null,
   };
   classA++;
@@ -278,6 +311,8 @@ function putBack(p: LaneProgress, tier: Tier, batches: string[][]): void {
 /** One pack: the batch's raw messages end to end, and each one's Basin row with where it is. */
 export function pack(account: string, messages: RawMessage[], key: string, syncedAt: string): { key: string; bytes: Uint8Array; rows: BasinRow[] } {
   const raws = messages.map((m) => b64urlBytes(m.raw));
+  // One message: its bytes are the pack, with no copy.
+  if (raws.length === 1) return { key, bytes: raws[0], rows: [basinRow(account, messages[0], raws[0], key, syncedAt, { offset: 0, len: raws[0].length })] };
   const bytes = new Uint8Array(raws.reduce((t, r) => t + r.length, 0));
   const rows: BasinRow[] = [];
   let offset = 0;
@@ -459,5 +494,6 @@ async function landMonth(env: Env, user: UserId, account: string, p: LaneProgres
   await syncDeps.launch(env, { user, account, index: p.month }, `${account}-index-${p.month}-${Date.now().toString(36)}`);
   await env.ARCHIVE.delete(r2Keys.lane(user, account, p.month));
   await mailbox.endLane(p.month);
+  if (p.tooBig?.length) console.log(JSON.stringify({ landed: p.month, tooBig: p.tooBig }));
   await launchLanes(env, user, account);
 }
