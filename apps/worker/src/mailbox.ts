@@ -118,8 +118,6 @@ export const MIGRATIONS: readonly string[] = [
   `ALTER TABLE job_months ADD COLUMN finished_at TEXT;`,
 ];
 
-/** How long a kept page answer may lag the writes behind it, in ms. */
-const KEEP_MS = 60_000;
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -147,18 +145,16 @@ export class MailboxDO extends DurableObject<Env> {
   /**
    * Answers the Backfill page polls (coverage, jobs), kept in memory. The page asks every 15 s,
    * and coverage reads every month row (~900 rows a call), which an open page turned into ~10M
-   * rows read a day. A kept answer is served until a write has happened and it is a minute old;
-   * queueing or changing a job drops them, so a click shows at once.
+   * rows read a day. A kept answer is served until a write to what it shows drops it (`kept.clear()`
+   * where months, jobs, Basin or Gmail counts change); any other write (lanes' alarms, usage)
+   * leaves it, since lanes' progress is laid over it from memory.
    */
-  private kept = new Map<string, { at: number; writes: number; value: unknown }>();
-  /** Writes so far (rows written, as count() sees them), to tell whether a kept answer is still true. */
-  private writes = 0;
+  private kept = new Map<string, unknown>();
 
   private keep<T>(key: string, read: () => T): T {
-    const k = this.kept.get(key);
-    if (k && (k.writes === this.writes || Date.now() - k.at < KEEP_MS)) return k.value as T;
+    if (this.kept.has(key)) return this.kept.get(key) as T;
     const value = read();
-    this.kept.set(key, { at: Date.now(), writes: this.writes, value });
+    this.kept.set(key, value);
     return value;
   }
 
@@ -398,6 +394,7 @@ export class MailboxDO extends DurableObject<Env> {
         if (parts.every((p) => busy.has(p.month))) this.noneQueued = true;
         if (fresh.length) {
           this.active = null;
+          this.kept.clear();
           written += this.setLanes();
         }
         if (written) this.count({ do_rows_written: written });
@@ -569,6 +566,7 @@ export class MailboxDO extends DurableObject<Env> {
   /** The month's search index has been built from Basin. */
   async markIndexed(month: string): Promise<void> {
     const { rowsWritten } = this.ctx.storage.sql.exec(`UPDATE basin_months SET indexed_at = ? WHERE month = ?`, new Date().toISOString(), month);
+    this.kept.clear();
     this.count({ do_rows_written: rowsWritten });
   }
 
@@ -695,6 +693,7 @@ export class MailboxDO extends DurableObject<Env> {
       `INSERT INTO gmail_months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
       month, n, new Date().toISOString(),
     );
+    this.kept.clear();
     this.count({ do_rows_written: rowsWritten });
   }
 
@@ -929,7 +928,10 @@ export class MailboxDO extends DurableObject<Env> {
           id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
         );
       const added = addedIds.length;
-      if (added) this.count({ messages_indexed: added, do_rows_written: rowsWritten });
+      if (added) {
+        this.kept.clear();
+        this.count({ messages_indexed: added, do_rows_written: rowsWritten });
+      }
       return { added, skipped: batch.length - added, rowsWritten, addedIds };
     });
   }
@@ -939,8 +941,6 @@ export class MailboxDO extends DurableObject<Env> {
    * so the meter never under-reports what the free tier counts.
    */
   private count(usage: Partial<Record<UsageMetric, number>>) {
-    // A call that only records reads changed nothing a kept answer shows.
-    if (Object.entries(usage).some(([m, v]) => m !== 'do_rows_read' && v)) this.writes++;
     const others = Object.entries(usage).filter(([m, v]) => m !== 'do_rows_written' && v);
     const written = (usage.do_rows_written ?? 0) + others.length + 1; // +1: the rows-written row itself
     const day = today();
