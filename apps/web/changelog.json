@@ -1,5 +1,42 @@
 [
   {
+    "tag": "v0.0.6",
+    "sha": "dec911078594fb624c96b94f46ffffad5b19fcd8",
+    "published_at": "2026-10-24T23:51:26Z",
+    "takeaways": [
+      {
+        "text": "**Unread dots, a Category column and Gmail-coloured labels**: On the Messages page, unread mail now shows a dot with bold sender and subject, a new Category column sits in the list, your own labels appear as chips in their Gmail colours, and search gains matching Read and category filters.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Separate Copying and Indexing panels**: On the Backfills page, the Sync card is now split into a Copying panel and an Indexing panel, each with its own status badge, and the page gains an Indexing section showing each month's searchable progress.",
+        "types": [
+          "improvement"
+        ]
+      },
+      {
+        "text": "**Daily Durable Object limit now pauses only indexing**: When the daily Durable Object write limit is reached, only indexing waits for the daily reset, and copying your Gmail mail into storage carries on, with the Backfills page saying \"Indexing paused\" and when it resumes.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Backfills page loads from one kept status summary**: The Backfills page and the status bar now read a single saved status per mailbox instead of scanning several tables, so leaving the page open uses far fewer Durable Object reads.",
+        "types": [
+          "performance"
+        ]
+      },
+      {
+        "text": "**Re-copying a month skips mail already stored**: When you copy a month again from the Backfills page, messages already in storage are no longer downloaded from Gmail and written a second time.",
+        "types": [
+          "fix"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.5",
     "sha": "f03e81fea71e3e150b108edeaf8f893aae661477",
     "published_at": "2026-10-24T23:12:28Z",
