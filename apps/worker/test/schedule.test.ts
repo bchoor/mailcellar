@@ -230,7 +230,7 @@ describe('Backfill by month', () => {
     const left = (await (await api(`/api/accounts/${id}/coverage`)).json()) as AccountCoverage;
     expect(left.months.filter((m) => m.state === 'queued').map((m) => m.month)).toEqual(['2024-01', '2024-03']);
     // A failed month leaves with Clear queue too.
-    expect((await box.claimLanes(1, id)).map((l) => l.month)).toEqual(['2024-03']);
+    expect((await box.claimLanes(user, id, 1)).map((l) => l.month)).toEqual(['2024-03']);
     await box.finishPart({ job: 1, month: '2024-03' }, 'failed', 'HTTP 403');
     expect(await (await post({})).json()).toMatchObject({ changed: 2 });
     expect(await (await post({})).json()).toMatchObject({ changed: 0 });
