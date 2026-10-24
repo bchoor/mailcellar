@@ -42,6 +42,7 @@ import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MESSAGES, type Msg } from './data';
 import { BackfillPage, BackfillStatus, UsagePage } from './ops-pages';
+import { RELEASES, RELEASES_API } from './releases';
 import './index.css';
 
 const MESSAGE_DOMAIN: ViewDomain<Msg> = {
@@ -264,6 +265,7 @@ function Frame() {
       brand={<span className="px-2 font-semibold">MailCellar</span>}
       nav={<>{nav}{opsNav}</>}
       status={<BackfillStatus />}
+      releases={RELEASES_API}
       user={{ email: 'you@example.com', name: 'Sample user' }}
       settings={[
         { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts this archive keeps', content: <AccountsSettings /> },
@@ -292,6 +294,8 @@ const router = createRouter({
   history: createMemoryHistory({ initialEntries: ['/'] }),
 });
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+// No releases API yet: seed What's new with the prototype's change log (Lumen's query key).
+queryClient.setQueryData(['edgeshell', 'releases', RELEASES_API], { pages: [RELEASES], pageParams: [null] });
 
 createRoot(document.getElementById('root') as HTMLElement).render(
   <StrictMode>
