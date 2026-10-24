@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { countAttachments, decodeWords, headers, indexRow, parseBatch, parseFrom, unescapeSnippet } from '../src/gmail';
+import { bodyText, countAttachments, decodeWords, headers, indexRow, parseAddresses, parseBatch, parseFrom, unescapeSnippet } from '../src/gmail';
 import { fakeRaw } from './fixtures/gmail';
 
 const bytes = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
@@ -34,5 +34,17 @@ describe('gmail parsing', () => {
   it('unescapes snippets and counts attachments', () => {
     expect(unescapeSnippet('It&#39;s &amp; &lt;b&gt; &#x2713;')).toBe("It's & <b> ✓");
     expect(countAttachments(bytes(fakeRaw(1, { attachments: 2 })))).toBe(2);
+  });
+
+  it('reads recipients', () => {
+    expect(parseAddresses('"Doe, Jane" <Jane@Example.com>, bob@example.com, (none)')).toEqual(['jane@example.com', 'bob@example.com']);
+  });
+
+  it('finds the body text, decoding the part and skipping attachments', () => {
+    const qp = 'Content-Type: multipart/alternative; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nCaf=C3=A9 au l=\r\nait\r\n--x\r\nContent-Type: text/html\r\n\r\n<p>ignored</p>\r\n--x--';
+    expect(bodyText(bytes(qp))).toBe('Café au lait');
+    const html = 'Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n' + btoa('<style>p{}</style><p>Hello&nbsp;there</p><p>Bye</p>');
+    expect(bodyText(bytes(html))).toBe('Hello there\nBye');
+    expect(bodyText(bytes(fakeRaw(7, { attachments: 1 })))).toBe('Body 7');
   });
 });

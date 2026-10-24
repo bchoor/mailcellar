@@ -29,6 +29,11 @@ export const r2Keys = {
     if (!SAFE_ID.test(account) || !/^[0-9a-f]{1,16}$/.test(gmailId)) throw new Error('invalid raw key');
     return `u/${user}/a/${account}/raw/${gmailId}.eml`;
   },
+  /** A batch of Basin rows waiting to be committed (gzipped JSON). */
+  basinQueue: (user: UserId, account: string, batch: string) => {
+    if (!SAFE_ID.test(account) || !SAFE_ID.test(batch)) throw new Error('invalid queue key');
+    return `u/${user}/a/${account}/basin-queue/${batch}.json.gz`;
+  },
   attachment: (user: UserId, sha256: string) => {
     if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error('invalid sha256');
     return `u/${user}/att/${sha256}`;

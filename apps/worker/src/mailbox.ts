@@ -74,6 +74,8 @@ export interface IngestResult {
   added: number;
   skipped: number;
   rowsWritten: number;
+  /** IDs of the messages this call added (not ones already indexed). */
+  addedIds: string[];
 }
 
 type Tally = Map<string, { n: number; bytes: number; first: number; last: number; name: string }>;
@@ -190,7 +192,7 @@ export class MailboxDO extends DurableObject<Env> {
       const domains: Tally = new Map();
       const months: Tally = new Map();
       const labels: Tally = new Map();
-      let added = 0;
+      const addedIds: string[] = [];
       for (const m of batch) {
         const labelText = m.labels.join(' ');
         const insert = sql.exec(
@@ -200,7 +202,7 @@ export class MailboxDO extends DurableObject<Env> {
         );
         rowsWritten += insert.rowsWritten;
         if (insert.rowsWritten === 0) continue;
-        added++;
+        addedIds.push(m.id);
         run(
           `INSERT INTO message_fts (rowid, subject, from_addr, from_name, snippet, labels)
            VALUES (CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
@@ -238,8 +240,9 @@ export class MailboxDO extends DurableObject<Env> {
              n = n + excluded.n, bytes = bytes + excluded.bytes`,
           id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
         );
+      const added = addedIds.length;
       if (added) this.count({ messages_indexed: added, do_rows_written: rowsWritten });
-      return { added, skipped: batch.length - added, rowsWritten };
+      return { added, skipped: batch.length - added, rowsWritten, addedIds };
     });
   }
 

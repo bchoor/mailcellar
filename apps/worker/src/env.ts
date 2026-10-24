@@ -5,6 +5,11 @@ export interface Env {
   ASSETS: Fetcher;
   MAILBOX: DurableObjectNamespace<MailboxDO>;
   ARCHIVE: R2Bucket;
+  /** Basin (R2 Data Catalog): the catalog, its warehouse and bucket, and the write token (a Worker secret). */
+  BASIN_CATALOG_URI: string;
+  BASIN_WAREHOUSE: string;
+  BASIN_BUCKET: string;
+  BASIN_TOKEN?: string;
   /** Copies one Gmail account, a batch a run (sync.ts). */
   SYNC: Workflow<SyncParams>;
   APP_VERSION: string;

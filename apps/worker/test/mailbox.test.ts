@@ -23,7 +23,7 @@ describe('mailbox index', () => {
     expect(rows / mail.length).toBeLessThan(6.98);
 
     const again = await stub.ingest(mail.slice(0, 100));
-    expect(again).toEqual({ added: 0, skipped: 100, rowsWritten: 0 });
+    expect(again).toEqual({ added: 0, skipped: 100, rowsWritten: 0, addedIds: [] });
   });
 
   it('keeps rollups equal to the messages they count', async () => {
