@@ -193,6 +193,10 @@ export const COMMIT_TURN_MS = 2 * 60_000;
 /** What a lane run may use, asked of the account's meters before it starts: a few rows of progress, no rows per message. */
 export const LANE_COST: QuotaUse = { do_rows_written: 30, do_rows_read: RUN_SIZE + 50, r2_class_a: RUN_SIZE + 30, r2_class_b: 50 };
 
+/** What a run may add to the backfill's spend, checked against the cap before it starts: RUN_SIZE messages of up to 100 KB. */
+export const LANE_SPEND = { classA: LANE_COST.r2_class_a!, classB: LANE_COST.r2_class_b!, bytes: RUN_SIZE * 100 * 1024 };
+export const RUN_SPEND = { classA: RUN_COST.r2_class_a!, classB: RUN_COST.r2_class_b!, bytes: RUN_SIZE * 100 * 1024 };
+
 /** An index row for a Basin row (the search index is built from Basin). */
 export function indexedFromBasin(r: Pick<BasinRow, 'id' | 'thread_id' | 'ts' | 'from_addr' | 'from_name' | 'subject' | 'snippet' | 'size' | 'attachments' | 'labels'>): IndexedMessage {
   return {
@@ -275,6 +279,11 @@ export async function runBatch(
     return later(new Date(full.resumesAt), 'paused', null);
   }
   state.pausedFor = null;
+  // The spend cap: a run that could pass it pauses all backfill instead (Bikram's $1.10, 2026-10-24).
+  if (await quota.overBudget(lane ? LANE_SPEND : RUN_SPEND)) {
+    await owner.setBackfillPaused(true, true);
+    return { copied: 0, phase: state.phase, more: false, resumesAt: null };
+  }
   let r2a = 0;
   let r2b = 0;
   let rowsRead = 0;
@@ -417,6 +426,8 @@ export async function runBatch(
   }
   // Sync-state saves and month bookkeeping: a few rows each run.
   await quota.add({ do_rows_written: rowsWritten + 6, do_rows_read: rowsRead + rowsWritten * 2 + 20, r2_class_a: r2a, r2_class_b: r2b });
+  // Raw mail counts at Gmail's size (gzip only makes it smaller), staged rows and Basin's files at a KB a message.
+  await quota.charge({ classA: r2a, classB: r2b, bytes: added.bytes + added.copied * 1024 });
 
   const next: SyncState = { ...state, pending: rest, copied: state.copied + added.copied, bytes: state.bytes + added.bytes, resumesAt: null, error: basinError };
   // A Basin failure waits 5 minutes, so a run that can't commit doesn't start the next at once;

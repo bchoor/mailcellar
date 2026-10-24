@@ -209,14 +209,23 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   private isPaused(): boolean {
-    return this.ctx.storage.sql.exec(`SELECT 1 FROM meta WHERE key = 'backfill_paused'`).toArray().length > 0;
+    return this.pausedBy() !== null;
   }
 
-  /** Pause or resume backfill. Resuming starts each account's sync again; lanes pick up where they stood. */
-  async setBackfillPaused(paused: boolean): Promise<void> {
+  /** Who paused backfill: the person ('true'), or the spend cap ('budget'); null when it runs. */
+  private pausedBy(): 'person' | 'budget' | null {
+    const v = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'backfill_paused'`).toArray()[0]?.value;
+    return v === undefined ? null : v === 'budget' ? 'budget' : 'person';
+  }
+
+  /**
+   * Pause or resume backfill. Resuming starts each account's sync again; lanes pick up where they
+   * stood. `budget`: the spend cap paused it (a person's pause is kept as theirs).
+   */
+  async setBackfillPaused(paused: boolean, budget = false): Promise<void> {
     const sql = this.ctx.storage.sql;
     const { rowsWritten } = paused
-      ? sql.exec(`INSERT INTO meta (key, value) VALUES ('backfill_paused', 'true') ON CONFLICT (key) DO NOTHING`)
+      ? sql.exec(`INSERT INTO meta (key, value) VALUES ('backfill_paused', ?) ON CONFLICT (key) DO NOTHING`, budget ? 'budget' : 'true')
       : sql.exec(`DELETE FROM meta WHERE key = 'backfill_paused'`);
     if (rowsWritten) this.count({ do_rows_written: rowsWritten });
     if (paused || !this.env.BASIN_TOKEN) return;
@@ -869,10 +878,12 @@ export class MailboxDO extends DurableObject<Env> {
     const accounts = this.ctx.storage.sql
       .exec<{ id: string; email: string }>(`SELECT id, email FROM accounts ORDER BY added_at`)
       .toArray();
-    const paused = this.isPaused();
+    const pausedBy = this.pausedBy();
+    const paused = pausedBy !== null;
     return {
       basin: !!this.env.BASIN_TOKEN,
       paused,
+      pausedBy,
       accounts: user
         ? await Promise.all(
             accounts.map(async (a) => {

@@ -203,6 +203,8 @@ export interface QuotaOverview {
   /** When Refresh may read Cloudflare again (at most one read a minute). */
   refreshAt: string;
   paused: { metric: QuotaMetric; label: string; resumesAt: string } | null;
+  /** The backfill's spend against its cap. */
+  spend: SpendOverview;
 }
 
 /** The billing period, if it is known and still running at `now`. */
@@ -227,4 +229,42 @@ export function quotaReset(period: 'day' | 'month', now = new Date(), billing?: 
 export function quotaCost(l: QuotaLimit, used: number): number | null {
   const { perMillion, limit } = l;
   return perMillion === undefined ? null : Math.max(0, used - limit) / 1_000_000 * perMillion;
+}
+
+/**
+ * The backfill's spend cap (Bikram, 2026-10-24 2:11 PM PT): all R2 spend the backfill adds from
+ * `since` until it's done stays at or under `cap`. The backfill pauses itself once spend plus
+ * the next run would pass `stop`, which leaves room for what the meters can't see yet.
+ * Everything is priced as billed: the account is past R2's free writes and storage already.
+ */
+export const SPEND = {
+  since: '2026-10-24T21:11:00Z',
+  cap: 1.1,
+  stop: 1.0,
+  /** The mailcellar bucket's bytes at `since` (Cloudflare's storage figure for 2026-10-24). */
+  baseBytes: 149_316_163,
+  classAPerOp: 4.5 / 1e6,
+  classBPerOp: 0.36 / 1e6,
+  /** One month of storage for each byte added: what it costs until the backfill is done. */
+  perByte: 0.015 / GB,
+} as const;
+
+/** What the backfill has added since SPEND.since: R2 writes and reads, and bytes stored. */
+export interface SpendUse {
+  classA: number;
+  classB: number;
+  bytes: number;
+}
+
+export const spendCost = (u: SpendUse) => u.classA * SPEND.classAPerOp + u.classB * SPEND.classBPerOp + Math.max(0, u.bytes) * SPEND.perByte;
+
+/** GET /api/quota's spend: dollars added since SPEND.since, against the cap. */
+export interface SpendOverview {
+  since: string;
+  cap: number;
+  stop: number;
+  spent: number;
+  use: SpendUse;
+  /** When Cloudflare's own figures were last read; null before (then only MailCellar's count). */
+  readAt: string | null;
 }

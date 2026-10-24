@@ -112,6 +112,38 @@ describe('Account limits', () => {
     expect(q.paused).toBeNull(); // 89.5% is under the stop line; only the run's cost would pass it.
   });
 
+  it('AC-SPEND1 the backfill pauses itself before its spend passes the $1.10 cap, and says so', async () => {
+    // Cloudflare's figures since the cap began: $0.999 of R2 writes, so one more run would pass the $1.00 stop.
+    quotaDeps.readSpend = async () => ({ classA: 222_000, classB: 0, bytes: 0 });
+    fakeGmail(fakeMessages(3));
+    const { user, account, mailbox } = await connected();
+    const now = new Date().toISOString();
+    await mailbox.saveSync({
+      phase: 'backfill', runId: 'run-s', total: null, copied: 0, bytes: 0, pending: [], pageToken: null, historyId: null,
+      basinQueue: [], basinReady: false, startedAt: now, updatedAt: now, resumesAt: null, error: null,
+    });
+    await mailbox.queueMonths(['2024-01'], 'Test');
+    expect(await runBatch(env, user, account, 'run-s', { calls: RUN_CALLS, batchBytes: BATCH_BYTES })).toMatchObject({ copied: 0, more: false });
+    const owner = env.MAILBOX.getByName(mailboxName(user));
+    expect(await owner.syncAll()).toMatchObject({ paused: true, pausedBy: 'budget' });
+    const q = await accountQuota(env).overview();
+    expect(q.spend).toMatchObject({ cap: 1.1, stop: 1, use: { classA: 222_000 } });
+    expect(q.spend.spent).toBeCloseTo(0.999);
+  });
+
+  it("AC-SPEND2 counts the backfill's own R2 use when Cloudflare's figures lag, and the higher of the two wins", async () => {
+    // Cloudflare has seen fewer writes than MailCellar made, but more stored bytes.
+    quotaDeps.readSpend = async () => ({ classA: 500, classB: 0, bytes: 70 * 1024 ** 3 });
+    const quota = accountQuota(env);
+    await quota.charge({ classA: 1000, bytes: 1024 ** 3 });
+    const s = (await quota.overBudget({ classA: 100 }))!;
+    expect(s.use).toEqual({ classA: 1000, classB: 0, bytes: 70 * 1024 ** 3 });
+    expect(s.spent).toBeCloseTo(0.0045 + 1.05);
+    quotaDeps.readSpend = async () => ({ classA: 0, classB: 0, bytes: 0 });
+    // Cloudflare is read again only after 2 minutes, so the figure holds.
+    expect((await quota.spend()).spent).toBeCloseTo(0.0045 + 1.05);
+  });
+
   it('AC-Q4 R2 past its free tier is billed, never paused', async () => {
     cloudflare({ r2_class_a: 2_000_000, r2_class_b: 9_500_000 });
     expect(await accountQuota(env).reserve({ r2_class_a: 1000, r2_class_b: 1000 })).toBeNull();
