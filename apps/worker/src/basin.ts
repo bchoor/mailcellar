@@ -140,3 +140,28 @@ async function ensureTable(catalog: RestCatalog, namespace: string): Promise<voi
   if (tables.some((t) => (t as { name?: string }).name === MESSAGES_TABLE)) return;
   await icebergCreateTable({ catalog, namespace, table: MESSAGES_TABLE, schema: icebergSchema(), partitionSpec: partitionSpec() });
 }
+
+/** Who the Basin check writes as: a namespace of its own, never a user's. */
+export const BASIN_CHECK_USER = 'basin-check' as UserId;
+
+/**
+ * Prove the catalog takes writes with the deployed token: create the check table if needed and
+ * append one made-up row. Run as a SYNC instance with `check: true`; touches no one's mail.
+ */
+export async function basinCheck(env: Env): Promise<{ ok: boolean; ms: number; error?: string }> {
+  const start = Date.now();
+  try {
+    const target = await catalogTarget(env, BASIN_CHECK_USER);
+    if (!target) return { ok: false, ms: 0, error: 'BASIN_TOKEN is not set' };
+    await target.ensure();
+    const now = new Date().toISOString();
+    await target.append([{
+      account: 'check', id: `check-${Date.now().toString(16)}`, thread_id: 'check', ts: now, from_addr: 'check@mailcellar.invalid',
+      from_name: 'Basin check', to_addrs: [], cc_addrs: [], subject: 'Basin check', snippet: '', body_text: '', labels: [],
+      size: 0, attachments: 0, raw_key: '', synced_at: now,
+    }]);
+    return { ok: true, ms: Date.now() - start };
+  } catch (e) {
+    return { ok: false, ms: Date.now() - start, error: String(e).slice(0, 500) };
+  }
+}
