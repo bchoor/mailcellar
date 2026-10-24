@@ -54,4 +54,5 @@ export * from './mail';
 export * from './ops';
 export * from './auth';
 export * from './sync';
+export * from './gmail';
 export * from './quota';
