@@ -111,7 +111,8 @@ export interface StageState {
   /** One line on why and when it resumes. */
   detail: string | null;
 }
-const compact = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : fmt(n));
+const compact = (n: number) =>
+  n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : fmt(n);
 /** A daily limit's use against where backfill stops for it: "DO rows written 89.7k of 97.5k". */
 function meterLine(name: string | null | undefined, meters: QuotaMeter[]): string | null {
   const m = meters.find((x) => x.label === name || x.metric === name);
@@ -195,6 +196,7 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
   const toIndex = cov?.months.filter(indexing) ?? [];
   const unindexed = toIndex.reduce((n, m) => n + m.inBasin - m.indexed, 0);
   const writes = meters.find((m) => m.metric === 'do_rows_written');
+  const reads = meters.find((m) => m.metric === 'do_rows_read');
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -225,36 +227,39 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
           <RefreshCwIcon className={busy ? 'animate-spin' : undefined} /> Sync now
         </Button>
       </div>
-      {s.phase !== null && (
-        <div className="flex flex-col gap-3">
-          <StageHead title="Copying" state={copy} fallback={copy.kind === 'running' || copy.kind === 'idle' ? headline(s) : null} />
-          <TileRow>
-            <Tile className="lg:flex-1" label="Rate" value={rate.value} caption={rate.caption} />
-            <Tile
-              className="lg:flex-1"
-              label="Queued to copy"
-              value={`${fmt(toCopy)} messages`}
-              caption={!queued.length ? 'nothing queued' : `in ${months(queued.length)}${s.ratePerMin ? ` · ${duration(toCopy / s.ratePerMin)} left` : ''}`}
-            />
-            <Tile className="lg:flex-1" label="Size" value={size(s.bytes)} caption="as Gmail counts it" />
-          </TileRow>
-        </div>
-      )}
-      {inBasin > 0 && (
-        <div className="flex flex-col gap-3">
-          <StageHead title="Indexing" state={index} />
-          <TileRow>
-            <Tile className="lg:flex-1" label="Searchable" value={`${Math.floor((indexed / inBasin) * 1000) / 10}%`} caption={`${fmt(indexed)} of ${fmt(inBasin)} copied`} />
-            <Tile className="lg:flex-1" label="Queued for indexing" value={`${fmt(unindexed)} messages`} caption={toIndex.length ? `in ${months(toIndex.length)}` : 'nothing queued'} />
-            <Tile
-              className="lg:flex-1"
-              label="DO writes today"
-              value={writes ? compact(writes.used) : '—'}
-              caption={writes ? `of ${compact(writes.limit * quotaStop(writes.metric))}, then indexing waits` : 'not read yet'}
-            />
-          </TileRow>
-        </div>
-      )}
+      {/* Copying and Indexing side by side: six cards on one row on desktop. */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {s.phase !== null && (
+          <div className="flex min-w-0 flex-col gap-3">
+            <StageHead title="Copying" state={copy} fallback={copy.kind === 'running' || copy.kind === 'idle' ? headline(s) : null} />
+            <TileRow>
+              <Tile className="lg:flex-1" label="Rate" value={rate.value} caption={rate.caption} />
+              <Tile
+                className="lg:flex-1"
+                label="Queued to copy"
+                value={fmt(toCopy)}
+                caption={!queued.length ? 'nothing queued' : `in ${months(queued.length)}${s.ratePerMin ? ` · ${duration(toCopy / s.ratePerMin).replace('about ', '~')}` : ''}`}
+              />
+              <Tile className="lg:flex-1" label="Size" value={size(s.bytes)} caption="as Gmail counts it" />
+            </TileRow>
+          </div>
+        )}
+        {inBasin > 0 && (
+          <div className="flex min-w-0 flex-col gap-3">
+            <StageHead title="Indexing" state={index} />
+            <TileRow>
+              <Tile className="lg:flex-1" label="Searchable" value={`${Math.floor((indexed / inBasin) * 1000) / 10}%`} caption={`${fmt(indexed)} of ${fmt(inBasin)}`} />
+              <Tile className="lg:flex-1" label="Queued for indexing" value={fmt(unindexed)} caption={toIndex.length ? `in ${months(toIndex.length)}` : 'nothing queued'} />
+              <Tile
+                className="lg:flex-1"
+                label="DO I/O today"
+                value={writes ? `${compact(writes.used)} writes` : '—'}
+                caption={reads ? `${compact(reads.used)} reads` : 'not read yet'}
+              />
+            </TileRow>
+          </div>
+        )}
+      </div>
       {s.error && <ErrorLine error={new Error(s.error)} />}
       {result && !result.ok && <ErrorLine error={new Error(result.detail)} />}
     </div>
