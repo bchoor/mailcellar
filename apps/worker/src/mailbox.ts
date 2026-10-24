@@ -41,7 +41,7 @@ import {
 } from '@mailcellar/schema';
 import type { Env } from './env';
 import { accountMailbox, accessToken, BasinNotReady, launchLanes, runDied, syncDeps } from './sync';
-import { BUCKET, freshLane, readLane, saveLane } from './copy';
+import { BUCKET, FLIGHT, freshLane, readLane, saveLane } from './copy';
 import { GmailError } from './gmail';
 import { accountQuota } from './quota';
 
@@ -428,7 +428,9 @@ export class MailboxDO extends DurableObject<Env> {
   /** Copy-rate samples (total copied over time), in memory only. */
   private samples: { at: string; copied: number }[] = [];
   /** Gmail pacing for this account, msgvault's way: a token bucket that halves on a rate limit and recovers. */
-  private bucket = { level: BUCKET.cap, at: 0, rate: BUCKET.rate, slowUntil: 0 };
+  private bucket = { level: BUCKET.cap, at: 0, rate: BUCKET.rate, calmAt: 0 };
+  /** Lanes with a batch in flight, until their next turn (or 30 s, if a run died mid-batch). */
+  private flight = new Map<string, number>();
   private access: { token: string; until: number } | null = null;
 
   private activeMonths(): Map<string, PartState> {
@@ -452,10 +454,10 @@ export class MailboxDO extends DurableObject<Env> {
     const b = this.bucket;
     if (throttled) {
       b.rate = Math.max(BUCKET.min, b.rate / 2);
-      b.slowUntil = now + BUCKET.slowMs;
-    } else if (b.rate < BUCKET.rate && now >= b.slowUntil) {
-      b.rate = Math.min(BUCKET.rate, b.rate * 2);
-      b.slowUntil = now + BUCKET.slowMs;
+      b.calmAt = now + BUCKET.calmMs;
+    } else if (b.rate < BUCKET.rate && now >= b.calmAt) {
+      b.rate = Math.min(BUCKET.rate, b.rate + BUCKET.step);
+      b.calmAt = now + BUCKET.calmMs;
     }
     b.level = Math.min(BUCKET.cap, b.level + (b.at ? ((now - b.at) / 1000) * b.rate : 0));
     b.at = now;
@@ -466,10 +468,14 @@ export class MailboxDO extends DurableObject<Env> {
   /**
    * A lane's turn before each Gmail batch, answered from memory: an access token, whether the
    * month is still queued, and how long to wait for Gmail's rate. It records what the lane has
-   * copied, for the page. Reads no rows (job months are read once, then kept).
+   * copied, for the page. Reads no rows (job months are read once, then kept). A turn ends the
+   * lane's last batch; one with units starts the next, unless FLIGHT batches are already out
+   * (then `busy`: ask again after waitMs).
    */
-  async laneTurn(t: { user: UserId; account: string; month: string; runId: string; units: number; throttled: boolean; copied: number; bytes: number }): Promise<{ token: string | null; active: boolean; waitMs: number; error?: string }> {
+  async laneTurn(t: { user: UserId; account: string; month: string; runId: string; units: number; throttled: boolean; copied: number; bytes: number }): Promise<{ token: string | null; active: boolean; waitMs: number; busy?: boolean; error?: string }> {
     const now = Date.now();
+    this.flight.delete(t.month);
+    for (const [month, until] of this.flight) if (until < now) this.flight.delete(month);
     const active = this.activeMonths().get(t.month) === 'running';
     const before = this.live.get(t.month);
     this.live.set(t.month, { at: now, runId: t.runId, copied: t.copied, bytes: t.bytes });
@@ -485,6 +491,11 @@ export class MailboxDO extends DurableObject<Env> {
         throw e;
       }
     }
+    if (t.units && this.flight.size >= FLIGHT) {
+      if (t.throttled) this.pace(0, true, now);
+      return { token: this.access.token, active, waitMs: 250, busy: true };
+    }
+    if (t.units) this.flight.set(t.month, now + 30_000);
     return { token: this.access.token, active, waitMs: this.pace(t.units, t.throttled, now) };
   }
 
