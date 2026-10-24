@@ -1,7 +1,7 @@
 {
   // MailCellar on the Bchoor@gmail.com Cloudflare account, Workers Free.
   // One Worker serves the app (static assets) and the API (/api/*), and hosts the
-  // per-user mailbox Durable Object. The sync Workflow joins in phase 2.
+  // per-user mailbox Durable Object, and the sync Workflow that copies Gmail into it.
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "mailcellar",
   "account_id": "87a4f50952b4b2ce00cab6c2680e63ae",
@@ -18,14 +18,21 @@
     "APP_VERSION": "dev",
     // Cloudflare Access app "icaruslab.dev apps (wildcard)", which covers this domain.
     "ACCESS_TEAM_DOMAIN": "https://bchoor.cloudflareaccess.com",
-    "ACCESS_AUD": "3b94450e06686e3e57c6a9bf1f017485bb9750730246009dddd9739955009fb0"
+    "ACCESS_AUD": "3b94450e06686e3e57c6a9bf1f017485bb9750730246009dddd9739955009fb0",
+    // Basin: R2 Data Catalog on the mailcellar bucket. The write token is the BASIN_TOKEN secret.
+    "BASIN_CATALOG_URI": "https://catalog.cloudflarestorage.com/87a4f50952b4b2ce00cab6c2680e63ae/mailcellar",
+    "BASIN_WAREHOUSE": "87a4f50952b4b2ce00cab6c2680e63ae_mailcellar",
+    "BASIN_BUCKET": "mailcellar"
   },
   "durable_objects": {
     "bindings": [{ "name": "MAILBOX", "class_name": "MailboxDO" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MailboxDO"] }],
+  "workflows": [{ "name": "mailcellar-sync", "binding": "SYNC", "class_name": "SyncWorkflow" }],
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
   "observability": { "enabled": true },
+  // hysnappy compiles WebAssembly at run time, which Workers forbid; see the shim.
+  "alias": { "hysnappy": "./apps/worker/src/shims/hysnappy.ts" },
   // wrangler dev keeps localhost as the request's origin (not the route's host), so the
   // Google sign-in redirect matches the client's http://localhost:8787 callback.
   "dev": { "port": 8787, "host": "localhost:8787" }

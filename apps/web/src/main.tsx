@@ -33,12 +33,13 @@ import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
 import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
-import { BackfillPage, UsagePage } from './ops-pages';
+import { UsagePage } from './ops-pages';
+import { BackfillPage, SyncStatus, syncAllNow } from './sync';
 import './index.css';
 
-// Schedules are saved in the mailbox. Nothing runs them until phase 2's sync,
-// so Run now reports that rather than pretending.
+// Schedules are saved in the mailbox, which runs Gmail sync on its own. Run now syncs every account now.
 function SchedulesSettings() {
+  const me = useMe();
   const query = useQuery({
     queryKey: ['schedules'],
     queryFn: async (): Promise<ScheduleItem[]> => {
@@ -58,11 +59,15 @@ function SchedulesSettings() {
         if (!res.ok) throw new Error(body.detail ?? 'Not saved');
         client.setQueryData<ScheduleItem[]>(['schedules'], (all) => all?.map((s) => (s.id === id ? body : s)));
       }}
-      onRun={async (): Promise<ScheduleRun> => ({
-        at: new Date().toISOString(),
-        ok: false,
-        detail: 'Not built yet: syncing starts when the backfill ships',
-      })}
+      onRun={async (id: string): Promise<ScheduleRun> => {
+        const ids = me.data?.accounts.map((a) => a.id) ?? [];
+        const run: ScheduleRun =
+          id === 'gmail-sync' && ids.length
+            ? await syncAllNow(ids)
+            : { at: new Date().toISOString(), ok: false, detail: id === 'gmail-sync' ? 'Add a Gmail account first' : 'Not built yet' };
+        await client.invalidateQueries({ queryKey: ['sync'] });
+        return run;
+      }}
     />
   );
 }
@@ -113,6 +118,7 @@ function Frame() {
       signOutUrl="/cdn-cgi/access/logout"
       // What's new: each release's Key takeaways and merged PRs; the status bar shows the version.
       releases="/api/releases"
+      statusEnd={<SyncStatus />}
       settings={[
         { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts MailCellar copies', content: <AccountsSettings /> },
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },

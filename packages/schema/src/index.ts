@@ -24,7 +24,16 @@ export function mailboxName(user: UserId, mailbox = 'default'): string {
 /** R2 keys, all under the user's own prefix. */
 export const r2Keys = {
   prefix: (user: UserId) => `u/${user}/`,
-  raw: (user: UserId, gmailId: GmailId) => `u/${user}/raw/${gmailId}.eml.gz`,
+  /** A message as Gmail sent it; gzipped when small (contentEncoding says which). */
+  raw: (user: UserId, account: string, gmailId: GmailId) => {
+    if (!SAFE_ID.test(account) || !/^[0-9a-f]{1,16}$/.test(gmailId)) throw new Error('invalid raw key');
+    return `u/${user}/a/${account}/raw/${gmailId}.eml`;
+  },
+  /** A batch of Basin rows waiting to be committed (gzipped JSON). */
+  basinQueue: (user: UserId, account: string, batch: string) => {
+    if (!SAFE_ID.test(account) || !SAFE_ID.test(batch)) throw new Error('invalid queue key');
+    return `u/${user}/a/${account}/basin-queue/${batch}.json.gz`;
+  },
   attachment: (user: UserId, sha256: string) => {
     if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error('invalid sha256');
     return `u/${user}/att/${sha256}`;
@@ -44,3 +53,4 @@ export interface Health {
 export * from './mail';
 export * from './ops';
 export * from './auth';
+export * from './sync';

@@ -126,6 +126,44 @@ export function checkScheduleChange(s: Schedule, change: unknown): ScheduleChang
   return out;
 }
 
+const DAY_MS = 86_400_000;
+const minutesOf = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
+
+/** tz's offset from UTC at `at`, in ms (wall clock minus UTC). */
+function tzOffset(tz: string, at: number): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+  }).formatToParts(at);
+  const p = Object.fromEntries(parts.map((x) => [x.type, Number(x.value)]));
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(at / 1000) * 1000;
+}
+
+/** The UTC time of a wall-clock time (as ms since the epoch, read as if UTC) in tz. */
+const fromWallClock = (tz: string, wall: number) => wall - tzOffset(tz, wall - tzOffset(tz, wall));
+
+/**
+ * When a schedule next runs after `after`: every `every` minutes from `from` to `to` (or once
+ * at `from` for a daily one), on its days, in its time zone. Null when it is off.
+ */
+export function nextRun(s: Schedule, after: Date): Date | null {
+  if (!s.on || !s.days.length) return null;
+  const now = after.getTime();
+  const today = Math.floor((now + tzOffset(s.tz, now)) / DAY_MS) * DAY_MS;
+  const start = minutesOf(s.from);
+  const step = s.kind === 'daily' ? 1440 : s.every;
+  let end = s.kind === 'daily' ? start : minutesOf(s.to);
+  if (end < start) end += 1440; // a window that runs past midnight
+  for (let d = -1; d <= 7; d++) {
+    const day = today + d * DAY_MS;
+    if (!s.days.includes(new Date(day).getUTCDay())) continue;
+    for (let m = start; m <= end; m += step) {
+      const at = fromWallClock(s.tz, day + m * 60_000);
+      if (at > now) return new Date(at);
+    }
+  }
+  return null;
+}
+
 /** Usage the mailbox measures itself, per UTC day. */
 export type UsageMetric = 'do_rows_written' | 'do_rows_read' | 'messages_indexed';
 export interface UsageDay {

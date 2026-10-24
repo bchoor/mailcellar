@@ -3,6 +3,7 @@ import { callback, connect, identity, revoke, testAccount, type Identity } from 
 import type { Env } from './env';
 
 export { MailboxDO } from './mailbox';
+export { SyncWorkflow } from './sync';
 
 // Static assets serve the app; only /api/* reaches this handler (run_worker_first).
 export default {
@@ -64,6 +65,18 @@ async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox
     const token = await mailbox.disconnectAccount(account[1]);
     if (!token) return Response.json({ error: 'not_found' }, { status: 404 });
     return Response.json({ ok: true, revoked: await revoke(token) }, { headers: noStore });
+  }
+  if (url.pathname === '/api/sync' && request.method === 'GET') return Response.json(await mailbox.syncAll(), { headers: noStore });
+  const sync = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/sync$/);
+  if (sync && request.method === 'GET') {
+    const info = await mailbox.syncInfo(sync[1]);
+    return info ? Response.json(info, { headers: noStore }) : Response.json({ error: 'not_found' }, { status: 404 });
+  }
+  if (sync && request.method === 'POST') {
+    // Sync now: start a run unless one is going; answers with where the sync stands.
+    const r = await mailbox.syncAccount(sync[1], true);
+    if ('error' in r) return Response.json({ error: r.error }, { status: r.error === 'not_found' ? 404 : 409, headers: noStore });
+    return Response.json({ started: r.status === 'started', sync: await mailbox.syncInfo(sync[1]) }, { headers: noStore });
   }
   const archive = url.pathname.match(/^\/api\/archive\/([a-z]+)$/);
   if (archive && request.method === 'GET' && ARCHIVE_VIEWS.includes(archive[1] as ArchiveView)) {
