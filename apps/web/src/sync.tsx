@@ -367,8 +367,7 @@ function AllMailboxesMap({ accounts, basin }: { accounts: SyncOverview['accounts
               rows: accounts.map((a) => ({
                 row: a.id,
                 label: a.email,
-                sub: freshness(a.sync),
-                badge: <Badge variant={badge(a.sync).variant}>{badge(a.sync).label}</Badge>,
+                sub: `${badge(a.sync).label} · ${freshness(a.sync)}`,
               })),
               current: Object.values(all)[0]?.current,
             };
