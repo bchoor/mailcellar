@@ -3,8 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "type-check": "tsc --noEmit",
-    "test": "vitest run"
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@mailcellar/schema": "workspace:*",
@@ -13,9 +12,7 @@
     "icebird": "0.9.2"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "1.4.7",
     "@cloudflare/workers-types": "5.20261023.1",
-    "typescript": "5.9.3",
-    "vitest": "5.0.5"
+    "typescript": "5.9.3"
   }
 }
