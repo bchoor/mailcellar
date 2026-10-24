@@ -8,7 +8,7 @@ const BATCH_URL = 'https://gmail.googleapis.com/batch/gmail/v1';
 /** Google's advice for Gmail batches; larger ones get rate limited. */
 export const BATCH_SIZE = 50;
 
-/** A Gmail call that failed. `status` 429 and 5xx are worth retrying later. */
+/** A Gmail call that failed. `status` 429 (also Gmail's rate-limit 403) and 5xx are worth retrying later. */
 export class GmailError extends Error {
   constructor(readonly status: number, message: string) {
     super(message);
@@ -87,7 +87,7 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
   token: string,
   ids: string[],
   format: F,
-): Promise<{ messages: (F extends 'raw' ? RawMessage : MinimalMessage)[]; retry: string[] }> {
+): Promise<{ messages: (F extends 'raw' ? RawMessage : MinimalMessage)[]; retry: string[]; throttled: boolean }> {
   const boundary = `mc${crypto.randomUUID().replaceAll('-', '')}`;
   const body =
     ids
@@ -98,21 +98,46 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
     headers: { authorization: `Bearer ${token}`, 'content-type': `multipart/mixed; boundary=${boundary}` },
     body,
   });
-  if (!res.ok) throw new GmailError(res.status, `Gmail batch failed (HTTP ${res.status})`);
+  if (!res.ok) {
+    // Gmail says it's going too fast with 429, or 403 and a rate-limit reason (not a refusal).
+    const text = await res.text();
+    throw new GmailError(res.status === 403 && rateLimited(text) ? 429 : res.status, `Gmail batch failed (HTTP ${res.status})`);
+  }
   const parts = parseBatch(new TextDecoder().decode(await res.arrayBuffer()), res.headers.get('content-type') ?? '');
   const messages = [];
   const got = new Set<string>();
   const retry: string[] = [];
+  let throttled = false;
   for (const p of parts) {
     const id = p.contentId?.replace(/^response-/, '');
     if (!id) continue;
     got.add(id);
     if (p.status === 200) messages.push(JSON.parse(p.body));
-    else if (p.status === 429 || p.status >= 500) retry.push(id);
+    else if (p.status === 429 || (p.status === 403 && rateLimited(p.body))) {
+      retry.push(id);
+      throttled = true;
+    } else if (p.status >= 500) retry.push(id);
     else if (p.status !== 404) throw new GmailError(p.status, `Gmail message fetch failed (HTTP ${p.status})`);
   }
   for (const id of ids) if (!got.has(id)) retry.push(id);
-  return { messages, retry };
+  return { messages, retry, throttled };
+}
+
+/** A 403 that is Gmail's rate limit (rateLimitExceeded, userRateLimitExceeded), not access refused. */
+export const rateLimited = (body: string) => /rate ?limit/i.test(body);
+
+/**
+ * Get one message as raw, without the batch endpoint: for huge mail, so the answer is parsed
+ * once, with no multipart text copy beside it. Null: the message is gone (404).
+ */
+export async function getRaw(token: string, id: string): Promise<RawMessage | null> {
+  const res = await fetch(`${API}/messages/${id}?format=raw`, { headers: { authorization: `Bearer ${token}` } });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new GmailError(res.status === 403 && rateLimited(text) ? 429 : res.status, `Gmail message fetch failed (HTTP ${res.status})`);
+  }
+  return (await res.json()) as RawMessage;
 }
 
 /**
@@ -181,9 +206,15 @@ function binary(bytes: Uint8Array): string {
 
 /** The header block of a raw message, unfolded, as name → first value. */
 export function headers(raw: Uint8Array): Map<string, string> {
-  const head = binary(raw.subarray(0, Math.min(raw.length, 65536)));
-  const end = head.search(/\r?\n\r?\n/);
-  const block = (end < 0 ? head : head.slice(0, end)).replace(/\r?\n[ \t]+/g, ' ');
+  // Only the header block is turned into text: find its blank line in the bytes first.
+  const limit = Math.min(raw.length, 65536);
+  let end = limit;
+  for (let i = 0; i < limit - 1; i++)
+    if (raw[i] === 10 && (raw[i + 1] === 10 || (raw[i + 1] === 13 && raw[i + 2] === 10))) {
+      end = i;
+      break;
+    }
+  const block = binary(raw.subarray(0, end)).replace(/\r?\n[ \t]+/g, ' ');
   const out = new Map<string, string>();
   for (const line of block.split(/\r?\n/)) {
     const i = line.indexOf(':');
@@ -249,8 +280,7 @@ export function countAttachments(raw: Uint8Array): number {
 }
 
 /** The index row for a message, from Gmail's fields and the raw headers. */
-export function indexRow(m: RawMessage, raw: Uint8Array): IndexedMessage {
-  const h = headers(raw);
+export function indexRow(m: RawMessage, raw: Uint8Array, h = headers(raw)): IndexedMessage {
   const from = parseFrom(h.get('from') ?? '');
   return {
     id: m.id,
@@ -288,6 +318,41 @@ export function parseAddresses(value: string): string[] {
   return out;
 }
 
+/** One byte a character, as `binary` made them. */
+function latin1Bytes(s: string): Uint8Array {
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+const hex = (c: number) => (c >= 48 && c <= 57 ? c - 48 : c >= 65 && c <= 70 ? c - 55 : c >= 97 && c <= 102 ? c - 87 : -1);
+
+/** Quoted-printable as bytes, in one pass: the regex version was most of a message's CPU. */
+function quotedPrintable(s: string): Uint8Array {
+  const out = new Uint8Array(s.length);
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c !== 61) {
+      out[n++] = c;
+      continue;
+    }
+    const a = s.charCodeAt(i + 1);
+    if (a === 13 && s.charCodeAt(i + 2) === 10) i += 2;
+    else if (a === 10) i += 1;
+    else {
+      const hi = hex(a);
+      const lo = hex(s.charCodeAt(i + 2));
+      if (hi < 0 || lo < 0) out[n++] = c;
+      else {
+        out[n++] = hi * 16 + lo;
+        i += 2;
+      }
+    }
+  }
+  return out.subarray(0, n);
+}
+
 function decodeBody(body: string, encoding: string, charset: string): string {
   let bytes: Uint8Array;
   const enc = encoding.toLowerCase();
@@ -298,9 +363,8 @@ function decodeBody(body: string, encoding: string, charset: string): string {
       return '';
     }
   } else if (enc === 'quoted-printable') {
-    const s = body.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
-    bytes = Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff);
-  } else bytes = Uint8Array.from(body, (c) => c.charCodeAt(0) & 0xff);
+    bytes = quotedPrintable(body);
+  } else bytes = latin1Bytes(body);
   try {
     return new TextDecoder(charset || 'utf-8').decode(bytes);
   } catch {
@@ -331,7 +395,8 @@ export function bodyText(raw: Uint8Array, max = 32 * 1024): string {
   type Found = { plain?: string; html?: string };
   const found: Found = {};
   const walk = (entity: string, depth: number) => {
-    if (depth > 8 || (found.plain !== undefined && found.html !== undefined)) return;
+    // The plain part wins over HTML, so once it is found nothing else is decoded.
+    if (depth > 8 || found.plain !== undefined) return;
     const split = entity.search(/\r?\n\r?\n/);
     const head = (split < 0 ? entity : entity.slice(0, split)).replace(/\r?\n[ \t]+/g, ' ');
     const body = split < 0 ? '' : entity.slice(split).replace(/^\r?\n\r?\n/, '');

@@ -1,4 +1,6 @@
-// The sync Workflow: copies one Gmail account into MailCellar, 500 messages a run.
+// The sync Workflow: copies new mail of one Gmail account into MailCellar, 500 messages a run,
+// and routes the other runs: backfill lanes and the Basin committer (copy.ts), index builds,
+// the census.
 // Spike S7 found that a Workflow run is one Worker invocation, so Workers Free's caps of
 // 50 outside requests and 1,000 Cloudflare calls cover the whole run. A run therefore does
 // one batch and then starts the next run, until the account is copied.
@@ -10,6 +12,7 @@ import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, month
 import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
+import { runCommit, runLane } from './copy';
 import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, headers, indexRow, labels, listPage, packBySize, parseAddresses, profile, type RawMessage } from './gmail';
 
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
@@ -64,7 +67,7 @@ export interface RunResult {
   resumesAt: string | null;
 }
 
-async function accessToken(env: Env, refreshToken: string): Promise<string> {
+export async function accessToken(env: Env, refreshToken: string): Promise<string> {
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -89,8 +92,9 @@ async function gunzipJson<T>(body: ReadableStream): Promise<T> {
 }
 
 /** Basin's row for a message: the index row plus recipients and body text. */
-function basinRow(account: string, m: RawMessage, raw: Uint8Array, row: IndexedMessage, rawKey: string, syncedAt: string): BasinRow {
+export function basinRow(account: string, m: RawMessage, raw: Uint8Array, rawKey: string, syncedAt: string, at?: { offset: number; len: number }): BasinRow {
   const h = headers(raw);
+  const row = indexRow(m, raw, h);
   return {
     account,
     id: row.id,
@@ -108,6 +112,7 @@ function basinRow(account: string, m: RawMessage, raw: Uint8Array, row: IndexedM
     attachments: row.attachments,
     raw_key: rawKey,
     synced_at: syncedAt,
+    ...(at ? { raw_offset: at.offset, raw_len: at.len } : {}),
   };
 }
 
@@ -190,11 +195,7 @@ export const syncDeps: {
 export const BASIN_BEHIND = 4;
 /** How long a run may hold the account's Basin commit turn. */
 export const COMMIT_TURN_MS = 2 * 60_000;
-/** What a lane run may use, asked of the account's meters before it starts: a few rows of progress, no rows per message. */
-export const LANE_COST: QuotaUse = { do_rows_written: 30, do_rows_read: RUN_SIZE + 50, r2_class_a: RUN_SIZE + 30, r2_class_b: 50 };
-
 /** What a run may add to the backfill's spend, checked against the cap before it starts: RUN_SIZE messages of up to 100 KB. */
-export const LANE_SPEND = { classA: LANE_COST.r2_class_a!, classB: LANE_COST.r2_class_b!, bytes: RUN_SIZE * 100 * 1024 };
 export const RUN_SPEND = { classA: RUN_COST.r2_class_a!, classB: RUN_COST.r2_class_b!, bytes: RUN_SIZE * 100 * 1024 };
 
 /** An index row for a Basin row (the search index is built from Basin). */
@@ -206,22 +207,20 @@ export function indexedFromBasin(r: Pick<BasinRow, 'id' | 'thread_id' | 'ts' | '
 }
 
 /**
- * Start lanes for queued backfill months, up to MAX_LANES at once, and restart lanes whose run
- * died. Each lane copies one month to R2 and Basin, then takes the next queued month.
+ * Start lanes for queued backfill months, up to MAX_LANES at once, and restart lanes that
+ * stopped. Each lane copies one month to R2 and Basin (copy.ts), then takes the next queued month.
  */
-export async function launchLanes(env: Env, user: UserId, account: string, legacy?: SyncState): Promise<number> {
+export async function launchLanes(env: Env, user: UserId, account: string): Promise<number> {
   if (await env.MAILBOX.getByName(mailboxName(user)).backfillPaused()) return 0;
-  const lanes = await accountMailbox(env, user, account).claimLanes(MAX_LANES, account, legacy);
+  const lanes = await accountMailbox(env, user, account).claimLanes(user, account, MAX_LANES);
   for (const l of lanes) await syncDeps.launch(env, { user, account, month: l.month }, l.runId);
   return lanes.length;
 }
 
 /**
- * One run of a sync. Without `month`, the account's own sync: new mail since the last run,
- * and it hands queued backfill months to lanes. With `month`, one lane: that month listed and
- * copied, RUN_SIZE messages at most a run. Either way mail goes to R2 and its rows to Basin
- * first; the search index is built from Basin after (live mail as soon as it's committed, a
- * backfill month once all of it has landed).
+ * One run of the account's own sync: new mail since the last run, and it hands queued backfill
+ * months to lanes (copy.ts). Mail goes to R2 and its rows to Basin first; new mail is indexed as
+ * soon as Basin has it.
  */
 export async function runBatch(
   env: Env,
@@ -229,26 +228,16 @@ export async function runBatch(
   account: string,
   runId: string,
   limits: RunOptions = { calls: RUN_CALLS, batchBytes: BATCH_BYTES },
-  month?: string,
 ): Promise<RunResult> {
   const mailbox = accountMailbox(env, user, account);
-  const lane = month ?? null;
-  const state = lane ? await mailbox.laneState(lane) : await mailbox.syncState();
+  const state = await mailbox.syncState();
   const replaced: RunResult = { copied: 0, phase: 'replaced', more: false, resumesAt: null };
   if (!state || state.runId !== runId) return replaced;
   const added = { copied: 0, bytes: 0 };
-  const save = (next: SyncState) => {
-    const at = new Date().toISOString();
-    return lane ? mailbox.saveLane(lane, { ...next, updatedAt: at }, runId, added) : mailbox.saveSync({ ...next, updatedAt: at }, runId, added);
-  };
+  const save = (next: SyncState) => mailbox.saveSync({ ...next, updatedAt: new Date().toISOString() }, runId, added);
   // A stop fails the month being copied; Retry copies it again (copied mail is skipped).
   const stop = async (error: string): Promise<RunResult> => {
     const part = state.part;
-    if (lane) {
-      if (part) await mailbox.finishPart(part, 'failed', error);
-      await mailbox.endLane(lane, runId);
-      return { copied: 0, phase: 'error', more: false, resumesAt: null };
-    }
     if (!(await save({ ...state, phase: 'error', error, part: null, pending: [], pageToken: part ? null : state.pageToken }))) return replaced;
     if (part) await mailbox.finishPart(part, 'failed', error);
     return { copied: 0, phase: 'error', more: false, resumesAt: null };
@@ -259,12 +248,6 @@ export async function runBatch(
     return { copied: 0, phase, more: true, resumesAt: resumesAt.toISOString() };
   };
 
-  // A lane whose month was taken out of the queue just ends; what it copied stays.
-  if (lane && (!state.part || (await mailbox.partState(state.part)) !== 'running')) {
-    await mailbox.endLane(lane, runId);
-    return { copied: 0, phase: 'backfill', more: false, resumesAt: null };
-  }
-
   const owner = env.MAILBOX.getByName(mailboxName(user));
   // Paused by the person: stop without saving. A lane keeps where it stood; resuming picks it up.
   if (await owner.backfillPaused()) return { copied: 0, phase: state.phase, more: false, resumesAt: null };
@@ -273,14 +256,14 @@ export async function runBatch(
 
   // The account's daily limits are shared by every user: pause before one, resume after it resets.
   const quota = accountQuota(env);
-  const full = await quota.reserve(lane ? LANE_COST : RUN_COST);
+  const full = await quota.reserve(RUN_COST);
   if (full) {
     state.pausedFor = full.label;
     return later(new Date(full.resumesAt), 'paused', null);
   }
   state.pausedFor = null;
   // The spend cap: a run that could pass it pauses all backfill instead (Bikram's $1.10, 2026-10-24).
-  if (await quota.overBudget(lane ? LANE_SPEND : RUN_SPEND)) {
+  if (await quota.overBudget(RUN_SPEND)) {
     await owner.setBackfillPaused(true, true);
     return { copied: 0, phase: state.phase, more: false, resumesAt: null };
   }
@@ -294,7 +277,7 @@ export async function runBatch(
   let calls = 1; // the token refresh
   try {
     const token = await accessToken(env, refreshToken);
-    if (!lane) {
+    {
       // First run: how much there is, where new mail starts, and the label names.
       if (state.historyId === null) {
         const p = await profile(token);
@@ -304,10 +287,10 @@ export async function runBatch(
         state.historyId = p.historyId;
       }
       // Backfill months are copied by lanes, several at once. A month this sync was copying
-      // itself (before lanes) moves to a lane with what it had listed and staged.
+      // itself (before lanes) is still queued as running, so a lane copies it again from the start.
       if (state.phase === 'backfill' || state.part || (await mailbox.hasQueued())) {
-        await launchLanes(env, user, account, state.part ? state : undefined);
-        if (state.part) Object.assign(state, { part: null, pending: [], pageToken: null, basinQueue: [] });
+        await launchLanes(env, user, account);
+        if (state.part) Object.assign(state, { part: null, pending: [], pageToken: null });
         state.phase = 'live';
       }
       if (!state.pending.length) {
@@ -317,14 +300,6 @@ export async function runBatch(
         state.historyId = fresh.historyId;
         calls += fresh.calls;
       }
-    } else if (!state.pending.length && state.pageToken !== null) {
-      const page = await listPage(token, state.pageToken || undefined, 500, monthQuery(lane));
-      calls++;
-      // Mail the index already has is skipped; mail copied but not indexed yet may be copied
-      // again, and the index keeps one row per message.
-      state.pending = await mailbox.unknownIds(page.ids);
-      rowsRead += page.ids.length;
-      state.pageToken = page.next;
     }
     // Basin is behind: this run only commits what's staged, so its CPU stays in budget.
     const take = state.basinQueue.length >= BASIN_BEHIND ? [] : state.pending.slice(0, RUN_SIZE);
@@ -363,7 +338,7 @@ export async function runBatch(
         await env.ARCHIVE.put(rawKey, small ? await gzip(raw) : raw, {
           httpMetadata: { contentType: 'message/rfc822', contentEncoding: small ? 'gzip' : undefined },
         });
-        basin.push(basinRow(account, m, raw, indexRow(m, raw), rawKey, syncedAt));
+        basin.push(basinRow(account, m, raw, rawKey, syncedAt));
         added.copied++;
         added.bytes += m.sizeEstimate;
       }
@@ -373,12 +348,12 @@ export async function runBatch(
     Object.assign(added, { copied: 0, bytes: 0 });
     if (e instanceof GmailError && (e.status === 401 || e.status === 403)) return stop(e.message);
     if (!retryable(e)) throw e;
-    return later(new Date(Date.now() + (lane ? 60_000 : 5 * 60_000)), state.phase, `Gmail didn't answer (${e instanceof GmailError ? `HTTP ${e.status}` : 'network'}). Trying again shortly.`);
+    return later(new Date(Date.now() + 5 * 60_000), state.phase, `Gmail didn't answer (${e instanceof GmailError ? `HTTP ${e.status}` : 'network'}). Trying again shortly.`);
   }
 
   // Stage this batch's rows for Basin, then commit what's staged when it's this run's turn.
   if (basin.length) {
-    const key = r2Keys.basinQueue(user, account, `${lane ?? 'live'}-${runId}-${Date.now().toString(36)}`);
+    const key = r2Keys.basinQueue(user, account, `live-${runId}-${Date.now().toString(36)}`);
     r2a++;
     await env.ARCHIVE.put(key, await gzipJson(basin));
     state.basinQueue = [...state.basinQueue, key];
@@ -408,8 +383,8 @@ export async function runBatch(
         r2a += 10 + commit.length;
         await env.ARCHIVE.delete(commit);
         state.basinQueue = state.basinQueue.slice(commit.length);
-        // New mail is indexed as soon as Basin has it; a backfill month once all of it has landed.
-        if (!lane && queued.length) {
+        // New mail is indexed as soon as Basin has it.
+        if (queued.length) {
           try {
             rowsWritten = (await mailbox.ingest(queued.map(indexedFromBasin))).rowsWritten;
           } catch (e) {
@@ -435,20 +410,6 @@ export async function runBatch(
   if (basinError) next.resumesAt = new Date(Date.now() + 5 * 60_000).toISOString();
   else if (waitTurn && !added.copied) next.resumesAt = new Date(Date.now() + 15_000).toISOString();
 
-  if (lane) {
-    // The month has landed once it's listed to the end, copied and committed: then its index
-    // is built from Basin, and the lane takes the next queued month.
-    const landed = next.pageToken === null && !rest.length && !next.basinQueue.length;
-    if (!(await save(next))) return replaced;
-    if (landed && next.part) {
-      await mailbox.landMonth(next.part);
-      await syncDeps.launch(env, { user, account, index: lane }, `${account}-index-${lane}-${Date.now().toString(36)}`);
-      await mailbox.endLane(lane, runId);
-      await launchLanes(env, user, account);
-      return { copied: added.copied, phase: 'backfill', more: false, resumesAt: null };
-    }
-    return { copied: added.copied, phase: 'backfill', more: true, resumesAt: next.resumesAt };
-  }
   if (!(await save(next))) return replaced;
   const more = rest.length > 0 || next.basinQueue.length > 0;
   return { copied: added.copied, phase: next.phase, more, resumesAt: next.resumesAt };
@@ -574,13 +535,33 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
 }
 
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
-  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult | number | Awaited<ReturnType<typeof basinCheck>> | Awaited<ReturnType<typeof runCensus>>> {
+  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<unknown> {
     if (event.payload.check) return step.do('basin check', { retries: { limit: 0, delay: '1 second' } }, () => basinCheck(this.env));
     const { names } = event.payload;
     if (names) return step.do('names', () => accountQuota(this.env).setNames(names));
     const user = asUserId(event.payload.user);
     const { account, month } = event.payload;
     const runId = event.instanceId;
+    if (event.payload.trial) {
+      const trial = event.payload.trial;
+      return step.do('trial', () => this.env.MAILBOX.getByName(mailboxName(user)).trial(account, trial, !!event.payload.park));
+    }
+    if (event.payload.pause) return step.do('pause', () => this.env.MAILBOX.getByName(mailboxName(user)).setBackfillPaused(true).then(() => true));
+    if (event.payload.commit) {
+      const r = await step.do('commit', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runCommit(this.env, user, account, runId));
+      if (!r.more || !r.nextId) return r;
+      if (r.waitMs) await step.sleep('wait for more staged rows', r.waitMs);
+      await step.do('next run', () => syncDeps.launch(this.env, { user, account, commit: true }, r.nextId!));
+      return r;
+    }
+    if (month) {
+      // Each step is idempotent: a retried run that already saved hands over to the run it named.
+      const r = await step.do('copy', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runLane(this.env, user, account, month, runId));
+      if (!r.more || !r.nextId) return r;
+      if (r.resumesAt) await step.sleepUntil('wait before trying again', new Date(r.resumesAt));
+      await step.do('next run', () => syncDeps.launch(this.env, { user, account, month }, r.nextId!));
+      return r;
+    }
     if (event.payload.index) {
       const index = event.payload.index;
       const from = event.payload.from ?? 0;
@@ -609,20 +590,12 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     // Each step is idempotent: R2 writes overwrite and the index skips messages it has.
     // Gmail and the daily limit are handled inside the step (a fresh run retries them, with a
     // fresh request budget); a retry here is for anything unexpected.
-    const result = await step.do('copy', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () =>
-      runBatch(this.env, user, account, runId, undefined, month),
-    );
+    const result = await step.do('copy', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runBatch(this.env, user, account, runId));
     if (!result.more) return result;
     if (result.resumesAt) await step.sleepUntil('wait before trying again', new Date(result.resumesAt));
     // Hand over to a fresh run, so the next batch gets its own request budget.
     await step.do('next run', async () => {
       const mailbox = accountMailbox(this.env, user, account);
-      if (month) {
-        const nextId = `${account}-${month}-${Date.now().toString(36)}`;
-        if (!(await mailbox.handLane(month, runId, nextId))) return null;
-        await syncDeps.launch(this.env, { user, account, month }, nextId);
-        return nextId;
-      }
       const state = await mailbox.syncState();
       if (!state || state.runId !== runId) return null;
       const nextId = `${account}-${Date.now().toString(36)}`;

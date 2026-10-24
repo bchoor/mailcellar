@@ -72,6 +72,9 @@ export const BASIN_TABLES = {
       { name: 'attachments', type: 'int', required: true },
       { name: 'raw_key', type: 'string', required: true },
       { name: 'synced_at', type: 'timestamptz', required: true },
+      // Added 2026-10-24: raw mail is packed, many messages to a file; a message is these bytes of raw_key.
+      { name: 'raw_offset', type: 'long' },
+      { name: 'raw_len', type: 'long' },
     ],
   },
   attachments: {

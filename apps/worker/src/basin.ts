@@ -5,7 +5,7 @@
 import { BASIN_TABLES, basinNamespace, type UserId } from '@mailcellar/schema';
 import { ByteWriter } from 'hyparquet-writer';
 import { parquetReadObjects } from 'hyparquet';
-import { icebergAppend, icebergCreateTable, restCatalogConnect, restCatalogCreateNamespace, restCatalogListTables, restCatalogLoadTable } from 'icebird';
+import { icebergAppend, icebergCreateTable, icebergUpdateSchema, restCatalogConnect, restCatalogCreateNamespace, restCatalogListTables, restCatalogLoadTable } from 'icebird';
 import { fetchManifestEntries, icebergManifestList } from 'icebird/src/manifest.js';
 import type { Env } from './env';
 
@@ -37,33 +37,55 @@ export interface BasinRow {
   attachments: number;
   raw_key: string;
   synced_at: string;
+  /** Where the message is in raw_key, for a pack of many messages; absent for a file of one. */
+  raw_offset?: number;
+  raw_len?: number;
 }
 
 type Column = { name: string; type: string; required?: boolean };
 /** The messages table: the shared schema plus the Gmail account each message came from. */
 const COLUMNS: readonly Column[] = [{ name: 'account', type: 'string', required: true }, ...(BASIN_TABLES.messages.columns as readonly Column[])];
+/** Columns the table was created with (through synced_at); later ones were added to tables that exist. */
+const FIRST_COLUMNS = COLUMNS.findIndex((c) => c.name === 'synced_at') + 1;
+/** Columns added after the table was first created: raw_offset and raw_len (2026-10-24). */
+export const ADDED_COLUMNS = COLUMNS.slice(FIRST_COLUMNS);
 
-/** COLUMNS as an Iceberg schema. List columns get element IDs after the field IDs. */
+type Field = Schema['fields'][number];
+const field = (c: Column, id: number, list?: number): Field => {
+  const l = /^list<(\w+)>$/.exec(c.type);
+  return { id, name: c.name, required: !!c.required, type: l ? { type: 'list', 'element-id': list!, element: l[1], 'element-required': false } : c.type } as Field;
+};
+
+/**
+ * COLUMNS as an Iceberg schema, with the IDs the first tables got: the first columns 1 to 16,
+ * their list elements next (17 to 19), and columns added later after those (20 on).
+ */
 export function icebergSchema(): Schema {
-  let nextId = COLUMNS.length + 1;
-  return {
-    type: 'struct',
-    'schema-id': 0,
-    fields: COLUMNS.map((c, i) => {
-      const list = /^list<(\w+)>$/.exec(c.type);
-      return {
-        id: i + 1,
-        name: c.name,
-        required: !!c.required,
-        type: list ? { type: 'list', 'element-id': nextId++, element: list[1], 'element-required': false } : c.type,
-      };
-    }),
-  } as Schema;
+  let nextId = FIRST_COLUMNS + 1;
+  const fields = COLUMNS.slice(0, FIRST_COLUMNS).map((c, i) => field(c, i + 1, /^list</.test(c.type) ? nextId++ : undefined));
+  for (const c of ADDED_COLUMNS) fields.push(field(c, nextId++));
+  return { type: 'struct', 'schema-id': 0, fields } as Schema;
+}
+
+type TableRef = { catalog: Catalog; namespace?: string; table?: string; tableUrl?: string; resolver?: Resolver };
+type LoadedMetadata = { 'current-schema-id': number; 'last-column-id': number; schemas: Schema[] };
+
+/** Add the columns a table made before them lacks (Iceberg keeps old rows; they read as null). */
+export async function addColumns(ref: TableRef, metadata: LoadedMetadata): Promise<boolean> {
+  const current = metadata.schemas.find((x) => x['schema-id'] === metadata['current-schema-id']) ?? metadata.schemas.at(-1)!;
+  const missing = ADDED_COLUMNS.filter((c) => !current.fields.some((f) => f.name === c.name));
+  if (!missing.length) return false;
+  let id = metadata['last-column-id'];
+  await icebergUpdateSchema({ ...ref, schema: { ...current, fields: [...current.fields, ...missing.map((c) => field(c, ++id))] } } as Parameters<typeof icebergUpdateSchema>[0]);
+  return true;
 }
 
 /** Rows as Iceberg wants them: Dates for timestamps, BigInts for longs. */
 export function toRecords(rows: BasinRow[]) {
-  return rows.map((r) => ({ ...r, ts: new Date(r.ts), synced_at: new Date(r.synced_at), size: BigInt(r.size) }));
+  return rows.map((r) => ({
+    ...r, ts: new Date(r.ts), synced_at: new Date(r.synced_at), size: BigInt(r.size),
+    raw_offset: r.raw_offset === undefined ? null : BigInt(r.raw_offset), raw_len: r.raw_len === undefined ? null : BigInt(r.raw_len),
+  }));
 }
 
 /** Reads and writes the catalog's files (s3://<bucket>/<key>) through the R2 binding. */
@@ -183,7 +205,7 @@ export function partitionSpec() {
   return { 'spec-id': 0, fields: [{ 'source-id': tsId, 'field-id': 1000, name: 'ts_month', transform: 'month' as const }] };
 }
 
-/** Create the namespace and messages table if they don't exist yet. */
+/** Create the namespace and messages table if they don't exist yet, and add columns it lacks. */
 async function ensureTable(catalog: RestCatalog, namespace: string): Promise<void> {
   let tables: unknown[];
   try {
@@ -193,8 +215,12 @@ async function ensureTable(catalog: RestCatalog, namespace: string): Promise<voi
     await restCatalogCreateNamespace(catalog, { namespace });
     tables = [];
   }
-  if (tables.some((t) => (t as { name?: string }).name === MESSAGES_TABLE)) return;
-  await icebergCreateTable({ catalog, namespace, table: MESSAGES_TABLE, schema: icebergSchema(), partitionSpec: partitionSpec() });
+  if (!tables.some((t) => (t as { name?: string }).name === MESSAGES_TABLE)) {
+    await icebergCreateTable({ catalog, namespace, table: MESSAGES_TABLE, schema: icebergSchema(), partitionSpec: partitionSpec() });
+    return;
+  }
+  const { metadata } = await restCatalogLoadTable(catalog, { namespace, table: MESSAGES_TABLE });
+  await addColumns({ catalog, namespace, table: MESSAGES_TABLE }, metadata as unknown as LoadedMetadata);
 }
 
 /** Who the Basin check writes as: a namespace of its own, never a user's. */

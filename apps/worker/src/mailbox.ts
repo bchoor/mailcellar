@@ -37,9 +37,13 @@ import {
   syncSummary,
   withRecent,
   LANE_STALE_MS,
+  mailboxName,
 } from '@mailcellar/schema';
 import type { Env } from './env';
-import { accountMailbox, BasinNotReady, launchLanes, runDied, syncDeps } from './sync';
+import { accountMailbox, accessToken, BasinNotReady, launchLanes, runDied, syncDeps } from './sync';
+import { BUCKET, freshLane, readLane, saveLane } from './copy';
+import { GmailError } from './gmail';
+import { accountQuota } from './quota';
 
 /**
  * Ordered schema migrations for the mailbox's SQLite database. Each entry runs once,
@@ -214,23 +218,33 @@ export class MailboxDO extends DurableObject<Env> {
     return this.pausedBy() !== null;
   }
 
+  /** Who paused backfill, kept in memory once read: every lane run asks, and this DO is the only writer. */
+  private pausedKept: 'person' | 'budget' | null | undefined;
+
   /** Who paused backfill: the person ('true'), or the spend cap ('budget'); null when it runs. */
   private pausedBy(): 'person' | 'budget' | null {
-    const v = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'backfill_paused'`).toArray()[0]?.value;
-    return v === undefined ? null : v === 'budget' ? 'budget' : 'person';
+    if (this.pausedKept === undefined) {
+      const v = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'backfill_paused'`).toArray()[0]?.value;
+      this.pausedKept = v === undefined ? null : v === 'budget' ? 'budget' : 'person';
+    }
+    return this.pausedKept;
   }
 
   /**
    * Pause or resume backfill. Resuming starts each account's sync again; lanes pick up where they
-   * stood. `budget`: the spend cap paused it (a person's pause is kept as theirs).
+   * stood. `budget`: the spend cap paused it (a person's pause is kept as theirs). Returns false
+   * when a resume was refused because spend is still past the cap's stop line.
    */
-  async setBackfillPaused(paused: boolean, budget = false): Promise<void> {
+  async setBackfillPaused(paused: boolean, budget = false): Promise<boolean> {
     const sql = this.ctx.storage.sql;
+    // Paused at the spend cap: resuming is refused while spend is still past the stop line.
+    if (!paused && this.pausedBy() === 'budget' && (await accountQuota(this.env).overBudget({}))) return false;
     const { rowsWritten } = paused
       ? sql.exec(`INSERT INTO meta (key, value) VALUES ('backfill_paused', ?) ON CONFLICT (key) DO NOTHING`, budget ? 'budget' : 'true')
       : sql.exec(`DELETE FROM meta WHERE key = 'backfill_paused'`);
+    this.pausedKept = undefined;
     if (rowsWritten) this.count({ do_rows_written: rowsWritten });
-    if (paused || !this.env.BASIN_TOKEN) return;
+    if (paused || !this.env.BASIN_TOKEN) return true;
     for (const { id } of sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray()) {
       try {
         await this.syncAccount(id, true);
@@ -238,12 +252,37 @@ export class MailboxDO extends DurableObject<Env> {
         console.error('resume sync', id, e);
       }
     }
+    return true;
   }
 
   /** This account's sync progress, or null before its first sync. */
   async syncState(): Promise<SyncState | null> {
-    const row = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'sync'`).toArray()[0];
-    return row ? (JSON.parse(row.value) as SyncState) : null;
+    return structuredClone(this.syncState0());
+  }
+
+  /** The sync state, kept in memory once read (this DO is its only writer; putMeta drops it). */
+  private syncKept: SyncState | null | undefined;
+  private syncState0(): SyncState | null {
+    if (this.syncKept === undefined) this.syncKept = this.meta<SyncState>('sync');
+    return this.syncKept;
+  }
+
+  /**
+   * The sync as the page shows it: what's saved, plus what lanes have copied of months not landed
+   * yet (they report it from memory, not rows), and when they last checked in.
+   */
+  async syncView(): Promise<SyncState | null> {
+    const s = await this.syncState();
+    if (!s || !this.live.size) return s;
+    const lanes = [...this.live.values()];
+    const at = Math.max(Date.parse(s.updatedAt), ...lanes.map((l) => l.at));
+    return {
+      ...s,
+      copied: s.copied + lanes.reduce((n, l) => n + l.copied, 0),
+      bytes: s.bytes + lanes.reduce((n, l) => n + l.bytes, 0),
+      updatedAt: new Date(at).toISOString(),
+      recent: this.samples.length ? this.samples : s.recent,
+    };
   }
 
   /**
@@ -275,56 +314,34 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   private putMeta(key: string, value: unknown): number {
+    if (key === 'sync') this.syncKept = undefined;
     return this.ctx.storage.sql.exec(
       `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
       key, JSON.stringify(value),
     ).rowsWritten;
   }
 
-  /** One backfill lane's progress: the month it copies, listed and staged like a sync. */
-  async laneState(month: string): Promise<SyncState | null> {
-    return this.meta<SyncState>(`lane:${month}`);
-  }
+  /** The months lanes are copying (meta `lane:<month>` → job), kept in memory once read: the DO is their only writer. */
+  private laneJobs: Map<string, number> | null = null;
 
-  /**
-   * Save a lane's progress while `onlyIf` owns it, and add what it copied to the account's sync
-   * (its count and rate) and to the month's Basin count. A few rows, once a run, never per message.
-   */
-  async saveLane(month: string, state: SyncState, onlyIf: string, added: { copied: number; bytes: number }): Promise<boolean> {
-    return this.ctx.storage.transactionSync(() => {
-      if (this.meta<SyncState>(`lane:${month}`)?.runId !== onlyIf) return false;
-      let written = this.putMeta(`lane:${month}`, state);
-      if (added.copied || added.bytes) {
-        const main = this.meta<SyncState>('sync');
-        if (main) {
-          const next = { ...main, copied: main.copied + added.copied, bytes: main.bytes + added.bytes, updatedAt: state.updatedAt };
-          written += this.putMeta('sync', { ...next, recent: withRecent(next, state.updatedAt) });
-        }
-        written += this.ctx.storage.sql.exec(
-          `INSERT INTO basin_months (month, copied) VALUES (?, ?) ON CONFLICT (month) DO UPDATE SET copied = copied + excluded.copied`,
-          month, added.copied,
-        ).rowsWritten;
-      }
-      this.count({ do_rows_written: written });
-      return true;
-    });
-  }
-
-  /** Hand a lane to its next run (or a fresh run, for a lane that died). False: `onlyIf` no longer owns it. */
-  async handLane(month: string, onlyIf: string | null, runId: string): Promise<boolean> {
-    return this.ctx.storage.transactionSync(() => {
-      const lane = this.meta<SyncState>(`lane:${month}`);
-      if (!lane || (onlyIf !== null && lane.runId !== onlyIf)) return false;
-      this.count({ do_rows_written: this.putMeta(`lane:${month}`, { ...lane, runId, resumesAt: null, updatedAt: new Date().toISOString() }) });
-      return true;
-    });
+  private lanes(): Map<string, number> {
+    if (!this.laneJobs) {
+      const rows = this.ctx.storage.sql.exec<{ key: string; value: string }>(`SELECT key, value FROM meta WHERE key LIKE 'lane:%'`).toArray();
+      // A lane from before the copy engine kept its sync state here, with its month's job as `part`.
+      this.laneJobs = new Map(rows.map((r) => {
+        const v = JSON.parse(r.value) as { job?: number; part?: SyncPart };
+        return [r.key.slice('lane:'.length), v.job ?? v.part?.job ?? 0];
+      }));
+    }
+    return this.laneJobs;
   }
 
   /** Close a lane: its month landed, failed or was taken out of the queue. */
-  async endLane(month: string, runId: string): Promise<void> {
+  async endLane(month: string): Promise<void> {
     this.ctx.storage.transactionSync(() => {
-      if (this.meta<SyncState>(`lane:${month}`)?.runId !== runId) return;
       let written = this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, `lane:${month}`).rowsWritten;
+      this.lanes().delete(month);
+      this.live.delete(month);
       written += this.setLanes();
       this.count({ do_rows_written: written });
     });
@@ -334,71 +351,152 @@ export class MailboxDO extends DurableObject<Env> {
   private setLanes(): number {
     const main = this.meta<SyncState>('sync');
     if (!main) return 0;
-    const lanes = this.ctx.storage.sql
-      .exec<{ key: string }>(`SELECT key FROM meta WHERE key LIKE 'lane:%' ORDER BY key DESC`)
-      .toArray()
-      .map((r) => r.key.slice('lane:'.length));
-    return this.putMeta('sync', { ...main, lanes });
+    this.syncKept = undefined;
+    return this.putMeta('sync', { ...main, lanes: [...this.lanes().keys()].sort().reverse() });
   }
 
   /**
    * Start lanes for queued months, newest first, until `max` run at once, and take over lanes
-   * that stopped saving (their run died). Returns each lane to start, with its new run ID.
-   * `legacy` moves a month a single-run sync was copying into a lane of its own.
+   * that stopped (their run died, or backfill was paused). Each lane's progress is an R2 file
+   * (copy.ts); this writes a row only when a month starts or ends. Returns each lane to start.
    */
-  async claimLanes(max: number, prefix: string, legacy?: SyncState): Promise<{ month: string; runId: string }[]> {
+  async claimLanes(user: UserId, account: string, max: number): Promise<{ month: string; runId: string }[]> {
     const sql = this.ctx.storage.sql;
-    return this.ctx.storage.transactionSync(() => {
-      const now = new Date();
-      const at = now.toISOString();
-      const id = (month: string) => `${prefix}-${month}-${now.getTime().toString(36)}`;
-      const out: { month: string; runId: string }[] = [];
-      let written = 0;
-      const lanes = sql
-        .exec<{ key: string; value: string }>(`SELECT key, value FROM meta WHERE key LIKE 'lane:%'`)
-        .toArray()
-        .map((r) => ({ month: r.key.slice('lane:'.length), state: JSON.parse(r.value) as SyncState }));
-      const fresh = (part: SyncPart, from?: SyncState): SyncState => ({
-        phase: 'backfill', runId: id(part.month), total: null, copied: 0, bytes: 0, part,
-        pending: from?.pending ?? [], pageToken: from ? from.pageToken : '', historyId: null,
-        basinQueue: from?.basinQueue ?? [], basinReady: from?.basinReady ?? false, startedAt: at, updatedAt: at, resumesAt: null, error: null,
-      });
-      if (legacy?.part && !lanes.some((l) => l.month === legacy.part!.month)) {
-        const lane = fresh(legacy.part, legacy);
-        written += this.putMeta(`lane:${legacy.part.month}`, lane);
-        lanes.push({ month: legacy.part.month, state: lane });
-        out.push({ month: legacy.part.month, runId: lane.runId });
-      }
-      // A lane waiting out a limit isn't stale; one that stopped saving is, and starts again where it stood.
-      for (const l of lanes) {
-        const waiting = l.state.resumesAt && Date.parse(l.state.resumesAt) > now.getTime();
-        if (!waiting && now.getTime() - Date.parse(l.state.updatedAt) >= LANE_STALE_MS) {
-          const runId = id(l.month);
-          written += this.putMeta(`lane:${l.month}`, { ...l.state, runId, resumesAt: null, updatedAt: at });
-          out.push({ month: l.month, runId });
-        }
-      }
-      const busy = new Set(lanes.map((l) => l.month));
-      const room = max - lanes.length;
-      if (room > 0) {
+    const now = Date.now();
+    const id = (month: string) => `${account}-${month}-${now.toString(36)}`;
+    const lanes = this.lanes();
+    const fresh: { part: SyncPart; prior: boolean }[] = [];
+    if (lanes.size < max && !this.noneQueued)
+      this.ctx.storage.transactionSync(() => {
+        let written = 0;
         const parts = sql
-          .exec<{ job: number; month: string }>(
-            `SELECT job, month FROM job_months WHERE state IN ('running', 'queued') ORDER BY month DESC, job`,
+          .exec<{ job: number; month: string; prior: number | null }>(
+            `SELECT j.job, j.month, b.copied AS prior FROM job_months j LEFT JOIN basin_months b ON b.month = j.month
+             WHERE j.state IN ('running', 'queued') ORDER BY j.month DESC, j.job`,
           )
-          .toArray()
-          .filter((p) => !busy.has(p.month) && (busy.add(p.month), true))
-          .slice(0, room);
+          .toArray();
+        const busy = new Set(lanes.keys());
         for (const p of parts) {
+          if (lanes.size >= max) break;
+          if (busy.has(p.month)) continue;
+          busy.add(p.month);
           written += sql.exec(`UPDATE job_months SET state = 'running' WHERE job = ? AND month = ? AND state = 'queued'`, p.job, p.month).rowsWritten;
-          const lane = fresh(p);
-          written += this.putMeta(`lane:${p.month}`, lane);
-          out.push({ month: p.month, runId: lane.runId });
+          written += this.putMeta(`lane:${p.month}`, { job: p.job, month: p.month });
+          lanes.set(p.month, p.job);
+          fresh.push({ part: { job: p.job, month: p.month }, prior: (p.prior ?? 0) > 0 });
         }
+        // Nothing else waits: later checks skip the query until a month is queued.
+        if (parts.every((p) => busy.has(p.month))) this.noneQueued = true;
+        if (fresh.length) {
+          this.active = null;
+          written += this.setLanes();
+        }
+        if (written) this.count({ do_rows_written: written });
+      });
+    const out: { month: string; runId: string }[] = [];
+    for (const f of fresh) {
+      const runId = id(f.part.month);
+      const got = await readLane(this.env, user, account, f.part.month);
+      if (await saveLane(this.env, user, account, freshLane(f.part, runId, f.prior), got?.etag ?? null)) out.push({ month: f.part.month, runId });
+    }
+    // A lane that checked in lately is running. One that hasn't (or stopped for a pause) starts again where it stood.
+    const started = new Set(fresh.map((f) => f.part.month));
+    for (const [month, job] of lanes) {
+      if (started.has(month)) continue;
+      const beat = this.live.get(month);
+      if (beat && now - beat.at < LANE_STALE_MS && !beat.stopped) continue;
+      const got = await readLane(this.env, user, account, month);
+      if (got && !got.p.runId) continue; // all copied: the committer lands it
+      if (got && !got.p.stopped && now - Date.parse(got.p.updatedAt) < LANE_STALE_MS) continue;
+      const runId = id(month);
+      const prior = (sql.exec<{ copied: number }>(`SELECT copied FROM basin_months WHERE month = ?`, month).toArray()[0]?.copied ?? 0) > 0;
+      const next = got ? { ...got.p, runId, prev: null, stopped: null, updatedAt: new Date(now).toISOString() } : freshLane({ job, month }, runId, prior);
+      if (await saveLane(this.env, user, account, next, got?.etag ?? null)) {
+        this.live.delete(month);
+        out.push({ month, runId });
       }
-      if (out.length) written += this.setLanes();
-      if (written) this.count({ do_rows_written: written });
-      return out;
-    });
+    }
+    return out;
+  }
+
+  /** Nothing is queued that a lane isn't copying; reset whenever a month is queued. */
+  private noneQueued = false;
+  /** Backfill months waiting or being copied, by state; read once, then kept with every change. */
+  private active: Map<string, PartState> | null = null;
+  /** What each lane last reported, in memory only: shown on the map and the sync card while it copies. */
+  private live = new Map<string, { at: number; runId: string; copied: number; bytes: number; stopped?: boolean }>();
+  /** Copy-rate samples (total copied over time), in memory only. */
+  private samples: { at: string; copied: number }[] = [];
+  /** Gmail pacing for this account, msgvault's way: a token bucket that halves on a rate limit and recovers. */
+  private bucket = { level: BUCKET.cap, at: 0, rate: BUCKET.rate, slowUntil: 0 };
+  private access: { token: string; until: number } | null = null;
+
+  private activeMonths(): Map<string, PartState> {
+    if (!this.active) {
+      const cursor = this.ctx.storage.sql.exec<{ month: string; state: PartState }>(`SELECT month, state FROM job_months WHERE state IN ('queued', 'running')`);
+      this.active = new Map(cursor.toArray().map((r) => [r.month, r.state]));
+      this.count({ do_rows_read: cursor.rowsRead });
+    }
+    return this.active;
+  }
+
+  /** Drop what's kept about job months: something changed them. */
+  private changedMonths(): void {
+    this.active = null;
+    this.noneQueued = false;
+    this.kept.clear();
+  }
+
+  /** Take Gmail units from the bucket; the answer is how long to wait first. */
+  private pace(units: number, throttled: boolean, now = Date.now()): number {
+    const b = this.bucket;
+    if (throttled) {
+      b.rate = Math.max(BUCKET.min, b.rate / 2);
+      b.slowUntil = now + BUCKET.slowMs;
+    } else if (b.rate < BUCKET.rate && now >= b.slowUntil) {
+      b.rate = Math.min(BUCKET.rate, b.rate * 2);
+      b.slowUntil = now + BUCKET.slowMs;
+    }
+    b.level = Math.min(BUCKET.cap, b.level + (b.at ? ((now - b.at) / 1000) * b.rate : 0));
+    b.at = now;
+    b.level -= units;
+    return b.level >= 0 ? 0 : Math.ceil((-b.level / b.rate) * 1000);
+  }
+
+  /**
+   * A lane's turn before each Gmail batch, answered from memory: an access token, whether the
+   * month is still queued, and how long to wait for Gmail's rate. It records what the lane has
+   * copied, for the page. Reads no rows (job months are read once, then kept).
+   */
+  async laneTurn(t: { user: UserId; account: string; month: string; runId: string; units: number; throttled: boolean; copied: number; bytes: number }): Promise<{ token: string | null; active: boolean; waitMs: number; error?: string }> {
+    const now = Date.now();
+    const active = this.activeMonths().get(t.month) === 'running';
+    const before = this.live.get(t.month);
+    this.live.set(t.month, { at: now, runId: t.runId, copied: t.copied, bytes: t.bytes });
+    if (t.copied !== (before?.copied ?? 0)) this.sample(now);
+    if (!active) return { token: null, active, waitMs: 0 };
+    if (!this.access || this.access.until < now + 60_000) {
+      const refresh = await this.env.MAILBOX.getByName(mailboxName(t.user)).accountToken(t.account);
+      if (!refresh) return { token: null, active, waitMs: 0, error: 'This account was removed from MailCellar.' };
+      try {
+        this.access = { token: await accessToken(this.env, refresh), until: now + 50 * 60_000 };
+      } catch (e) {
+        if (e instanceof GmailError && e.status === 401) return { token: null, active, waitMs: 0, error: e.message };
+        throw e;
+      }
+    }
+    return { token: this.access.token, active, waitMs: this.pace(t.units, t.throttled, now) };
+  }
+
+  /** Add a copy-rate sample: everything copied so far, the lanes' unlanded months included. */
+  private sample(now: number): void {
+    const main = this.syncState0();
+    if (!main) return;
+    const copied = main.copied + [...this.live.values()].reduce((n, l) => n + l.copied, 0);
+    const at = new Date(now).toISOString();
+    const last = this.samples.at(-1);
+    if (last && now - Date.parse(last.at) < 10_000) last.copied = copied;
+    else this.samples = withRecent({ ...main, copied, recent: this.samples }, at);
   }
 
   /** Of these message IDs, the ones not in the index yet (reads only). */
@@ -410,14 +508,22 @@ export class MailboxDO extends DurableObject<Env> {
     return ids.filter((id) => !known.has(id));
   }
 
-  /** A month's backfill has landed in Basin: the month is done, and its index can be built. */
-  async landMonth(part: SyncPart): Promise<void> {
+  /**
+   * A month's backfill has landed in Basin: the month is done, its index can be built, and what
+   * the lane copied is added to the month and the account's sync. A few rows, once a month.
+   */
+  async landMonth(part: SyncPart, added: { copied: number; bytes: number } = { copied: 0, bytes: 0 }): Promise<void> {
     this.ctx.storage.transactionSync(() => {
       let written = this.ctx.storage.sql.exec(
-        `INSERT INTO basin_months (month, copied, landed_at) VALUES (?, 0, ?) ON CONFLICT (month) DO UPDATE SET landed_at = excluded.landed_at, indexed_at = NULL`,
-        part.month, new Date().toISOString(),
+        `INSERT INTO basin_months (month, copied, landed_at) VALUES (?, ?, ?)
+         ON CONFLICT (month) DO UPDATE SET copied = copied + excluded.copied, landed_at = excluded.landed_at, indexed_at = NULL`,
+        part.month, added.copied, new Date().toISOString(),
       ).rowsWritten;
       written += this.ctx.storage.sql.exec(`UPDATE job_months SET state = 'done', error = NULL, finished_at = ? WHERE job = ? AND month = ? AND state = 'running'`, new Date().toISOString(), part.job, part.month).rowsWritten;
+      const main = this.meta<SyncState>('sync');
+      if (main && added.copied) written += this.putMeta('sync', { ...main, copied: main.copied + added.copied, bytes: main.bytes + added.bytes, updatedAt: new Date().toISOString() });
+      this.live.delete(part.month);
+      this.changedMonths();
       this.count({ do_rows_written: written });
     });
   }
@@ -461,6 +567,11 @@ export class MailboxDO extends DurableObject<Env> {
     });
   }
 
+  /** Backfill months waiting or being copied. */
+  async activeList(): Promise<string[]> {
+    return [...this.activeMonths().keys()].sort();
+  }
+
   /** Whether any backfill month is waiting to be copied. */
   async hasQueued(): Promise<boolean> {
     return this.ctx.storage.sql.exec(`SELECT 1 FROM job_months WHERE state IN ('queued', 'running') LIMIT 1`).toArray().length > 0;
@@ -489,7 +600,10 @@ export class MailboxDO extends DurableObject<Env> {
       .toArray()[0];
     if (!row) return null;
     const { rowsWritten } = sql.exec(`UPDATE job_months SET state = 'running' WHERE job = ? AND month = ? AND state = 'queued'`, row.job, row.month);
-    if (rowsWritten) this.count({ do_rows_written: rowsWritten });
+    if (rowsWritten) {
+      this.changedMonths();
+      this.count({ do_rows_written: rowsWritten });
+    }
     return { job: row.job, month: row.month };
   }
 
@@ -499,7 +613,10 @@ export class MailboxDO extends DurableObject<Env> {
       `UPDATE job_months SET state = ?, error = ?, finished_at = ? WHERE job = ? AND month = ? AND state = 'running'`,
       state, error, new Date().toISOString(), part.job, part.month,
     );
-    if (rowsWritten) this.count({ do_rows_written: rowsWritten });
+    if (rowsWritten) {
+      this.changedMonths();
+      this.count({ do_rows_written: rowsWritten });
+    }
   }
 
   /** The census's progress, or null before the first. */
@@ -545,7 +662,13 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** Each month's Gmail count, copied count and latest backfill state, oldest first. */
   async coverageMonths(): Promise<MonthCoverage[]> {
-    return structuredClone(this.keep('coverage', () => this.readCoverage()));
+    const months = structuredClone(this.keep('coverage', () => this.readCoverage()));
+    // Lanes report what they've copied from memory; a month shows it until it lands.
+    for (const m of months) {
+      const l = this.live.get(m.month);
+      if (l) m.copied = Math.max(m.copied, m.inBasin + l.copied);
+    }
+    return months;
   }
 
   private readCoverage(): MonthCoverage[] {
@@ -597,7 +720,7 @@ export class MailboxDO extends DurableObject<Env> {
         .exec<{ id: number }>(`INSERT INTO jobs (created_at, label) VALUES (?, ?) RETURNING id`, new Date().toISOString(), label)
         .toArray()[0].id;
       for (const m of fresh) sql.exec(`INSERT INTO job_months (job, month, state) VALUES (?, ?, 'queued')`, job, m);
-      this.kept.clear();
+      this.changedMonths();
       this.count({ do_rows_written: fresh.length + 1 });
       return job;
     });
@@ -643,7 +766,7 @@ export class MailboxDO extends DurableObject<Env> {
           );
     const changed = cursor.toArray().length;
     if (changed) {
-      this.kept.clear();
+      this.changedMonths();
       this.count({ do_rows_written: cursor.rowsWritten });
     }
     return changed;
@@ -657,7 +780,7 @@ export class MailboxDO extends DurableObject<Env> {
       : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running', 'failed') RETURNING month`);
     const changed = cursor.toArray().length;
     if (changed) {
-      this.kept.clear();
+      this.changedMonths();
       this.count({ do_rows_written: cursor.rowsWritten });
     }
     return changed;
@@ -874,7 +997,7 @@ export class MailboxDO extends DurableObject<Env> {
   async syncInfo(account: string): Promise<SyncSummary | null> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return null;
-    return syncSummary(await accountMailbox(this.env, user, account).syncState());
+    return syncSummary(await accountMailbox(this.env, user, account).syncView());
   }
 
   /** Every account's sync, for the Backfill page and the status bar, and whether Basin can be written. */
@@ -893,7 +1016,7 @@ export class MailboxDO extends DurableObject<Env> {
         ? await Promise.all(
             accounts.map(async (a) => {
               const mailbox = accountMailbox(this.env, user, a.id);
-              let state = await mailbox.syncState();
+              let state = await mailbox.syncView();
               // A run Cloudflare stopped never saves again: start it afresh, so the page never shows a dead run as running.
               // Lanes are checked on their own: a lane that stopped saving starts again where it stood.
               const ownWork = state && (state.phase !== 'live' || state.pending.length > 0 || state.basinQueue.length > 0);
@@ -901,7 +1024,7 @@ export class MailboxDO extends DurableObject<Env> {
               if (!paused && state && ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) {
                 try {
                   await syncDeps.start(this.env, user, a.id);
-                  state = await mailbox.syncState();
+                  state = await mailbox.syncView();
                 } catch (e) {
                   if (!(e instanceof BasinNotReady)) throw e;
                 }
@@ -977,6 +1100,33 @@ export class MailboxDO extends DurableObject<Env> {
     // A sync already going: the new months get lanes now, up to MAX_LANES at once.
     if (!('error' in r) && r.status !== 'started') await launchLanes(this.env, user, account);
     return 'error' in r ? r : { job, status: r.status };
+  }
+
+  /**
+   * Copy one month as a test of the copy engine: queue it (unless it is already) and resume
+   * backfill, but only when no other month of any account is waiting or being copied.
+   */
+  async trial(account: string, month: string, park = false): Promise<{ started: boolean; active: { account: string; months: string[] }[]; job?: number | null; parked?: string[] }> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account) || !/^\d{4}-\d{2}$/.test(month)) return { started: false, active: [] };
+    const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
+    const active = [];
+    for (const id of ids) {
+      // The test month itself may already be queued (or part copied): that's the month that runs.
+      const months = (await accountMailbox(this.env, user, id).activeList()).filter((m) => id !== account || m !== month);
+      if (months.length) active.push({ account: id, months });
+    }
+    // `park`: months waiting on the test's own account are taken out of the queue (Retry on
+    // their job queues them again); another account's months still stop the test.
+    let parked: string[] = [];
+    if (park && active.length === 1 && active[0].account === account) {
+      parked = active[0].months;
+      await accountMailbox(this.env, user, account).unqueueMonths(parked);
+      active.length = 0;
+    }
+    if (active.length) return { started: false, active };
+    const job = await accountMailbox(this.env, user, account).queueMonths([month], `Speed test: ${month}`);
+    return { started: await this.setBackfillPaused(false), active, job, parked };
   }
 
   /** An account's latest backfill jobs. Null: not this user's account. */
