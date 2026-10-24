@@ -357,7 +357,8 @@ async function endListing(env: Env, user: UserId, account: string, p: LaneProgre
   const skip = new Set<string>();
   const copied = await env.ARCHIVE.get(r2Keys.copied(user, account, p.month));
   if (copied) for (const id of (await copied.json()) as string[]) skip.add(id);
-  else if (p.prior) {
+  // Both: the file has only what lanes landed, not what a stopped lane or the old engine put in Basin.
+  if (p.prior) {
     const target = await syncDeps.basin(env, user);
     if (target) for (const r of await target.monthRows(account, p.month)) skip.add(r.id);
   }
