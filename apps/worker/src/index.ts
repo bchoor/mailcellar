@@ -71,6 +71,18 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     if (!token) return Response.json({ error: 'not_found' }, { status: 404 });
     return Response.json({ ok: true, revoked: await revoke(token) }, { headers: noStore });
   }
+  if (url.pathname === '/api/backfill/paused' && request.method === 'PUT') {
+    // Pause or resume all backfill: {"paused": true}.
+    let body: { paused?: unknown };
+    try {
+      body = JSON.parse((await request.text()).slice(0, 1024));
+    } catch {
+      return Response.json({ error: 'bad_json' }, { status: 400 });
+    }
+    if (typeof body.paused !== 'boolean') return Response.json({ error: 'bad_paused' }, { status: 400 });
+    await mailbox.setBackfillPaused(body.paused);
+    return Response.json(await mailbox.syncAll(), { headers: noStore });
+  }
   if (url.pathname === '/api/sync' && request.method === 'GET') return Response.json(await mailbox.syncAll(), { headers: noStore });
   const sync = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/sync$/);
   if (sync && request.method === 'GET') {
