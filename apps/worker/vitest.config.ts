@@ -18,5 +18,6 @@ export default defineConfig({
   ],
   // Same shim as wrangler.jsonc's alias: Workers can't compile WebAssembly at run time.
   resolve: { alias: { hysnappy: '/src/shims/hysnappy.ts' } },
-  test: { setupFiles: ['./test/setup.ts'] },
+  // The CI runner pays each file's worker startup inside its first test; 5 s timed out there.
+  test: { setupFiles: ['./test/setup.ts'], testTimeout: 20_000 },
 });
