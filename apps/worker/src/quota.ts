@@ -68,8 +68,8 @@ export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()
   };
 }
 
-/** The plan is read again after this. */
-export const PLAN_READ_MS = 6 * 3_600_000;
+/** The plan is cached this long: it is read only when a backfill or a page asks for the limits, never on a timer. */
+export const PLAN_READ_MS = 24 * 3_600_000;
 
 /**
  * The account's Workers plan, from its subscriptions (a read-only Billing Read token). Workers
