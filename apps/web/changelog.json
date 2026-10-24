@@ -1,1 +1,39 @@
-[]
+[
+  {
+    "tag": "v0.0.1",
+    "sha": "4ee991df03678740b82a0037091ea5e763d4622e",
+    "published_at": "2026-10-24T18:19:47Z",
+    "takeaways": [
+      {
+        "text": "**Archive pages read your real mailbox**: On the Overview, Messages, Time, Labels, Domains and Senders pages, you now see counts and lists from your own mailbox, and \"No mail yet\" until mail arrives.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Search all mail**: On the Messages page, the \"Search all mail\" box now searches subject, sender, snippet and labels across your whole mailbox, not just the newest 1,000 messages.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Saved schedules**: In Settings ▸ Schedules, you can change when Gmail sync and Archive maintenance should run, and your changes are saved in your mailbox (nothing runs on them yet).",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Self-measured Cloudflare usage**: On the Usage page, you can see today's rows written, rows read and messages indexed against the free tier's daily limits.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Made-up data removed**: In Accounts, Backfill and What's new, the invented accounts, progress and change log are gone, so you see \"none connected yet\", \"Not started\" and nothing invented.",
+        "types": [
+          "fix"
+        ]
+      }
+    ]
+  }
+]
