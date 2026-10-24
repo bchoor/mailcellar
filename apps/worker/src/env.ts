@@ -1,9 +1,12 @@
+import type { SyncParams } from '@mailcellar/schema';
 import type { MailboxDO } from './mailbox';
 
 export interface Env {
   ASSETS: Fetcher;
   MAILBOX: DurableObjectNamespace<MailboxDO>;
   ARCHIVE: R2Bucket;
+  /** Copies one Gmail account, a batch a run (sync.ts). */
+  SYNC: Workflow<SyncParams>;
   APP_VERSION: string;
   /** Google OAuth client: Worker secrets in production, .dev.vars locally. Never in the repo. */
   GOOGLE_CLIENT_ID: string;
