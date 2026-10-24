@@ -160,7 +160,8 @@ const facts = (id: string, email: string) => (c: AccountCoverage): CoverageData 
       period: m.month,
       have: m.copied,
       expected: m.gmail ?? 0,
-      state: m.state === 'done' || m.state === null ? undefined : m.state,
+      // A canceled month is missing again: it shows by what is copied, never as Canceled.
+      state: m.state === 'done' || m.state === 'canceled' || m.state === null ? undefined : m.state,
       note: m.error ?? undefined,
     })),
   rows: [{ row: id, label: email }],
