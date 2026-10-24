@@ -56,6 +56,12 @@ export interface SyncParams {
   check?: boolean;
   /** Instead of syncing, count the account's messages by month (the census). */
   census?: boolean;
+  /**
+   * Instead of syncing, keep names for Durable Object namespace and D1 database IDs (ID → name)
+   * in the account meter, for the Usage page. Sent through the Workflows API by whoever can list
+   * them, since the analytics token can't.
+   */
+  names?: Record<string, string>;
 }
 
 /** Where an account's sync stands: a run is going, it's waiting to resume, it stopped on an error, or it can start. */

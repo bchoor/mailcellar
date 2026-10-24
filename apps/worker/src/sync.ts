@@ -470,8 +470,10 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
 }
 
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
-  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult | Awaited<ReturnType<typeof basinCheck>> | Awaited<ReturnType<typeof runCensus>>> {
+  async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<RunResult | number | Awaited<ReturnType<typeof basinCheck>> | Awaited<ReturnType<typeof runCensus>>> {
     if (event.payload.check) return step.do('basin check', { retries: { limit: 0, delay: '1 second' } }, () => basinCheck(this.env));
+    const { names } = event.payload;
+    if (names) return step.do('names', () => accountQuota(this.env).setNames(names));
     const user = asUserId(event.payload.user);
     const { account } = event.payload;
     const runId = event.instanceId;
