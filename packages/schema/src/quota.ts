@@ -172,18 +172,6 @@ export function levelCost(l: LevelLimit, used: number): number | null {
   return l.perGbMonth === undefined ? null : (Math.max(0, used - l.limit) / GB) * l.perGbMonth;
 }
 
-/** The CPU time one Worker request may use, in ms: Free's is 10 ms, Paid's default 30 s. */
-export const CPU_LIMIT_MS: Record<QuotaPlan, number> = { free: 10, paid: 30_000 };
-
-/** One Worker's CPU time per request today (UTC), in ms. */
-export interface CpuRow {
-  name: string;
-  mine: boolean;
-  requests: number;
-  p50: number;
-  p99: number;
-}
-
 /** GET /api/quota: the account's meters now, and whether backfills are paused for a limit. */
 export interface QuotaOverview {
   plan: QuotaPlan;
@@ -203,7 +191,6 @@ export interface QuotaOverview {
   /** Storage and Workflows running, as last read; empty until read. */
   levels: LevelMeter[];
   /** CPU per request by Worker, most requests first, as last read; empty until read. */
-  cpu: { limitMs: number; rows: CpuRow[] };
   /** When Refresh may read Cloudflare again (at most one read a minute). */
   refreshAt: string;
   paused: { metric: QuotaMetric; label: string; resumesAt: string } | null;
