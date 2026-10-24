@@ -1,0 +1,76 @@
+name: Release
+
+# Versioning: docs/releases.md. Copied from EdgeDesk's release workflow; runs
+# scripts/release.sh on OpenShip's self-hosted runner.
+# - push to main: one patch once RELEASE_EVERY merges (repo variable, default 10)
+#   landed since the last tag, or on the first merge 7 days after it, only while the
+#   repo variable RELEASE_ON_MERGE is "true". Its notes are key takeaways Claude
+#   writes (secret ANTHROPIC_API_KEY).
+# - Run workflow: patch (now, whatever the count), minor or notes, dry run by default.
+# - Pull requests that change the release path: dry run only, in their own job
+#   with a read-only token, because they run the branch's own release.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: [.github/workflows/release.yml, scripts/release.sh]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: patch, minor, or notes (set the latest minor's notes from docs/releases)
+        type: choice
+        options: [patch, minor, notes]
+        default: patch
+      dry_run:
+        description: Print the releases without creating them
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, openship, linux, arm64]
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: List the releases it would cut
+        env:
+          DRY_RUN: "1"
+          FORCE: "1"
+        run: bash scripts/release.sh patch
+
+  release:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && vars.RELEASE_ON_MERGE == 'true')
+    runs-on: [self-hosted, openship, linux, arm64]
+    permissions:
+      contents: write
+      pull-requests: read # release notes read each PR's description
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Install gh and jq
+        run: |
+          command -v gh && command -v jq && exit 0
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -qq && $SUDO apt-get install -y -qq gh jq
+      - name: Cut releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUMP: ${{ inputs.bump || 'patch' }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          RELEASE_EVERY: ${{ vars.RELEASE_EVERY || '10' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bash scripts/release.sh "$BUMP"
