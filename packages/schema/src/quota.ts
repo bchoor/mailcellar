@@ -63,6 +63,10 @@ export const QUOTA_METRICS = Object.keys(QUOTA_LIMITS_BY_PLAN.free) as QuotaMetr
 
 /** Backfills pause once a hard meter would pass this share of its limit, leaving room for the app itself. */
 export const QUOTA_STOP = 0.9;
+/** Per-meter stop lines where they differ from QUOTA_STOP: DO rows written stop at 97.5k of 100k (Bikram, 2026-10-24). */
+export const QUOTA_STOPS: Partial<Record<QuotaMetric, number>> = { do_rows_written: 0.975 };
+/** The share of a meter's limit where backfills pause. */
+export const quotaStop = (metric: QuotaMetric) => QUOTA_STOPS[metric] ?? QUOTA_STOP;
 
 /** R2 operations by Cloudflare's class (deletes are free). */
 export const R2_CLASS_A = new Set([
