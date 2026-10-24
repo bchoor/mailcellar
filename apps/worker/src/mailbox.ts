@@ -673,9 +673,15 @@ export class MailboxDO extends DurableObject<Env> {
     });
   }
 
-  /** The month's search index has been built from Basin. */
-  async markIndexed(month: string): Promise<void> {
-    const { rowsWritten } = this.ctx.storage.sql.exec(`UPDATE basin_months SET indexed_at = ? WHERE month = ?`, new Date().toISOString(), month);
+  /**
+   * The month's search index has been built from Basin, which has `inBasin` messages for it. The
+   * lanes' count can be off by one or two (a message copied twice is one row in search), so
+   * Basin's own count replaces it: the month is done, not left Indexing for a message it has.
+   */
+  async markIndexed(month: string, inBasin: number): Promise<void> {
+    const { rowsWritten } = this.ctx.storage.sql.exec(
+      `UPDATE basin_months SET indexed_at = ?, copied = ? WHERE month = ?`, new Date().toISOString(), inBasin, month,
+    );
     this.kept.clear();
     this.count({ do_rows_written: rowsWritten });
   }

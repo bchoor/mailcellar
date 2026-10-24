@@ -450,7 +450,9 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
     at += chunk.length;
   }
   if (at < rows.length) return { indexed, next: at, resumesAt: null };
-  await mailbox.markIndexed(month);
+  const inBasin = new Set(rows.map((r) => r.id)).size;
+  console.log(JSON.stringify({ indexedMonth: { month, inBasin, rows: rows.length } }));
+  await mailbox.markIndexed(month, inBasin);
   // Senders, domains and labels once backfill is done, not once a month.
   // (Senders, domains and labels left with no mail after unindexMonth keep their rows until mail returns.)
   if (!(await mailbox.hasQueued())) {
