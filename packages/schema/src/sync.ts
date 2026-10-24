@@ -117,6 +117,8 @@ export interface SyncParams {
   index?: string;
   /** Where an index build resumes: rows of the month already done. */
   from?: number;
+  /** With `index`: take the month out of the index first, and build it again. */
+  reindex?: boolean;
 }
 
 /** Where an account's sync stands: a run is going, it's waiting to resume, it stopped on an error, or it can start. */
