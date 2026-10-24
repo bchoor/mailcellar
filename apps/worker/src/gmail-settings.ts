@@ -4,6 +4,7 @@ import {
   type FiltersResponse,
   type GmailError,
   type GmailFilter,
+  type LabelColors,
   parseFrom,
   SUBSCRIPTION_SCAN,
   type Subscription,
@@ -53,6 +54,19 @@ export async function filters(token: string): Promise<FiltersResponse> {
     filters: (f.filter ?? []).map(({ id, criteria, action }) => ({ id, criteria: criteria ?? {}, action: action ?? {} })),
     labels: Object.fromEntries((l.labels ?? []).map((x) => [x.id, x.name])),
   };
+}
+
+/** The colours the person gave their labels in Gmail, by label id; labels without one are left out. */
+export async function labelColors(token: string): Promise<LabelColors> {
+  const l = await get<{ labels?: { id: string; color?: { backgroundColor?: string; textColor?: string } }[] }>(
+    token,
+    '/labels?fields=labels(id,color)',
+  );
+  return Object.fromEntries(
+    (l.labels ?? [])
+      .filter((x) => x.color?.backgroundColor && x.color.textColor)
+      .map((x) => [x.id, { bg: x.color!.backgroundColor!, fg: x.color!.textColor! }]),
+  );
 }
 
 interface Meta {
