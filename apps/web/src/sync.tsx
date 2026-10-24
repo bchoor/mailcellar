@@ -14,7 +14,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { addMonths, monthRange, type AccountCoverage, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { EmptyState } from './archive';
 import { AccountLimits, AccountLimitsTools } from './quota';
@@ -101,7 +101,7 @@ function rateTile(s: SyncSummary): { value: string; caption: string } {
 
 const pct = (s: SyncSummary) => (s.total ? Math.min(100, Math.round((s.copied / s.total) * 1000) / 10) : 0);
 
-function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; basin: boolean }) {
+function AccountSync({ id, sync: s, basin, paused }: { id: string; sync: SyncSummary; basin: boolean; paused: boolean }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
@@ -113,8 +113,8 @@ function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; ba
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2 text-sm">
-          <Badge variant={badge(s).variant}>{badge(s).label}</Badge>
-          {headline(s) && <span className="text-muted-foreground">{headline(s)}</span>}
+          {paused ? <Badge variant="secondary">Paused</Badge> : <Badge variant={badge(s).variant}>{badge(s).label}</Badge>}
+          {paused ? <span className="text-muted-foreground">Nothing copies until you resume in Backfills.</span> : headline(s) && <span className="text-muted-foreground">{headline(s)}</span>}
         </div>
         <Button
           variant="outline"
@@ -398,6 +398,15 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
     setProblem(res.ok ? null : `Not removed (${res.status})`);
     await refresh();
   };
+  const sync = useSync();
+  const paused = !!sync.data?.paused;
+  /** Pause or resume all backfill; nothing copies while paused. */
+  const setPaused = async (to: boolean) => {
+    const res = await fetch('/api/backfill/paused', { method: 'PUT', body: JSON.stringify({ paused: to }) });
+    if (!res.ok) return setProblem(`Not ${to ? 'paused' : 'resumed'} (${res.status})`);
+    setProblem(null);
+    client.setQueryData(['sync'], await res.json());
+  };
   const retry = async (month: string) => {
     setProblem(await queueBackfill(id, [month], 'Retry'));
     await refresh();
@@ -412,7 +421,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   const busy = [...now, ...next];
   const toCopy = busy.reduce((n, m) => n + left(m), 0);
   if (!busy.length && !failed.length)
-    return <p className="text-sm text-muted-foreground">Nothing queued. Pick months on the map, or use Select months.</p>;
+    return <p className="text-sm text-muted-foreground">Nothing queued. Pick months on the map, or use Select months.{paused ? ' Backfill is paused.' : ''}</p>;
   const each = rate && now.length ? rate / now.length : null;
   const rest = next.slice(NEXT_SHOWN);
   return (
@@ -424,15 +433,20 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
             {rate && toCopy ? ` · ${duration(toCopy / rate)} at ${fmt(Math.round(rate))} a minute` : ''}
           </span>
           <span className="text-xs text-muted-foreground">
-            Copying {fmt(now.length)} at once · {fmt(next.length)} waiting
+            {paused ? 'Paused: nothing copies until you resume' : `Copying ${fmt(now.length)} at once`} · {fmt(next.length)} waiting
             {failed.length > 0 && <> · <span className="text-loss">{fmt(failed.length)} failed</span></>}
           </span>
         </div>
-        {busy.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => void unqueue()}>
-            <ListXIcon /> Clear queue
+        <span className="flex gap-2">
+          <Button variant={paused ? 'default' : 'outline'} size="sm" disabled={!sync.data} onClick={() => void setPaused(!paused)}>
+            {paused ? <PlayIcon /> : <PauseIcon />} {paused ? 'Resume' : 'Pause'}
           </Button>
-        )}
+          {busy.length > 0 && (
+            <Button variant="outline" size="sm" onClick={() => void unqueue()}>
+              <ListXIcon /> Clear queue
+            </Button>
+          )}
+        </span>
       </div>
       {failed.length > 0 && (
         <BackfillSection title="Needs attention" count={failed.length}>
@@ -621,7 +635,7 @@ export function BackfillPage() {
                 id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} />;
+                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} paused={data.paused} />;
                 },
               },
               {
