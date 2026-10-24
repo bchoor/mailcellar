@@ -1,5 +1,42 @@
 [
   {
+    "tag": "v0.0.3",
+    "sha": "a3dcc23a497f3ed576f97aaee5a62a98f01ce2a3",
+    "published_at": "2026-10-24T20:48:52Z",
+    "takeaways": [
+      {
+        "text": "**Account limits show who uses them and when they reset**: On the Backfill and Cloudflare usage pages, the Account limits card shows each Cloudflare limit stacked by project, says when daily and monthly limits reset, and pauses backfills at 90% of a free-plan daily cap.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Copy speed and time left**: On the Backfill page, the Sync card has a new Rate tile (messages copied a minute over the last 10 minutes) and a Queued to copy tile (messages left in queued months, with time left at the current rate).",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Stopped backfills restart on their own**: On the Backfill page, a sync that Cloudflare stopped no longer sits on Running for 45 minutes, because opening the page, Sync now and the schedule all restart it.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Lighter month coverage map**: The month coverage map on the Backfill page now reads each month's state in one pass, so its 15-second refresh no longer reads about 70,000 database rows per call.",
+        "types": [
+          "performance"
+        ]
+      },
+      {
+        "text": "**Clearer month map**: In the month coverage map, for one mailbox or All mailboxes, each year shows copied / Gmail total, and a month taken out of the queue reads Missing instead of Canceled.",
+        "types": [
+          "improvement"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.2",
     "sha": "4782111458b5e34f10e242630c28b2df7511a843",
     "published_at": "2026-10-24T18:21:49Z",
