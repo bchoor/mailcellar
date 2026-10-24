@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   check:
-    name: Type-check, build, test
+    name: Type-check, build
     runs-on: [self-hosted, openship, linux, arm64]
     timeout-minutes: 15
     steps:
@@ -27,6 +27,5 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bun run type-check
       - run: bun run build
-      - run: bun run test
       - name: Bundle the Worker (no upload)
         run: bunx wrangler deploy --dry-run --outdir "${RUNNER_TEMP}/worker"

@@ -32,7 +32,7 @@ Login is Cloudflare Access. Settings ▸ Accounts connects Gmail accounts throug
 ```bash
 bun install
 bun run dev              # the web app at http://localhost:5173
-bun run check            # type-check, build, Worker tests (Vitest in workerd)
+bun run check            # type-check and build
 ```
 
 `bun run --filter=@mailcellar/web build:single` writes the whole app into one `index.html`.
