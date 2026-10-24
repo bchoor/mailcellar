@@ -366,6 +366,11 @@ export class MailboxDO extends DurableObject<Env> {
     this.laneUser = user;
     this.laneAccount = account;
     const sql = this.ctx.storage.sql;
+    // A lane whose month was stopped while nothing ran to notice (its run had died) comes off now.
+    const stopped = [...this.lanes()].filter(
+      ([month, job]) => sql.exec<{ state: PartState }>(`SELECT state FROM job_months WHERE job = ? AND month = ?`, job, month).toArray()[0]?.state === 'canceled',
+    );
+    if (stopped.length) await this.stopLanes(stopped.map(([month]) => month));
     const now = Date.now();
     const id = (month: string) => `${account}-${month}-${now.toString(36)}`;
     const lanes = this.lanes();
