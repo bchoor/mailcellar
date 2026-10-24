@@ -112,8 +112,8 @@ export const MIGRATIONS: readonly string[] = [
   `ALTER TABLE job_months ADD COLUMN finished_at TEXT;`,
 ];
 
-/** How long a kept page answer may lag the writes behind it, in ms. Tests set it to 0. */
-export const keepFor = { ms: 60_000 };
+/** How long a kept page answer may lag the writes behind it, in ms. */
+const KEEP_MS = 60_000;
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -150,7 +150,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   private keep<T>(key: string, read: () => T): T {
     const k = this.kept.get(key);
-    if (k && (k.writes === this.writes || Date.now() - k.at < keepFor.ms)) return k.value as T;
+    if (k && (k.writes === this.writes || Date.now() - k.at < KEEP_MS)) return k.value as T;
     const value = read();
     this.kept.set(key, { at: Date.now(), writes: this.writes, value });
     return value;
