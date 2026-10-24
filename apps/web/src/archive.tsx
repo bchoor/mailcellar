@@ -1,6 +1,7 @@
 // The archive pages. Each reads its own rows from the mailbox's rollups (/api/archive/*),
 // so no page loads every message: Senders reads senders, Time reads months, and so on.
 import { LumenLayout, LumenSavedWidget, useLumenLoad, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Input } from '@columenlabs/lumen-ui/ui/input';
 import { type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
 import type { ArchiveRows, ArchiveView, DomainRow, LabelRow, MessageRow, MonthRow, SenderRow } from '@mailcellar/schema';
@@ -41,6 +42,22 @@ function useLabelNames() {
   const names = new Map((labels.data ?? []).map((l) => [l.id, l.name]));
   return (ids: string[]) => ids.map((id) => names.get(id) ?? id);
 }
+
+/** What a page shows before any mail is archived: the archive never shows made-up mail. */
+function NoMail() {
+  return (
+    <Empty>
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <MailIcon />
+        </EmptyMedia>
+        <EmptyTitle>No mail yet</EmptyTitle>
+        <EmptyDescription>Connect a Gmail account and the archive fills as the backfill runs.</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+const noMail = (rows: unknown[] | undefined) => (rows && rows.length === 0 ? <NoMail /> : undefined);
 
 const view = (name: string, over: Record<string, unknown>): CustomViewConfig => ({
   name,
@@ -164,6 +181,7 @@ export function OverviewPage() {
       domain={MONTHS}
       config={config}
       rows={months.data ?? []}
+      state={noMail(months.data)}
       load={load}
       onConfigChange={setConfig}
       rowTitle={(r) => r.month}
@@ -198,6 +216,7 @@ export function MessagesPage() {
       domain={MESSAGES}
       config={config}
       rows={rows}
+      state={q ? undefined : noMail(messages.data)}
       load={load}
       onConfigChange={setConfig}
       rowTitle={(r) => r.subject}
@@ -235,6 +254,7 @@ function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
       domain={domain}
       config={config}
       rows={query.data ?? []}
+      state={noMail(query.data)}
       load={load}
       onConfigChange={setConfig}
       rowTitle={rowTitle}

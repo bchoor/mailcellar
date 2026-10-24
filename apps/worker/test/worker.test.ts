@@ -18,6 +18,29 @@ describe('api', () => {
   });
 });
 
+describe('no made-up data', () => {
+  it('serves an empty archive until real mail arrives', async () => {
+    for (const view of ['months', 'labels', 'domains', 'senders', 'messages']) {
+      const res = await exports.default.fetch(`https://mailcellar.icaruslab.dev/api/archive/${view}`);
+      expect(await res.json(), view).toEqual([]);
+    }
+  });
+
+  it("empties a mailbox phase 1 filled with sample mail, keeping its settings and usage", async () => {
+    const stub = env.MAILBOX.getByName(mailboxName(asUserId('old-sample')));
+    await runInDurableObject(stub, async (instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec(`INSERT INTO meta VALUES ('sample', '2400')`);
+      sql.exec(`INSERT INTO months VALUES ('2020-01', 5, 100)`);
+      sql.exec(`INSERT INTO usage_days VALUES ('2026-10-23', 'do_rows_written', 9)`);
+      (instance as unknown as { dropSample(): void }).dropSample();
+      expect(sql.exec(`SELECT count(*) AS n FROM months`).one().n).toBe(0);
+      expect(sql.exec(`SELECT count(*) AS n FROM meta WHERE key = 'sample'`).one().n).toBe(0);
+      expect(sql.exec(`SELECT count(*) AS n FROM usage_days`).one().n).toBe(1);
+    });
+  });
+});
+
 describe('mailbox DO', () => {
   it('applies every migration once', async () => {
     const stub = env.MAILBOX.getByName(mailboxName(asUserId('u1')));

@@ -1,6 +1,6 @@
-// Sample mailbox for phase 1: made-up messages from reserved example domains, so the
-// pages run end to end before any real mail arrives. Nothing here is real.
-import type { IndexedMessage, MailLabel } from './mail';
+// Test fixture only, never shipped: made-up messages from reserved example domains, so the
+// tests can index a realistic mailbox. Nothing here is real.
+import type { IndexedMessage, MailLabel } from '@mailcellar/schema';
 
 export const SAMPLE_LABELS: MailLabel[] = [
   { id: 'INBOX', name: 'INBOX', type: 'system' },
@@ -67,4 +67,14 @@ export function sampleMessages(count: number, seed = 1): IndexedMessage[] {
       labels: r() < 0.15 ? ['SENT', label] : ['INBOX', label],
     };
   });
+}
+
+/** Fill a test mailbox with `count` sample messages and their labels. */
+export async function seedSample(
+  stub: { ingest(batch: IndexedMessage[]): Promise<unknown>; putLabels(labels: MailLabel[]): Promise<void> },
+  count = 2400,
+): Promise<void> {
+  const mail = sampleMessages(count);
+  for (let i = 0; i < mail.length; i += 100) await stub.ingest(mail.slice(i, i + 100));
+  await stub.putLabels(SAMPLE_LABELS);
 }
