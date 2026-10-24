@@ -96,8 +96,9 @@ describe('connecting Gmail accounts', () => {
     expect(me.accounts.map((a) => a.email)).toEqual(['home@gmail.com', 'work@example.org']);
     expect(me.accounts[0].test).toMatchObject({ ok: true, detail: 'Read ✓ · Modify ✓' });
     const work = me.accounts[1];
-    expect([work.read, work.modify, work.test.ok]).toEqual([true, false, false]);
-    expect(work.test.error).toMatch(/modify/i);
+    // Read only is fine: the account passes, and the app warns that Gmail cleanup is unavailable.
+    expect([work.read, work.modify, work.test.ok]).toEqual([true, false, true]);
+    expect(work.test).toMatchObject({ detail: 'Read ✓ · Modify ✗', error: null });
     expect(JSON.stringify(me)).not.toMatch(/rt-home|rt-work/);
 
     // The connection test asks Google which scopes the token carries now.

@@ -379,9 +379,9 @@ export class MailboxDO extends DurableObject<Env> {
           modify,
           test: {
             at: a.tested_at,
-            ok: !a.test_error && read && modify,
+            ok: !a.test_error && read,
             detail: a.test_error ? null : `Read ${read ? '✓' : '✗'} · Modify ${modify ? '✓' : '✗'}`,
-            error: a.test_error ?? (!modify ? 'No Modify access, so MailCellar can’t remove archived mail from Gmail. Add the account again and allow it.' : null),
+            error: a.test_error,
           },
         };
       });

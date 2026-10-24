@@ -20,7 +20,8 @@ export interface ConnectedAccount {
   /** What Google granted when last checked: read mail, and modify it (cleanup's move to Trash). */
   read: boolean;
   modify: boolean;
-  /** The last connection test, in Lumen's KeyTestResult shape. Not ok without modify. */
+  /** The last connection test, in Lumen's KeyTestResult shape. Read access is enough to pass;
+   * without modify the account is read only (no archiving or deleting in Gmail). */
   test: { at: string; ok: boolean; detail: string | null; error: string | null };
 }
 

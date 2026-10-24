@@ -72,7 +72,7 @@ export function AccountsSettings() {
           <IntegrationRow
             key={a.id}
             name={a.email}
-            meta={`Gmail · added ${added(a.addedAt)} · Read ${a.read ? '✓' : '✗'} · Modify ${a.modify ? '✓' : '✗'}`}
+            meta={`Gmail · added ${added(a.addedAt)} · ${a.modify ? 'Read ✓ · Modify ✓' : 'Read only'}`}
             badge={<TestBadge test={a.test} ok="Connected" />}
             open={open === a.id}
             onOpenChange={(o: boolean) => setOpen(o ? a.id : null)}
@@ -81,6 +81,9 @@ export function AccountsSettings() {
               <p className="text-sm text-muted-foreground">
                 MailCellar copies all mail from this account. Modify lets it remove mail from Gmail when you archive it.
               </p>
+              {a.read && !a.modify && (
+                <p className="text-sm text-amber-600 dark:text-amber-400">Read only: archiving and deleting in Gmail aren’t available.</p>
+              )}
               <KeyTestLine
                 test={a.test}
                 run={async () => {
