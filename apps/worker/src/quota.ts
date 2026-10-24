@@ -3,7 +3,7 @@
 // batch used after. It reads Cloudflare's analytics for the whole account (every project on
 // it) at most every 5 minutes, and adds what MailCellar has counted since.
 import { DurableObject } from 'cloudflare:workers';
-import { SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, QUOTA_STOP, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, CPU_LIMIT_MS, type CpuRow, type LevelMetric } from '@mailcellar/schema';
+import { SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, quotaStop, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, CPU_LIMIT_MS, type CpuRow, type LevelMetric } from '@mailcellar/schema';
 import type { Env } from './env';
 
 export type QuotaUse = Partial<Record<QuotaMetric, number>>;
@@ -442,7 +442,7 @@ export class QuotaDO extends DurableObject<Env> {
     for (const m of metrics) {
       if (!cost[m]) continue;
       const { limit, label, period, hard } = this.limits[m];
-      if (hard && this.used(m, now).used + (cost[m] ?? 0) > limit * QUOTA_STOP)
+      if (hard && this.used(m, now).used + (cost[m] ?? 0) > limit * quotaStop(m))
         return { metric: m, label, resumesAt: quotaReset(period, now, this.billing(now)).toISOString() };
     }
     return null;
@@ -504,7 +504,7 @@ export class QuotaDO extends DurableObject<Env> {
         })
       : [];
     const tried = this.meta('tried_at');
-    const over = meters.find((m) => m.hard && m.used >= m.limit * QUOTA_STOP);
+    const over = meters.find((m) => m.hard && m.used >= m.limit * quotaStop(m.metric));
     return {
       plan: this.plan,
       planReadAt: this.meta('plan_read_at'),
