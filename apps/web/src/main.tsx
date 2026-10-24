@@ -1,18 +1,14 @@
 import {
   IntegrationRow,
-  LumenLayout,
   LumenShell,
   NavGroup,
   SchedulesSection,
   TestBadge,
   type ScheduleItem,
   type ScheduleRun,
-  type ViewDomain,
-  useLumenLoad,
 } from '@columenlabs/lumen-ui';
 import { TooltipProvider } from '@columenlabs/lumen-ui/ui/tooltip';
-import { type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Outlet,
   RouterProvider,
@@ -22,17 +18,11 @@ import {
   createRouter,
 } from '@tanstack/react-router';
 import {
-  AtSignIcon,
   CalendarClockIcon,
-  CalendarIcon,
   GaugeIcon,
   GlobeIcon,
   HourglassIcon,
-  HardDriveIcon,
-  InboxIcon,
   LayoutDashboardIcon,
-  MailIcon,
-  PaperclipIcon,
   SearchIcon,
   TagIcon,
   UserIcon,
@@ -45,69 +35,33 @@ import { BackfillPage, BackfillStatus, UsagePage } from './ops-pages';
 import { RELEASES, RELEASES_API } from './releases';
 import './index.css';
 
-const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
-const minutesAhead = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
-
-const INITIAL_SCHEDULES: ScheduleItem[] = [
-  {
-    id: 'gmail-sync',
-    name: 'Gmail sync',
-    on: true,
-    every: 360,
-    from: '00:00',
-    to: '23:59',
-    days: [0, 1, 2, 3, 4, 5, 6],
-    tz: 'America/Los_Angeles',
-    kind: 'window',
-    choices: [60, 180, 360, 720, 1440],
-    about: {
-      inspects: 'Gmail changes since the last run, for each connected account',
-      processes: 'Saves new messages and attachments, and applies label changes and deletions',
-      enriches: 'Embeddings for the messages you chose for semantic search',
-      outputs: 'Your archive tables, search index and the views on these pages',
-      cost: 'Free tier',
-    },
-    last: { at: minutesAgo(130), ok: true, detail: '214 new messages, 3 label changes' },
-    next: minutesAhead(230),
-    waiting: null,
-  },
-  {
-    id: 'compaction',
-    name: 'Archive maintenance',
-    on: true,
-    every: 1440,
-    from: '03:15',
-    to: '03:15',
-    days: [0, 1, 2, 3, 4, 5, 6],
-    tz: 'America/Los_Angeles',
-    kind: 'daily',
-    choices: [],
-    about: {
-      inspects: 'Your archive tables',
-      processes: 'Merges small files and expires old snapshots',
-      outputs: 'Faster long-range views',
-      cost: 'Free tier',
-    },
-    last: { at: minutesAgo(900), ok: true, detail: 'Merged 41 files' },
-    next: minutesAhead(540),
-    waiting: null,
-  },
-];
-
+// Schedules are saved in the mailbox. Nothing runs them until phase 2's sync,
+// so Run now reports that rather than pretending.
 function SchedulesSettings() {
-  const [items, setItems] = useState(INITIAL_SCHEDULES);
+  const query = useQuery({
+    queryKey: ['schedules'],
+    queryFn: async (): Promise<ScheduleItem[]> => {
+      const res = await fetch('/api/schedules');
+      if (!res.ok) throw new Error(`Couldn't load schedules (${res.status})`);
+      return res.json();
+    },
+  });
+  const client = useQueryClient();
+  if (!query.data) return <p className="text-sm text-muted-foreground">{query.error ? String(query.error.message) : 'Loading…'}</p>;
   return (
     <SchedulesSection
-      schedules={items}
+      schedules={query.data}
       onSave={async (id: string, change: Partial<ScheduleItem>) => {
-        setItems((all) => all.map((s) => (s.id === id ? { ...s, ...change } : s)));
+        const res = await fetch(`/api/schedules/${id}`, { method: 'PUT', body: JSON.stringify(change) });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.detail ?? 'Not saved');
+        client.setQueryData<ScheduleItem[]>(['schedules'], (all) => all?.map((s) => (s.id === id ? body : s)));
       }}
-      onRun={async (id: string): Promise<ScheduleRun> => {
-        await new Promise((r) => setTimeout(r, 1200));
-        const run = { at: new Date().toISOString(), ok: true, detail: '12 new messages' };
-        setItems((all) => all.map((s) => (s.id === id ? { ...s, last: run } : s)));
-        return run;
-      }}
+      onRun={async (): Promise<ScheduleRun> => ({
+        at: new Date().toISOString(),
+        ok: false,
+        detail: 'Sync arrives with the backfill, in the next phase',
+      })}
     />
   );
 }

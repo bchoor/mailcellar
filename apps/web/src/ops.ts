@@ -1,4 +1,4 @@
-// Sample backfill and Cloudflare usage figures for the prototype. Illustrative only.
+// Sample backfill figures for the prototype, until phase 2's sync reports real ones. Illustrative only.
 export interface Run {
   id: string;
   date: string;
@@ -51,54 +51,3 @@ export const RUNS: Run[] = DAYS.flatMap((date, d) =>
     };
   }),
 ).reverse();
-
-export interface Usage {
-  id: string;
-  service: string;
-  metric: string;
-  period: string;
-  used: number;
-  allowance: number;
-  unit: string;
-  pct: number;
-  cost: number;
-}
-
-const u = (
-  service: string,
-  metric: string,
-  period: string,
-  used: number,
-  allowance: number,
-  unit: string,
-  cost = 0,
-): Usage => ({
-  id: `${service}:${metric}`,
-  service,
-  metric,
-  period,
-  used,
-  allowance,
-  unit,
-  pct: Math.round((used / allowance) * 1000) / 10,
-  cost,
-});
-
-export const USAGE: Usage[] = [
-  u('Workers', 'Requests', 'Today', 3_410, 100_000, 'requests'),
-  u('Workflows', 'Steps', 'Today', 1_870, 3_000, 'steps'),
-  u('Workflows', 'CPU per step (avg)', 'Per step', 6.1, 10, 'ms'),
-  u('Durable Objects', 'Rows written', 'Today', 61_240, 100_000, 'rows'),
-  u('Durable Objects', 'Rows read', 'Today', 820_000, 5_000_000, 'rows'),
-  u('Durable Objects', 'Requests', 'Today', 4_020, 100_000, 'requests'),
-  u('Durable Objects', 'Stored data', 'Now', 0.41, 5, 'GB'),
-  u('R2', 'Storage', 'This month', 14.2, 10, 'GB-month', 0.06),
-  u('R2', 'Class A operations', 'This month', 236_000, 1_000_000, 'ops'),
-  u('R2', 'Class B operations', 'This month', 41_000, 10_000_000, 'ops'),
-  u('Basin', 'Catalog operations', 'This month', 3_900, 1_000_000, 'ops'),
-  u('Basin', 'SQL data scanned', 'This month', 0.3, 10, 'GB'),
-  u('Workers AI', 'Neurons', 'Today', 7_350, 10_000, 'neurons'),
-  u('Vectorize', 'Stored dimensions', 'Now', 3_780_000, 5_000_000, 'dims'),
-  u('Vectorize', 'Queried dimensions', 'This month', 1_100_000, 30_000_000, 'dims'),
-  u('Analytics Engine', 'Data points written', 'Today', 1_240, 100_000, 'points'),
-];
