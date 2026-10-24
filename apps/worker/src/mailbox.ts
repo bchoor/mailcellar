@@ -19,7 +19,16 @@ import {
   type SyncState,
   type SyncSummary,
   type SyncOverview,
-  type SyncRange,
+  type AccountCoverage,
+  type BackfillJob,
+  type CensusState,
+  type MonthCoverage,
+  type PartState,
+  type SyncPart,
+  addMonths,
+  jobStatus,
+  monthNow,
+  SYNC_STALE_MS,
   type ScheduleRun,
   type UserId,
   asUserId,
@@ -75,6 +84,16 @@ export const MIGRATIONS: readonly string[] = [
      scopes TEXT NOT NULL, added_at TEXT NOT NULL, tested_at TEXT NOT NULL, test_error TEXT
    ) STRICT, WITHOUT ROWID;
    ALTER TABLE messages ADD COLUMN state TEXT NOT NULL DEFAULT 'live' CHECK (state IN ('live', 'archived'));`,
+  // 5: backfill by month. Gmail's count for each month (the census, from message IDs only),
+  // and backfill jobs: months queued together, each month copied as one part.
+  `CREATE TABLE gmail_months (month TEXT PRIMARY KEY, n INTEGER NOT NULL, counted_at TEXT NOT NULL) STRICT, WITHOUT ROWID;
+   CREATE TABLE jobs (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, label TEXT NOT NULL) STRICT;
+   CREATE TABLE job_months (
+     job INTEGER NOT NULL, month TEXT NOT NULL,
+     state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'done', 'failed', 'canceled')),
+     error TEXT, PRIMARY KEY (job, month)
+   ) STRICT, WITHOUT ROWID;
+   CREATE INDEX job_months_state ON job_months (state, month);`,
 ];
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -184,6 +203,162 @@ export class MailboxDO extends DurableObject<Env> {
           l.id, l.name, l.type,
         );
     });
+  }
+
+  /** Whether any backfill month is waiting to be copied. */
+  async hasQueued(): Promise<boolean> {
+    return this.ctx.storage.sql.exec(`SELECT 1 FROM job_months WHERE state IN ('queued', 'running') LIMIT 1`).toArray().length > 0;
+  }
+
+  /** A backfill month's state now (a canceled one is dropped by the sync). */
+  async partState(part: SyncPart): Promise<PartState | null> {
+    return (
+      this.ctx.storage.sql
+        .exec<{ state: PartState }>(`SELECT state FROM job_months WHERE job = ? AND month = ?`, part.job, part.month)
+        .toArray()[0]?.state ?? null
+    );
+  }
+
+  /**
+   * The next month to copy, marked running: newest first. A month left running by a run that
+   * was replaced comes first, since only one sync runs per account.
+   */
+  async nextPart(): Promise<SyncPart | null> {
+    const sql = this.ctx.storage.sql;
+    const row = sql
+      .exec<{ job: number; month: string }>(
+        `SELECT job, month FROM job_months WHERE state IN ('running', 'queued')
+         ORDER BY state = 'running' DESC, month DESC, job LIMIT 1`,
+      )
+      .toArray()[0];
+    if (!row) return null;
+    const { rowsWritten } = sql.exec(`UPDATE job_months SET state = 'running' WHERE job = ? AND month = ? AND state = 'queued'`, row.job, row.month);
+    if (rowsWritten) this.count({ do_rows_written: rowsWritten });
+    return { job: row.job, month: row.month };
+  }
+
+  /** Close a running backfill month as done or failed. A canceled month stays canceled. */
+  async finishPart(part: SyncPart, state: 'done' | 'failed', error: string | null = null): Promise<void> {
+    const { rowsWritten } = this.ctx.storage.sql.exec(
+      `UPDATE job_months SET state = ?, error = ? WHERE job = ? AND month = ? AND state = 'running'`,
+      state, error, part.job, part.month,
+    );
+    if (rowsWritten) this.count({ do_rows_written: rowsWritten });
+  }
+
+  /** The census's progress, or null before the first. */
+  async censusState(): Promise<CensusState | null> {
+    const row = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'census'`).toArray()[0];
+    return row ? (JSON.parse(row.value) as CensusState) : null;
+  }
+
+  /** Save census progress; with `onlyIf`, only while that run owns it. Returns whether it saved. */
+  async saveCensus(state: CensusState, onlyIf?: string): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => {
+      if (onlyIf !== undefined && (this.censusRow()?.runId ?? null) !== onlyIf) return false;
+      this.ctx.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('census', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+        JSON.stringify(state),
+      );
+      this.count({ do_rows_written: 1 });
+      return true;
+    });
+  }
+
+  private censusRow(): CensusState | null {
+    const row = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'census'`).toArray()[0];
+    return row ? (JSON.parse(row.value) as CensusState) : null;
+  }
+
+  /** A month's Gmail count if it was counted after the month ended (so it can't grow); else null. */
+  async finalCount(month: string): Promise<number | null> {
+    const row = this.ctx.storage.sql
+      .exec<{ n: number; counted_at: string }>(`SELECT n, counted_at FROM gmail_months WHERE month = ?`, month)
+      .toArray()[0];
+    return row && row.counted_at >= `${addMonths(month, 1)}-01T00:00:00.000Z` ? row.n : null;
+  }
+
+  /** Record Gmail's count for a month. */
+  async putMonthCount(month: string, n: number): Promise<void> {
+    const { rowsWritten } = this.ctx.storage.sql.exec(
+      `INSERT INTO gmail_months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
+      month, n, new Date().toISOString(),
+    );
+    this.count({ do_rows_written: rowsWritten });
+  }
+
+  /** Each month's Gmail count, copied count and latest backfill state, oldest first. */
+  async coverageMonths(): Promise<MonthCoverage[]> {
+    const sql = this.ctx.storage.sql;
+    const by = new Map<string, MonthCoverage>();
+    const at = (month: string) => by.get(month) ?? by.set(month, { month, gmail: null, copied: 0, state: null, error: null }).get(month)!;
+    for (const r of sql.exec<{ month: string; n: number }>(`SELECT month, n FROM gmail_months`)) at(r.month).gmail = r.n;
+    for (const r of sql.exec<{ month: string; n: number }>(`SELECT month, n FROM months`)) at(r.month).copied = r.n;
+    // The latest job to touch a month decides its state.
+    for (const r of sql.exec<{ month: string; state: PartState; error: string | null }>(
+      `SELECT month, state, error FROM job_months j WHERE job = (SELECT max(job) FROM job_months WHERE month = j.month)`,
+    )) Object.assign(at(r.month), { state: r.state, error: r.error });
+    return [...by.values()].sort((a, b) => a.month.localeCompare(b.month));
+  }
+
+  /**
+   * Queue months as one backfill job. Months already waiting or being copied are left out.
+   * Returns the job, or null when every month was already queued.
+   */
+  async queueMonths(months: string[], label: string): Promise<number | null> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const busy = new Set(
+        sql.exec<{ month: string }>(`SELECT month FROM job_months WHERE state IN ('queued', 'running')`).toArray().map((r) => r.month),
+      );
+      const fresh = [...new Set(months)].filter((m) => !busy.has(m));
+      if (!fresh.length) return null;
+      const job = sql
+        .exec<{ id: number }>(`INSERT INTO jobs (created_at, label) VALUES (?, ?) RETURNING id`, new Date().toISOString(), label)
+        .toArray()[0].id;
+      for (const m of fresh) sql.exec(`INSERT INTO job_months (job, month, state) VALUES (?, ?, 'queued')`, job, m);
+      this.count({ do_rows_written: fresh.length + 1 });
+      return job;
+    });
+  }
+
+  /** The latest backfill jobs, newest first. */
+  async jobList(limit = 20): Promise<BackfillJob[]> {
+    const sql = this.ctx.storage.sql;
+    const jobs = sql
+      .exec<{ id: number; created_at: string; label: string }>(`SELECT id, created_at, label FROM jobs ORDER BY id DESC LIMIT ?`, limit)
+      .toArray();
+    return jobs.map((j) => {
+      const months: Record<PartState, number> = { queued: 0, running: 0, done: 0, failed: 0, canceled: 0 };
+      let from = '';
+      let to = '';
+      for (const r of sql.exec<{ state: PartState; n: number; first: string; last: string }>(
+        `SELECT state, count(*) AS n, min(month) AS first, max(month) AS last FROM job_months WHERE job = ? GROUP BY state`,
+        j.id,
+      )) {
+        months[r.state] = r.n;
+        if (!from || r.first < from) from = r.first;
+        if (r.last > to) to = r.last;
+      }
+      return { id: j.id, createdAt: j.created_at, label: j.label, status: jobStatus(months), months, from, to };
+    });
+  }
+
+  /** Cancel a job's months still waiting or being copied; Retry its failed or canceled months. Returns months changed, or null: no such job. */
+  async changeJob(job: number, action: 'cancel' | 'retry'): Promise<number | null> {
+    const sql = this.ctx.storage.sql;
+    if (!sql.exec(`SELECT 1 FROM jobs WHERE id = ?`, job).toArray().length) return null;
+    const cursor =
+      action === 'cancel'
+        ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE job = ? AND state IN ('queued', 'running') RETURNING month`, job)
+        : sql.exec(
+            `UPDATE job_months SET state = 'queued', error = NULL WHERE job = ? AND state IN ('failed', 'canceled')
+             AND month NOT IN (SELECT month FROM job_months WHERE state IN ('queued', 'running')) RETURNING month`,
+            job,
+          );
+    const changed = cursor.toArray().length;
+    if (changed) this.count({ do_rows_written: cursor.rowsWritten });
+    return changed;
   }
 
   /**
@@ -415,18 +590,75 @@ export class MailboxDO extends DurableObject<Env> {
    * Start syncing an account unless a run is going or waiting to resume. Sync now (`manual`)
    * also restarts a sync that stopped on an error; the schedule leaves those for the person.
    */
-  async syncAccount(account: string, manual: boolean, range?: SyncRange): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
+  async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return { error: 'not_found' };
     const status = syncStatus(await accountMailbox(this.env, user, account).syncState());
     if (status === 'running' || status === 'waiting' || (status === 'stopped' && !manual)) return { status };
     try {
-      await syncDeps.start(this.env, user, account, range);
+      await syncDeps.start(this.env, user, account);
     } catch (e) {
       if (e instanceof BasinNotReady) return { error: 'basin_not_ready' };
       throw e;
     }
     return { status: 'started' };
+  }
+
+  /**
+   * An account's coverage map: each month's Gmail count, what MailCellar has, and backfill
+   * states. Opening it starts the census when there is none, resumes one that stopped, and
+   * recounts recent months every 6 hours. Null: not this user's account.
+   */
+  async coverage(account: string): Promise<AccountCoverage | null> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return null;
+    const mailbox = accountMailbox(this.env, user, account);
+    let c = await mailbox.censusState();
+    const now = Date.now();
+    const stale = c && now - Date.parse(c.updatedAt) >= SYNC_STALE_MS;
+    const mode = !c ? 'full' : c.month !== null && (c.error || stale) ? 'resume' : c.finishedAt && now - Date.parse(c.finishedAt) >= 6 * 3_600_000 ? 'refresh' : null;
+    if (mode) {
+      await syncDeps.census(this.env, user, account, mode === 'refresh' ? 'refresh' : 'full');
+      c = await mailbox.censusState();
+    }
+    const counting = !!c && c.month !== null && !c.error;
+    return {
+      months: await mailbox.coverageMonths(),
+      census: {
+        status: !c ? 'not_started' : c.error ? 'stopped' : counting ? 'counting' : 'done',
+        month: c?.month ?? null,
+        finishedAt: c?.finishedAt ?? null,
+        error: c?.error ?? null,
+      },
+      current: monthNow(),
+    };
+  }
+
+  /** Queue months to copy for an account, and start its sync if none is going. */
+  async backfill(account: string, months: string[], label: string): Promise<{ job: number | null; status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return { error: 'not_found' };
+    if (!this.env.BASIN_TOKEN) return { error: 'basin_not_ready' };
+    const job = await accountMailbox(this.env, user, account).queueMonths(months, label);
+    const r = await this.syncAccount(account, true);
+    return 'error' in r ? r : { job, status: r.status };
+  }
+
+  /** An account's latest backfill jobs. Null: not this user's account. */
+  async jobs(account: string): Promise<BackfillJob[] | null> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return null;
+    return accountMailbox(this.env, user, account).jobList();
+  }
+
+  /** Cancel or retry a backfill job; a retry starts the sync if none is going. Null: no such account or job. */
+  async jobAction(account: string, job: number, action: 'cancel' | 'retry'): Promise<{ changed: number } | null> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return null;
+    const changed = await accountMailbox(this.env, user, account).changeJob(job, action);
+    if (changed === null) return null;
+    if (action === 'retry' && changed && this.env.BASIN_TOKEN) await this.syncAccount(account, true);
+    return { changed };
   }
 
   private hasAccount(id: string): boolean {

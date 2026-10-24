@@ -1,4 +1,4 @@
-import { ARCHIVE_VIEWS, type ArchiveView, type Health, type SyncRange } from '@mailcellar/schema';
+import { ARCHIVE_VIEWS, monthNow, type ArchiveView, type Health } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import type { Env } from './env';
 
@@ -74,20 +74,44 @@ async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox
   }
   if (sync && request.method === 'POST') {
     // Sync now: start a run unless one is going; answers with where the sync stands.
-    // Optional body {"range": "30d" | "all"}: what the backfill covers. Left out, it continues as it was.
-    let range: SyncRange | undefined;
-    const text = await request.text();
-    if (text) {
-      try {
-        range = (JSON.parse(text) as { range?: SyncRange }).range;
-      } catch {
-        return Response.json({ error: 'bad_json' }, { status: 400 });
-      }
-      if (range !== undefined && range !== '30d' && range !== 'all') return Response.json({ error: 'bad_range' }, { status: 400 });
-    }
-    const r = await mailbox.syncAccount(sync[1], true, range);
+    const r = await mailbox.syncAccount(sync[1], true);
     if ('error' in r) return Response.json({ error: r.error }, { status: r.error === 'not_found' ? 404 : 409, headers: noStore });
     return Response.json({ started: r.status === 'started', sync: await mailbox.syncInfo(sync[1]) }, { headers: noStore });
+  }
+  const coverage = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/coverage$/);
+  if (coverage && request.method === 'GET') {
+    const c = await mailbox.coverage(coverage[1]);
+    return c ? Response.json(c, { headers: noStore }) : Response.json({ error: 'not_found' }, { status: 404 });
+  }
+  const backfill = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/backfill$/);
+  if (backfill && request.method === 'POST') {
+    // Queue a backfill: {"months": ["2024-01", ...], "label": "Last 3 months"}.
+    const text = await request.text();
+    if (text.length > 16_384) return Response.json({ error: 'too_large' }, { status: 413 });
+    let body: { months?: unknown; label?: unknown };
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return Response.json({ error: 'bad_json' }, { status: 400 });
+    }
+    const now = monthNow();
+    const months = body.months;
+    if (!Array.isArray(months) || !months.length || months.length > 1000 || !months.every((m) => typeof m === 'string' && /^(19[7-9]\d|20\d\d)-(0[1-9]|1[0-2])$/.test(m) && m <= now))
+      return Response.json({ error: 'bad_months' }, { status: 400 });
+    const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 60) : 'Picked months';
+    const r = await mailbox.backfill(backfill[1], months as string[], label);
+    if ('error' in r) return Response.json({ error: r.error }, { status: r.error === 'not_found' ? 404 : 409, headers: noStore });
+    return Response.json({ ...r, jobs: await mailbox.jobs(backfill[1]) }, { headers: noStore });
+  }
+  const jobs = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/jobs$/);
+  if (jobs && request.method === 'GET') {
+    const list = await mailbox.jobs(jobs[1]);
+    return list ? Response.json(list, { headers: noStore }) : Response.json({ error: 'not_found' }, { status: 404 });
+  }
+  const job = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/jobs\/(\d{1,9})\/(cancel|retry)$/);
+  if (job && request.method === 'POST') {
+    const r = await mailbox.jobAction(job[1], Number(job[2]), job[3] as 'cancel' | 'retry');
+    return r ? Response.json(r, { headers: noStore }) : Response.json({ error: 'not_found' }, { status: 404 });
   }
   const archive = url.pathname.match(/^\/api\/archive\/([a-z]+)$/);
   if (archive && request.method === 'GET' && ARCHIVE_VIEWS.includes(archive[1] as ArchiveView)) {

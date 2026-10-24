@@ -8,6 +8,18 @@ export interface FakeMessage {
   id: string;
   raw: string;
   labels?: string[];
+  /** Gmail internalDate in ms; by default 2024-01-01 plus the ID in seconds. */
+  ts?: number;
+}
+
+const tsOf = (m: FakeMessage) => m.ts ?? Date.UTC(2024, 0, 1) + Number.parseInt(m.id, 16) * 1000;
+
+/** The messages a search matches: only `after:` and `before:` in Unix seconds are understood. */
+function search(mail: FakeMessage[], q: string | null) {
+  if (!q) return mail;
+  const after = Number(q.match(/after:(\d+)/)?.[1] ?? -Infinity);
+  const before = Number(q.match(/before:(\d+)/)?.[1] ?? Infinity);
+  return mail.filter((m) => tsOf(m) / 1000 > after && tsOf(m) / 1000 < before);
 }
 
 export function fakeRaw(i: number, opts: { subject?: string; from?: string; attachments?: number; pad?: number } = {}) {
@@ -30,7 +42,7 @@ export const fakeMessages = (n: number, from = 1): FakeMessage[] =>
   Array.from({ length: n }, (_, k) => ({ id: (0x1000 + from + k).toString(16), raw: fakeRaw(from + k) }));
 
 /** Install the fake. `opts.fail` answers a batch part with that status, once per message ID. */
-export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; historyAdded?: string[]; failOnce?: Record<string, number>; tokenError?: string; estimate?: number } = {}) {
+export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; historyAdded?: string[]; failOnce?: Record<string, number>; tokenError?: string } = {}) {
   const calls: string[] = [];
   const failed = new Set<string>();
   const byId = new Map(mail.map((m) => [m.id, m]));
@@ -45,11 +57,13 @@ export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; histor
       return Response.json({ labels: [{ id: 'INBOX', name: 'INBOX', type: 'system' }, { id: 'Label_1', name: 'Receipts', type: 'user' }] });
     if (u.pathname === '/gmail/v1/users/me/messages') {
       const start = Number(u.searchParams.get('pageToken') ?? 0);
-      const ids = mail.slice(start, start + pageSize).map((m) => ({ id: m.id, threadId: m.id }));
-      const next = start + pageSize < mail.length ? String(start + pageSize) : undefined;
       const q = u.searchParams.get('q');
       if (q) calls.push(`q=${q}`);
-      return Response.json({ messages: ids, nextPageToken: next, resultSizeEstimate: opts.estimate ?? mail.length });
+      const found = search(mail, q);
+      const size = Math.min(pageSize, Number(u.searchParams.get('maxResults') ?? 500));
+      const ids = found.slice(start, start + size).map((m) => ({ id: m.id, threadId: m.id }));
+      const next = start + size < found.length ? String(start + size) : undefined;
+      return Response.json({ messages: ids, nextPageToken: next, resultSizeEstimate: found.length });
     }
     if (u.pathname === '/gmail/v1/users/me/history')
       return Response.json({ history: (opts.historyAdded ?? []).map((id) => ({ messagesAdded: [{ message: { id } }] })), historyId: '200' });
@@ -62,7 +76,7 @@ export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; histor
         const fail = opts.failOnce?.[id];
         let status = m ? 200 : 404;
         let body = m
-          ? JSON.stringify({ id, threadId: id, labelIds: m.labels ?? ['INBOX'], snippet: 'It&#39;s a test', sizeEstimate: m.raw.length, internalDate: String(Date.UTC(2024, 0, 1) + Number.parseInt(id, 16) * 1000), raw: b64url(m.raw) })
+          ? JSON.stringify({ id, threadId: id, labelIds: m.labels ?? ['INBOX'], snippet: 'It&#39;s a test', sizeEstimate: m.raw.length, internalDate: String(tsOf(m)), raw: b64url(m.raw) })
           : '{"error":{"code":404}}';
         if (fail && !failed.has(id)) {
           failed.add(id);
