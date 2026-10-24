@@ -84,6 +84,8 @@ const STATUS: Record<SyncSummary['status'], { label: string; variant: 'default' 
 /** What a sync is doing, in a few words; null when the badge says it all. */
 function headline(s: SyncSummary): string | null {
   if (s.phase === null || s.status === 'stopped') return null;
+  // The DO write limit is the Indexing panel's to explain.
+  if (doHeld(s)) return 'Not copying right now. The next run picks up the queue.';
   if (s.phase === 'paused' && s.resumesAt && s.pausedFor) return `Paused before the account's daily limit (${s.pausedFor}). Resumes ${when(s.resumesAt)}.`;
   if (s.phase === 'paused' && s.resumesAt) return `Paused at today's free limit. Resumes ${when(s.resumesAt)}.`;
   if (s.status === 'waiting' && s.resumesAt) return `Trying again ${when(s.resumesAt)}.`;
@@ -118,11 +120,14 @@ function meterLine(name: string | null | undefined, meters: QuotaMeter[]): strin
   const m = meters.find((x) => x.label === name || x.metric === name);
   return m ? `${m.label} ${compact(m.used)} of ${compact(m.limit * quotaStop(m.metric))}` : null;
 }
+const isDoWrites = (name: string | null | undefined, meters: QuotaMeter[]) =>
+  name === 'do_rows_written' || meters.some((m) => m.metric === 'do_rows_written' && m.label === name);
 export function copyState(o: { paused: boolean; pausedBy: 'person' | 'budget' | null } | undefined, a: AccountStatus | undefined, meters: QuotaMeter[] = []): StageState {
   if (o?.paused && o.pausedBy === 'budget') return { kind: 'budget', label: 'Copying paused: spend cap', detail: 'Stopped at the backfill spend cap. Resume to go on.' };
   if (o?.paused) return { kind: 'person', label: 'Copying paused by you', detail: 'Nothing copies until you resume.' };
   const s = a?.sync;
-  if (s?.phase === 'paused') {
+  // The DO write limit holds indexing only; a sync that still names it is not a copy pause.
+  if (s?.phase === 'paused' && !isDoWrites(s.pausedFor, meters)) {
     const why = meterLine(s.pausedFor, meters);
     const until = s.resumesAt ? `Resumes ${resumeTime(s.resumesAt)}.` : '';
     return { kind: 'limit', label: 'Copying paused: daily limit', detail: why ? `${why}. ${until}`.trim() : until || null };
@@ -131,19 +136,24 @@ export function copyState(o: { paused: boolean; pausedBy: 'person' | 'budget' | 
   return { kind: 'idle', label: 'Not copying', detail: null };
 }
 export function indexState(a: AccountStatus | undefined, meters: QuotaMeter[] = []): StageState {
-  if (a?.index.status === 'waiting') {
-    const why = meterLine(a.index.pausedFor ?? 'do_rows_written', meters) ?? 'daily DO write limit';
-    return { kind: 'limit', label: 'Indexing paused', detail: `${a.index.resumesAt ? `Until ${resumeTime(a.index.resumesAt)}` : 'Until the limit resets'} (${why}).` };
+  const held = a?.sync.phase === 'paused' && isDoWrites(a.sync.pausedFor, meters);
+  if (a?.index.status === 'waiting' || held) {
+    const why = meterLine(a?.index.pausedFor ?? 'do_rows_written', meters) ?? 'daily DO write limit';
+    const until = a?.index.resumesAt ?? (held ? a?.sync.resumesAt : null);
+    return { kind: 'limit', label: 'Indexing paused', detail: `${until ? `Until ${resumeTime(until)}` : 'Until the limit resets'} (${why}).` };
   }
   if (a?.index.status === 'indexing') return { kind: 'running', label: 'Indexing', detail: null };
   return { kind: 'idle', label: 'Not indexing', detail: null };
 }
 
+/** A sync paused for the DO write limit: that limit holds indexing, not copying. */
+const doHeld = (s: SyncSummary) => s.phase === 'paused' && (s.pausedFor === 'do_rows_written' || /durable object rows written/i.test(s.pausedFor ?? ''));
+
 /** The badge: what the sync is doing now. */
 function badge(s: SyncSummary): { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' } {
   if (s.phase === null) return { label: 'Not started', variant: 'outline' };
   if (s.phase === 'live' && s.status !== 'running') return { label: 'Live', variant: 'secondary' };
-  if (s.phase === 'paused') return { label: 'Copying paused', variant: 'secondary' };
+  if (s.phase === 'paused') return { label: doHeld(s) ? 'Indexing paused' : 'Copying paused', variant: 'secondary' };
   return STATUS[s.status];
 }
 
@@ -172,10 +182,15 @@ function StageHead({ title, state, fallback }: { title: string; state: StageStat
   const text = { running: 'Running', idle: 'Idle', limit: 'Paused', person: 'Paused by you', budget: 'Paused: spend cap' }[state.kind];
   const line = state.detail ?? fallback;
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
-      <span className="font-medium">{title}</span>
-      <Badge variant={variant}>{text}</Badge>
-      {line && <span className="text-muted-foreground">{line}</span>}
+    // One line in both groups, so the cards below share a top edge; the whole reason shows on hover.
+    <div className="flex h-6 min-w-0 items-center gap-2 text-sm">
+      <span className="shrink-0 font-medium">{title}</span>
+      <Badge variant={variant} className="shrink-0">{text}</Badge>
+      {line && (
+        <span className="min-w-0 truncate text-muted-foreground" title={line}>
+          {line}
+        </span>
+      )}
     </div>
   );
 }
@@ -232,7 +247,7 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
         {s.phase !== null && (
           <div className="flex min-w-0 flex-col gap-3">
             <StageHead title="Copying" state={copy} fallback={copy.kind === 'running' || copy.kind === 'idle' ? headline(s) : null} />
-            <TileRow>
+            <TileRow className="flex-1">
               <Tile className="lg:flex-1" label="Rate" value={rate.value} caption={rate.caption} />
               <Tile
                 className="lg:flex-1"
@@ -247,13 +262,13 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
         {inBasin > 0 && (
           <div className="flex min-w-0 flex-col gap-3">
             <StageHead title="Indexing" state={index} />
-            <TileRow>
+            <TileRow className="flex-1">
               <Tile className="lg:flex-1" label="Searchable" value={`${Math.floor((indexed / inBasin) * 1000) / 10}%`} caption={`${fmt(indexed)} of ${fmt(inBasin)}`} />
               <Tile className="lg:flex-1" label="Queued for indexing" value={fmt(unindexed)} caption={toIndex.length ? `in ${months(toIndex.length)}` : 'nothing queued'} />
               <Tile
                 className="lg:flex-1"
-                label="DO I/O today"
-                value={writes ? `${compact(writes.used)} writes` : '—'}
+                label="DO writes today"
+                value={writes ? compact(writes.used) : '—'}
                 caption={reads ? `${compact(reads.used)} reads` : 'not read yet'}
               />
             </TileRow>
@@ -870,7 +885,7 @@ export function SyncStatus() {
           : syncs.every((s) => s.phase === null)
             ? 'Not started'
             : syncs.some((s) => s.phase === 'paused')
-              ? 'Copying paused'
+              ? syncs.every((s) => s.phase !== 'paused' || doHeld(s)) ? 'Indexing paused' : 'Copying paused'
               : 'Not running';
   const ok = !data.basin || syncs.some((s) => s.status === 'stopped') ? false : syncs.every((s) => s.phase === 'live') ? true : null;
   return (
