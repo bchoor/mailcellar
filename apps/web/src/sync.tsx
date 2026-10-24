@@ -4,7 +4,7 @@
 // Everything shown is what the sync state says now; nothing is estimated.
 import {
   ErrorLine, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow,
-  type CoverageData, type CoveragePick, type ScheduleRun,
+  type CoverageData, type CoveragePick, type FilterToken, type ScheduleRun,
 } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
@@ -13,7 +13,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { addMonths, monthRange, type AccountCoverage, type BackfillJob, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { CalendarRangeIcon, ChevronDownIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListPlusIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, ChevronDownIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListPlusIcon, RefreshCwIcon } from 'lucide-react';
 import { useState } from 'react';
 import { EmptyState } from './archive';
 
@@ -335,9 +335,7 @@ function freshness(s: SyncSummary, now = Date.now()): string {
  * Every mailbox on one map: one row each, one column per month (or quarter, or year), and how
  * fresh each copy is. Picks queue a backfill in each mailbox picked.
  */
-function AllMailboxesMap({ accounts, basin }: { accounts: SyncOverview['accounts']; basin: boolean }) {
-  const client = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
+function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string | null; onPick: (email: string) => void }) {
   const ids = accounts.map((a) => a.id);
   const source = {
     queryKey: ['coverage-all', ids],
@@ -354,7 +352,6 @@ function AllMailboxesMap({ accounts, basin }: { accounts: SyncOverview['accounts
     refetchInterval: (q: { state: { data?: Record<string, AccountCoverage> } }) =>
       Object.values(q.state.data ?? {}).some((c) => c.census.status === 'counting' || c.months.some(busyMonth)) ? 15_000 : false,
   };
-  const { data } = useQuery(source);
   return (
     <div className="flex flex-col gap-2">
       <LumenCoverageMap
@@ -380,26 +377,52 @@ function AllMailboxesMap({ accounts, basin }: { accounts: SyncOverview['accounts
         zoom={['month', 'quarter', 'year']}
         unit="messages"
         summary={['complete']}
-        select={basin ? 'backfill' : undefined}
-        selectable={(row, month) => {
-          const m = data?.[row]?.months.find((x) => x.month === month);
-          return !!m && m.gmail !== null && m.gmail > 0 && !busyMonth(m);
+        select="drill"
+        drilled={null}
+        onDrill={(row) => {
+          const a = accounts.find((x) => x.id === row);
+          if (a) onPick(a.email);
         }}
-        onQueue={async (pick: CoveragePick) => {
-          const errors = await Promise.all(pick.map((p) => queueBackfill(p.row, p.months, 'Picked months')));
-          setError(errors.find(Boolean) ?? null);
-          await client.invalidateQueries();
-        }}
-        hint="Each row is one mailbox: its months, how much is copied, and when it last synced."
+        hint="Tap a row to show that mailbox below."
       />
-      {error && <ErrorLine error={new Error(error)} />}
     </div>
   );
+}
+
+/** Every mailbox, one line each: tap one to show it in the cards below. */
+function MailboxList({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string; onPick: (email: string) => void }) {
+  return (
+    <ul className="flex flex-col gap-1 text-sm">
+      {accounts.map((a) => (
+        <li key={a.id}>
+          <Button
+            variant={a.email === picked ? 'secondary' : 'ghost'}
+            className="h-auto w-full justify-start gap-3 py-2"
+            aria-pressed={a.email === picked}
+            onClick={() => onPick(a.email)}
+          >
+            <span className="min-w-0 flex-1 truncate text-left font-medium">{a.email}</span>
+            <Badge variant={badge(a.sync).variant}>{badge(a.sync).label}</Badge>
+            <span className="hidden text-muted-foreground sm:inline">{freshness(a.sync)}</span>
+            <span className="w-14 text-right tabular-nums text-muted-foreground">{a.sync.total ? `${pct(a.sync)}%` : '—'}</span>
+          </Button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The mailbox a card follows: the mailbox chip of its colour, else the first mailbox. */
+function followed(accounts: SyncOverview['accounts'], follows: FilterToken[]) {
+  const email = follows.find((t) => t.key === 'mailbox')?.value;
+  return accounts.find((a) => a.email === email) ?? accounts[0];
 }
 
 export function BackfillPage() {
   const query = useSync();
   const data = query.data;
+  const [picked, setPicked] = useState<string | null>(null);
+  const shown = data?.accounts.find((a) => a.email === picked) ?? data?.accounts[0];
   const running = data?.accounts.filter((a) => a.sync.status === 'running').length ?? 0;
   return (
     <LumenLayout
@@ -429,26 +452,47 @@ export function BackfillPage() {
               ),
             }]
           : []),
-        ...(data && data.accounts.length > 1
-          ? [{
-              id: 'all', title: 'All mailboxes by month', kind: 'own' as const, link: false as const, w: 6,
-              children: <AllMailboxesMap accounts={data.accounts} basin={data.basin} />,
-            }]
+        // The mailbox map picks the mailbox: its chip goes to every card of its colour (Lumen's
+        // linked cards), and the cards below show the mailbox they follow.
+        // Picking a mailbox shares its chip with every card of the same colour (Lumen's linked
+        // cards); the cards below show the mailbox they follow.
+        ...(data && data.accounts.length
+          ? [
+              {
+                id: 'mailboxes', title: 'Mailboxes', icon: MailIcon, kind: 'widget' as const, color: 'teal' as const, w: 6,
+                publishes: [{ key: 'mailbox', value: shown!.email }],
+                children: <MailboxList accounts={data.accounts} picked={shown!.email} onPick={setPicked} />,
+              },
+              ...(data.accounts.length > 1
+                ? [{
+                    id: 'all', title: 'All mailboxes by month', kind: 'own' as const, w: 6,
+                    children: <AllMailboxesMap accounts={data.accounts} picked={shown!.email} onPick={setPicked} />,
+                  }]
+                : []),
+            ]
           : []),
-        ...(data?.accounts ?? []).flatMap((a) => [
-          {
-            id: a.id, title: a.email, icon: HourglassIcon, kind: 'widget' as const, link: false as const, w: 6,
-            children: <AccountSync id={a.id} sync={a.sync} basin={data!.basin} />,
-          },
-          {
-            id: `${a.id}-map`, title: `${a.email} by month`, kind: 'own' as const, link: false as const, w: 6,
-            children: <AccountCoverageMap id={a.id} email={a.email} basin={data!.basin} />,
-          },
-          {
-            id: `${a.id}-jobs`, title: 'Backfills', icon: ListChecksIcon, kind: 'widget' as const, link: false as const, w: 6,
-            children: <Jobs id={a.id} />,
-          },
-        ]),
+        ...(data && data.accounts.length
+          ? [
+              {
+                id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                children: (f: FilterToken[]) => {
+                  const a = followed(data.accounts, f);
+                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} />;
+                },
+              },
+              {
+                id: 'map', title: 'By month', kind: 'own' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                children: (f: FilterToken[]) => {
+                  const a = followed(data.accounts, f);
+                  return <AccountCoverageMap key={a.id} id={a.id} email={a.email} basin={data.basin} />;
+                },
+              },
+              {
+                id: 'jobs', title: 'Backfills', icon: ListChecksIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                children: (f: FilterToken[]) => <Jobs key={followed(data.accounts, f).id} id={followed(data.accounts, f).id} />,
+              },
+            ]
+          : []),
       ]}
     />
   );
