@@ -16,7 +16,7 @@ Principles: each user's mail lives only in that user's stores and is read only t
 
 ## Status
 
-`apps/web` is a clickable prototype on sample data: archive views (Overview, Messages, Senders, Domains, Labels, Time), Backfill progress, Cloudflare usage against the free tier, and Settings (Accounts, Schedules). Nothing talks to Gmail yet.
+Login is Cloudflare Access. Settings ▸ Accounts connects Gmail accounts through Google. The archive pages, Backfill, Cloudflare usage and Schedules are built; they stay empty until the backfill (phase 2) copies mail.
 
 ## Layout
 
@@ -33,12 +33,11 @@ Principles: each user's mail lives only in that user's stores and is read only t
 bun install
 bun run dev              # the web app at http://localhost:5173
 bun run check            # type-check, build, Worker tests (Vitest in workerd)
-bun run deploy           # build and deploy the mailcellar Worker
 ```
 
 `bun run --filter=@mailcellar/web build:single` writes the whole app into one `index.html`.
 
-CI, deploys and releases run on OpenShip's self-hosted runner: `.github/workflows/` and [docs/releases.md](docs/releases.md).
+Cloudflare Workers Builds deploys every push to `main`. CI and releases run on OpenShip's self-hosted runner: `.github/workflows/` and [docs/releases.md](docs/releases.md).
 
 ## Plan
 
