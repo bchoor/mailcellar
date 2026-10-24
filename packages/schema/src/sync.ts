@@ -41,7 +41,14 @@ export interface SyncState {
   pausedFor?: string | null;
   /** When each recent save happened and `copied` then, oldest first, kept for RATE_WINDOW_MS and a little more. */
   recent?: { at: string; copied: number }[];
+  /** Backfill months being copied in parallel now, each by its own lane (a chain of runs). */
+  lanes?: string[];
 }
+
+/** Backfill months copied at once, each by its own chain of runs (Workers Free runs 100 Workflows at once per account). */
+export const MAX_LANES = 8;
+/** A lane that hasn't saved for this long has died, and is started again where it stood. */
+export const LANE_STALE_MS = 10 * 60_000;
 
 /** The copy rate is measured over this window. */
 export const RATE_WINDOW_MS = 10 * 60_000;
@@ -90,6 +97,12 @@ export interface SyncParams {
    * them, since the analytics token can't.
    */
   names?: Record<string, string>;
+  /** Copy this backfill month: one lane of a parallel backfill (its state is the account DO's `lane:<month>`). */
+  month?: string;
+  /** Build the search index for this month from Basin, once the month has landed there. */
+  index?: string;
+  /** Where an index build resumes: rows of the month already done. */
+  from?: number;
 }
 
 /** Where an account's sync stands: a run is going, it's waiting to resume, it stopped on an error, or it can start. */
@@ -103,7 +116,7 @@ export function syncStatus(s: SyncState | null, now = Date.now()): SyncStatus {
   if (s.phase === 'error') return 'stopped';
   if (s.resumesAt && Date.parse(s.resumesAt) > now) return 'waiting';
   // Live with nothing left to copy means the last run finished.
-  const busy = s.phase !== 'live' || s.pending.length > 0 || s.basinQueue.length > 0;
+  const busy = s.phase !== 'live' || s.pending.length > 0 || s.basinQueue.length > 0 || !!s.lanes?.length;
   return busy && now - Date.parse(s.updatedAt) < SYNC_STALE_MS ? 'running' : 'idle';
 }
 
@@ -118,8 +131,10 @@ export interface SyncSummary {
   updatedAt: string | null;
   resumesAt: string | null;
   error: string | null;
-  /** The month being copied now, if any. */
+  /** The month being copied now, if any (the newest, when several are). */
   month: string | null;
+  /** Every month being copied now, newest first. */
+  months: string[];
   /** The account limit a pause waits for, if any. */
   pausedFor: string | null;
   /** Messages copied a minute over the last 10 minutes; null until measured. */
@@ -137,7 +152,8 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
     updatedAt: s?.updatedAt ?? null,
     resumesAt: s?.resumesAt ?? null,
     error: s?.error ?? null,
-    month: s?.part?.month ?? null,
+    month: s?.lanes?.[0] ?? s?.part?.month ?? null,
+    months: s?.lanes ?? (s?.part ? [s.part.month] : []),
     pausedFor: s?.pausedFor ?? null,
     ratePerMin: copyRate(s, now),
   };
@@ -212,8 +228,14 @@ export interface MonthCoverage {
   month: string;
   /** Messages Gmail has that month (the census); null until counted. */
   gmail: number | null;
-  /** Messages MailCellar has that month. */
+  /** Messages MailCellar has that month: copied to Basin, or indexed if more (mail copied before Basin came first). */
   copied: number;
+  /** Messages copied to Basin, the system of record, this month (a backfill in progress counts as it goes). */
+  inBasin: number;
+  /** Whether the month's backfill has landed in Basin: listed to the end, copied and committed. */
+  landed: boolean;
+  /** Messages in the search index this month; built from Basin after the month lands. */
+  indexed: number;
   /** The latest backfill's state for this month, if one touched it. */
   state: PartState | null;
   /** Why that backfill failed. */
