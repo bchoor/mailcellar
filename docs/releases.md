@@ -9,4 +9,4 @@ MailCellar uses `v0.MINOR.PATCH` tags, cut by `scripts/release.sh` from `.github
 
 Setup: tag the first commit `v0.0.0`, then set `RELEASE_ON_MERGE=true`.
 
-Deploys are separate: `.github/workflows/deploy.yml` deploys every merge to `main` to https://mailcellar.icaruslab.dev once the `CLOUDFLARE_API_TOKEN` secret is set.
+Deploys are separate: Cloudflare Workers Builds is connected to this repo and deploys every push to `main` to https://mailcellar.icaruslab.dev (build `bun install --frozen-lockfile && bun run build`, deploy `bunx wrangler deploy`). Cloudflare manages its own build token, so no Cloudflare token lives in GitHub. Edit it under the Worker's Settings > Builds.
