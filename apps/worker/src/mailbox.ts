@@ -204,6 +204,7 @@ export class MailboxDO extends DurableObject<Env> {
           ftsRowid(m.id), m.subject, m.from_addr, m.from_name, m.snippet, m.labels,
         ).rowsWritten;
       written += sql.exec(`DELETE FROM meta WHERE key = 'fts_refill'`).rowsWritten;
+      console.log(JSON.stringify({ refillSearch: { rowsWritten: written } }));
       this.count({ do_rows_written: written });
     });
   }
@@ -639,6 +640,11 @@ export class MailboxDO extends DurableObject<Env> {
     });
     this.count({ do_rows_read: cursor.rowsRead, do_rows_written: written });
     return { rowsRead: cursor.rowsRead, rowsWritten: written };
+  }
+
+  /** Messages in the index, from the month counts (a row a month read, not a row a message). */
+  async indexedCount(): Promise<number> {
+    return this.ctx.storage.sql.exec<{ n: number }>(`SELECT coalesce(sum(n), 0) AS n FROM months`).toArray()[0].n;
   }
 
   /** Take a month out of the index, to build it again from Basin. Rollups follow at the next rebuildRollups. */

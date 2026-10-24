@@ -452,7 +452,16 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   if (at < rows.length) return { indexed, next: at, resumesAt: null };
   await mailbox.markIndexed(month);
   // Senders, domains and labels once backfill is done, not once a month.
-  if (!(await mailbox.hasQueued())) console.log(JSON.stringify({ rollups: await mailbox.rebuildRollups() }));
+  // (Senders, domains and labels left with no mail after unindexMonth keep their rows until mail returns.)
+  if (!(await mailbox.hasQueued())) {
+    const n = await mailbox.indexedCount();
+    const full = await quota.reserve({ do_rows_read: n, do_rows_written: Math.ceil(n / 4) });
+    if (!full) {
+      const r = await mailbox.rebuildRollups();
+      await quota.add({ do_rows_read: r.rowsRead, do_rows_written: r.rowsWritten });
+      console.log(JSON.stringify({ rollups: r }));
+    }
+  }
   return { indexed, next: null, resumesAt: null };
 }
 
