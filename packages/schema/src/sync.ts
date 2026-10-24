@@ -164,6 +164,8 @@ export interface SyncOverview {
   basin: boolean;
   /** The person paused backfill: nothing copies until they resume (PUT /api/backfill/paused). */
   paused: boolean;
+  /** Who paused it: the person, or the backfill's spend cap (SPEND in quota.ts). */
+  pausedBy: 'person' | 'budget' | null;
   accounts: { id: string; email: string; sync: SyncSummary }[];
 }
 

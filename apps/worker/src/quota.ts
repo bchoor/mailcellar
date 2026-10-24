@@ -3,7 +3,7 @@
 // batch used after. It reads Cloudflare's analytics for the whole account (every project on
 // it) at most every 5 minutes, and adds what MailCellar has counted since.
 import { DurableObject } from 'cloudflare:workers';
-import { QUOTA_METRICS, QUOTA_STOP, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, CPU_LIMIT_MS, type CpuRow, type LevelMetric } from '@mailcellar/schema';
+import { SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, QUOTA_STOP, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, CPU_LIMIT_MS, type CpuRow, type LevelMetric } from '@mailcellar/schema';
 import type { Env } from './env';
 
 export type QuotaUse = Partial<Record<QuotaMetric, number>>;
@@ -227,8 +227,43 @@ export async function readPlan(env: Env, now = new Date()): Promise<{ plan: Quot
   return { plan: workers ? 'paid' : 'free', billing };
 }
 
+/**
+ * Cloudflare's figures for the backfill's spend: the bucket's R2 writes and reads since
+ * SPEND.since, and the bytes it holds now less what it held then.
+ */
+export async function readSpend(env: Env): Promise<SpendUse> {
+  if (!env.CF_ANALYTICS_TOKEN) throw new Error('No Cloudflare analytics token is set.');
+  const res = await fetch(GRAPHQL, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      query: `query($a: String!, $since: Time!, $day: Date!, $bucket: String!) { viewer { accounts(filter: {accountTag: $a}) {
+        ops: r2OperationsAdaptiveGroups(limit: 1000, filter: {datetime_geq: $since, bucketName: $bucket}) { dimensions { actionType } sum { requests } }
+        stored: r2StorageAdaptiveGroups(limit: 10, filter: {date_geq: $day, bucketName: $bucket}, orderBy: [date_DESC]) { dimensions { date } max { payloadSize metadataSize } }
+      } } }`,
+      variables: { a: env.CF_ACCOUNT_ID, since: SPEND.since, day: SPEND.since.slice(0, 10), bucket: env.BASIN_BUCKET },
+    }),
+  });
+  if (!res.ok) throw new Error(`Cloudflare analytics answered HTTP ${res.status}.`);
+  type Body = { data?: { viewer: { accounts: { ops: { dimensions: { actionType: string }; sum: { requests: number } }[]; stored: { max: { payloadSize: number; metadataSize: number } }[] }[] } }; errors?: { message: string }[] | null };
+  const body = (await res.json()) as Body;
+  if (body.errors?.length) throw new Error(`Cloudflare analytics: ${body.errors[0].message}`);
+  const a = body.data?.viewer.accounts[0];
+  if (!a) throw new Error('Cloudflare analytics returned no account.');
+  const count = (set: Set<string>) => a.ops.reduce((n, r) => n + (set.has(r.dimensions.actionType) ? r.sum.requests : 0), 0);
+  const now = a.stored[0]?.max;
+  return { classA: count(R2_CLASS_A), classB: count(R2_CLASS_B), bytes: now ? now.payloadSize + now.metadataSize - SPEND.baseBytes : 0 };
+}
+
 /** Swapped in tests: each test gets its own meter, and none calls Cloudflare. */
-export const quotaDeps = { readCloudflare, readPlan, name: 'account' };
+export const quotaDeps = { readCloudflare, readPlan, readSpend, name: 'account' };
+
+/** Cloudflare's spend figures are read again after this; MailCellar's own count covers the gap. */
+export const SPEND_READ_MS = 2 * 60_000;
+/** MailCellar's own spend count is saved at most this often: one row, never one a message. */
+export const SPEND_SAVE_MS = 60_000;
+const NO_USE: SpendUse = { classA: 0, classB: 0, bytes: 0 };
+const higher = (a: SpendUse, b: SpendUse): SpendUse => ({ classA: Math.max(a.classA, b.classA), classB: Math.max(a.classB, b.classB), bytes: Math.max(a.bytes, b.bytes) });
 
 /** The one meter for the whole Cloudflare account. */
 export const accountQuota = (env: Env) => env.QUOTA.getByName(quotaDeps.name);
@@ -247,6 +282,58 @@ function withOurs(parts: QuotaPart[], used: number): QuotaPart[] {
 }
 
 export class QuotaDO extends DurableObject<Env> {
+  /** MailCellar's own count of the backfill's spend use, kept in memory and saved once a minute. */
+  private spendOurs: SpendUse | null = null;
+  private spendSavedAt = 0;
+  /** Cloudflare's figures, as last read. */
+  private spendCf: { use: SpendUse; at: number; tried: number } | null = null;
+
+  private ownSpend(): SpendUse {
+    if (!this.spendOurs) {
+      const saved = this.meta('spend');
+      this.spendOurs = saved ? (JSON.parse(saved) as SpendUse) : { ...NO_USE };
+    }
+    return this.spendOurs;
+  }
+
+  /** Spend use: the higher of MailCellar's own count and Cloudflare's, figure by figure. */
+  private async spendUse(now = Date.now()): Promise<SpendUse> {
+    const ours = this.ownSpend();
+    if (!this.spendCf || now - this.spendCf.tried >= SPEND_READ_MS) {
+      const tried = now;
+      try {
+        this.spendCf = { use: await quotaDeps.readSpend(this.env), at: now, tried };
+      } catch {
+        this.spendCf = this.spendCf ? { ...this.spendCf, tried } : { use: NO_USE, at: 0, tried };
+      }
+    }
+    return higher(ours, this.spendCf.use);
+  }
+
+  /** Add what a run used to the backfill's spend. */
+  async charge(use: Partial<SpendUse>): Promise<void> {
+    const ours = this.ownSpend();
+    ours.classA += use.classA ?? 0;
+    ours.classB += use.classB ?? 0;
+    ours.bytes += use.bytes ?? 0;
+    if (Date.now() - this.spendSavedAt >= SPEND_SAVE_MS) {
+      this.setMeta('spend', JSON.stringify(ours));
+      this.spendSavedAt = Date.now();
+    }
+  }
+
+  /** Whether a run that may use `next` still fits under the spend stop. Null: go ahead. */
+  async overBudget(next: Partial<SpendUse>): Promise<SpendOverview | null> {
+    const s = await this.spend();
+    const after = s.spent + spendCost({ ...NO_USE, ...next });
+    return after > SPEND.stop ? s : null;
+  }
+
+  async spend(): Promise<SpendOverview> {
+    const use = await this.spendUse();
+    return { since: SPEND.since, cap: SPEND.cap, stop: SPEND.stop, spent: spendCost(use), use, readAt: this.spendCf?.at ? new Date(this.spendCf.at).toISOString() : null };
+  }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`
@@ -429,6 +516,7 @@ export class QuotaDO extends DurableObject<Env> {
       cpu: { limitMs: CPU_LIMIT_MS[this.plan], rows: read ? (JSON.parse(this.meta('cpu') ?? '[]') as CpuRow[]) : [] },
       refreshAt: new Date((tried ? Date.parse(tried) : now.getTime()) + QUOTA_REFRESH_MS).toISOString(),
       paused: over ? { metric: over.metric, label: over.label, resumesAt: over.resetsAt } : null,
+      spend: await this.spend(),
     };
   }
 }
