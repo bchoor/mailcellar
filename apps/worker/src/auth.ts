@@ -197,14 +197,11 @@ export async function callback(request: Request, env: Env, url: URL, who: Identi
   return back(saved.ok ? undefined : 'no_refresh');
 }
 
-/**
- * Test a connected account: trade its refresh token for an access token and ask Google
- * which scopes that token carries. Records the outcome on the account.
- */
-export async function testAccount(env: Env, mailbox: DurableObjectStub<MailboxDO>, id: string): Promise<boolean> {
-  const refreshToken = await mailbox.accountToken(id);
-  if (!refreshToken) return false;
-  let result: { scopes: string[] } | { error: string };
+/** The mailbox that holds one Gmail account's archive: its own Durable Object, beside the user's. */
+export const accountMailbox = (env: Env, user: UserId, accountId: string) => env.MAILBOX.getByName(mailboxName(user, accountId));
+
+/** Trade a refresh token for an access token, or say in words why Google refused. */
+export async function accessTokenFor(env: Env, refreshToken: string): Promise<{ token: string } | { error: string; revoked: boolean }> {
   try {
     const res = await fetch(TOKEN_URL, {
       method: 'POST',
@@ -216,16 +213,34 @@ export async function testAccount(env: Env, mailbox: DurableObjectStub<MailboxDO
         grant_type: 'refresh_token',
       }),
     });
-    const token = (await res.json()) as { access_token?: string; error?: string };
-    if (!token.access_token) {
-      result = { error: token.error === 'invalid_grant' ? 'Google no longer accepts this connection (revoked or expired). Remove the account and add it again.' : `Google rejected the connection (HTTP ${res.status}). Try again; if it keeps failing, remove the account and add it again.` };
-    } else {
-      const info = await fetch(`${TOKENINFO_URL}?access_token=${encodeURIComponent(token.access_token)}`);
+    const body = (await res.json()) as { access_token?: string; error?: string };
+    if (body.access_token) return { token: body.access_token };
+    return body.error === 'invalid_grant'
+      ? { error: 'Google no longer accepts this connection (revoked or expired). Remove the account and add it again.', revoked: true }
+      : { error: `Google rejected the connection (HTTP ${res.status}). Try again; if it keeps failing, remove the account and add it again.`, revoked: false };
+  } catch {
+    return { error: 'Couldn’t reach Google. Try again.', revoked: false };
+  }
+}
+
+/**
+ * Test a connected account: trade its refresh token for an access token and ask Google
+ * which scopes that token carries. Records the outcome on the account.
+ */
+export async function testAccount(env: Env, mailbox: DurableObjectStub<MailboxDO>, id: string): Promise<boolean> {
+  const refreshToken = await mailbox.accountToken(id);
+  if (!refreshToken) return false;
+  let result: { scopes: string[] } | { error: string };
+  const access = await accessTokenFor(env, refreshToken);
+  if ('error' in access) result = { error: access.error };
+  else {
+    try {
+      const info = await fetch(`${TOKENINFO_URL}?access_token=${encodeURIComponent(access.token)}`);
       const body = (await info.json()) as { scope?: string };
       result = info.ok ? { scopes: (body.scope ?? '').split(' ') } : { error: `Google couldn’t confirm this account’s access (HTTP ${info.status}). Try again.` };
+    } catch {
+      result = { error: 'Couldn’t reach Google. Try again.' };
     }
-  } catch {
-    result = { error: 'Couldn’t reach Google. Try again.' };
   }
   await mailbox.recordTest(id, result);
   return true;

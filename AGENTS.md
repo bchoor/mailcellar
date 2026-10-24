@@ -5,7 +5,7 @@ Gmail archive on Cloudflare Workers (Free plan). Bun monorepo.
 ## Layout
 
 - `apps/web`: the app (Vite, React, Lumen UI), served as static assets.
-- `apps/worker`: the Worker (`/api/*`) and `MailboxDO`, one SQLite Durable Object per user.
+- `apps/worker`: the Worker (`/api/*`) and `MailboxDO` (SQLite). One per user (`user:default`: accounts, schedules, usage) and one per Gmail account (`accountMailbox`: that account's archive and sync state).
 - `packages/schema`: shared IDs, key layout and API types.
 - `wrangler.jsonc`: one Worker, `mailcellar.icaruslab.dev`; bindings `MAILBOX`, `ARCHIVE` (R2), `ASSETS`.
 
@@ -19,6 +19,7 @@ Gmail archive on Cloudflare Workers (Free plan). Bun monorepo.
 
 - Login is Cloudflare Access. The Worker verifies `Cf-Access-Jwt-Assertion` (`apps/worker/src/auth.ts`) and uses its email as the user.
 - Gmail accounts are added separately via Google OAuth: `/api/accounts/connect`, callback `/api/auth/callback`.
+- Each account is a mailbox; the sidebar switcher picks one and every page shows it (`/api/accounts/:id/archive/*`). Gmail settings (`/api/accounts/:id/filters`, `/subscriptions`) are read live from Gmail, never stored.
 - Local dev: `.dev.vars` (gitignored) sets `ACCESS_AUD=""`, `DEV_USER_EMAIL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
 
 ## Conventions

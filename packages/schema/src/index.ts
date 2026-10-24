@@ -44,3 +44,4 @@ export interface Health {
 export * from './mail';
 export * from './ops';
 export * from './auth';
+export * from './gmail';

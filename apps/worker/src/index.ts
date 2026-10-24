@@ -1,5 +1,6 @@
-import { ARCHIVE_VIEWS, type ArchiveView, type Health } from '@mailcellar/schema';
-import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
+import { ARCHIVE_VIEWS, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
+import { accountMailbox, callback, connect, identity, revoke, testAccount, type Identity } from './auth';
+import { filters, subscriptions, withGmail } from './gmail';
 import type { Env } from './env';
 
 export { MailboxDO } from './mailbox';
@@ -50,8 +51,9 @@ async function releases(request: Request, env: Env, url: URL): Promise<Response>
   return Response.json({ releases: from < 0 ? [] : all.slice(from, from + limit) }, { headers: noStore });
 }
 
-/** The API a mailbox serves: who this is, accounts, archive pages, schedules and usage. Null: not one of these. */
-async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox }: Identity): Promise<Response | null> {
+/** The API a person's mailboxes serve: who this is, accounts, each account's pages, schedules and usage. Null: not one of these. */
+async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): Promise<Response | null> {
+  const { email, mailbox } = who;
   if (url.pathname === '/api/me' && request.method === 'GET') return Response.json(await mailbox.me(email), { headers: noStore });
   const test = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/test$/);
   if (test && request.method === 'POST') {
@@ -65,13 +67,33 @@ async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox
     if (!token) return Response.json({ error: 'not_found' }, { status: 404 });
     return Response.json({ ok: true, revoked: await revoke(token) }, { headers: noStore });
   }
-  const archive = url.pathname.match(/^\/api\/archive\/([a-z]+)$/);
-  if (archive && request.method === 'GET' && ARCHIVE_VIEWS.includes(archive[1] as ArchiveView)) {
+  // One Gmail account's pages: its archive (its own mailbox DO) and its Gmail settings (read live).
+  const scoped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/(archive\/[a-z]+|filters|subscriptions)$/);
+  if (scoped && request.method === 'GET') {
+    const [, id, page] = scoped;
+    const refreshToken = await mailbox.accountToken(id);
+    if (!refreshToken) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    if (page === 'filters' || page === 'subscriptions') {
+      const body = await withGmail<object>(env, refreshToken, page === 'filters' ? filters : subscriptions);
+      return Response.json(body, { status: 'error' in body ? 502 : 200, headers: noStore });
+    }
+    const view = page.slice('archive/'.length) as ArchiveView;
+    if (!ARCHIVE_VIEWS.includes(view)) return null;
     const q = (url.searchParams.get('q') ?? '').slice(0, 200);
-    return Response.json(await mailbox.archive(archive[1] as ArchiveView, q), { headers: noStore });
+    return Response.json(await accountMailbox(env, who.user, id).archive(view, q), { headers: noStore });
   }
-  if (url.pathname === '/api/usage' && request.method === 'GET')
-    return Response.json(await mailbox.usage(), { headers: noStore });
+  if (url.pathname === '/api/usage' && request.method === 'GET') {
+    // Every mailbox meters itself: the user's, and one per Gmail account. The page shows their sum.
+    const ids = (await mailbox.me(email)).accounts.map((a) => a.id);
+    const all = await Promise.all([mailbox.usage(), ...ids.map((id) => accountMailbox(env, who.user, id).usage())]);
+    const sum = new Map<string, UsageDay>();
+    for (const d of all.flat()) {
+      const k = `${d.day}:${d.metric}`;
+      const prev = sum.get(k);
+      sum.set(k, prev ? { ...prev, value: prev.value + d.value } : { ...d });
+    }
+    return Response.json([...sum.values()].sort((a, b) => a.day.localeCompare(b.day) || a.metric.localeCompare(b.metric)), { headers: noStore });
+  }
   if (url.pathname === '/api/schedules' && request.method === 'GET')
     return Response.json(await mailbox.schedules(), { headers: noStore });
   const schedule = url.pathname.match(/^\/api\/schedules\/([a-z-]{1,40})$/);

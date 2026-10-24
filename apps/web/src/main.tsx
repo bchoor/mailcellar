@@ -20,10 +20,12 @@ import {
 } from '@tanstack/react-router';
 import {
   CalendarClockIcon,
+  FilterIcon,
   GaugeIcon,
   GlobeIcon,
   HourglassIcon,
   LayoutDashboardIcon,
+  NewspaperIcon,
   SearchIcon,
   TagIcon,
   UserIcon,
@@ -33,6 +35,8 @@ import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
 import { DomainsPage, LabelsPage, MessagesPage, OverviewPage, SendersPage, TimePage } from './archive';
+import { FiltersPage, SubscriptionsPage } from './gmail-pages';
+import { MailboxProvider, MailboxSwitcher } from './mailbox';
 import { BackfillPage, UsagePage } from './ops-pages';
 import './index.css';
 
@@ -80,6 +84,16 @@ const nav = (
     ]}
   />
 );
+// Read live from Gmail for the picked mailbox; separate from Settings ▸ Accounts, which connects mailboxes.
+const gmailNav = (
+  <NavGroup
+    label="Gmail settings"
+    items={[
+      { title: 'Filters', to: '/gmail/filters', icon: FilterIcon },
+      { title: 'Subscriptions', to: '/gmail/subscriptions', icon: NewspaperIcon },
+    ]}
+  />
+);
 const opsNav = (
   <NavGroup
     label="Operations"
@@ -103,25 +117,28 @@ function Frame() {
   if (me.isPending) return null;
   if (me.data === null) return <NoIdentity />;
   return (
-    <LumenShell
-      app="mailcellar"
-      appLabel="MailCellar"
-      brand={<span className="px-2 font-semibold">MailCellar</span>}
-      nav={<>{nav}{opsNav}</>}
-      user={me.data ? { email: me.data.user.email, name: null } : null}
-      // Signing out is Cloudflare Access's: it ends the Access session for this site.
-      signOutUrl="/cdn-cgi/access/logout"
-      // What's new: one entry per PR merged to main, generated at build time.
-      releases="/api/releases"
-      settings={[
-        { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts MailCellar copies', content: <AccountsSettings /> },
-        { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },
-      ]}
-    >
-      <CloseMenuOnNavigate />
-      <SettingsFromUrl />
-      <Outlet />
-    </LumenShell>
+    <MailboxProvider>
+      <LumenShell
+        app="mailcellar"
+        appLabel="MailCellar"
+        // Each connected Gmail account is a mailbox; every page shows the one picked here.
+        brand={<MailboxSwitcher />}
+        nav={<>{nav}{gmailNav}{opsNav}</>}
+        user={me.data ? { email: me.data.user.email, name: null } : null}
+        // Signing out is Cloudflare Access's: it ends the Access session for this site.
+        signOutUrl="/cdn-cgi/access/logout"
+        // What's new: one entry per PR merged to main, generated at build time.
+        releases="/api/releases"
+        settings={[
+          { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts MailCellar copies', content: <AccountsSettings /> },
+          { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },
+        ]}
+      >
+        <CloseMenuOnNavigate />
+        <SettingsFromUrl />
+        <Outlet />
+      </LumenShell>
+    </MailboxProvider>
   );
 }
 
@@ -134,6 +151,8 @@ const routes = Object.entries(PAGES).map(([path, component]) => createRoute({ ge
 const opsRoutes = [
   createRoute({ getParentRoute: () => root, path: '/backfill', component: BackfillPage }),
   createRoute({ getParentRoute: () => root, path: '/usage', component: UsagePage }),
+  createRoute({ getParentRoute: () => root, path: '/gmail/filters', component: FiltersPage }),
+  createRoute({ getParentRoute: () => root, path: '/gmail/subscriptions', component: SubscriptionsPage }),
 ];
 const router = createRouter({
   routeTree: root.addChildren([...routes, ...opsRoutes]),

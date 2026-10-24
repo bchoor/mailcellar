@@ -1,11 +1,11 @@
-// The archive pages. Each reads its own rows from the mailbox's rollups (/api/archive/*),
-// so no page loads every message: Senders reads senders, Time reads months, and so on.
+// The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
+// mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
 import { LumenLayout, LumenSavedWidget, Tile, TileRow, useLumenLoad, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Input } from '@columenlabs/lumen-ui/ui/input';
 import { type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lumen-ui-types/views';
 import type { ArchiveRows, ArchiveView, DomainRow, LabelRow, MessageRow, MonthRow, SenderRow } from '@mailcellar/schema';
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   AtSignIcon,
   CalendarClockIcon,
@@ -20,6 +20,7 @@ import {
   UserIcon,
 } from 'lucide-react';
 import { type ReactNode, useDeferredValue, useState } from 'react';
+import { useMailbox } from './mailbox';
 
 // Sizes stay exact here and round only when shown, so a total matches the sum of its rows.
 const KB = 1024;
@@ -61,27 +62,36 @@ export function EmptyState({ icon: Icon, title, children }: { icon: LucideIcon; 
   );
 }
 
-const NO_MAIL = (
-  <EmptyState icon={MailIcon} title="No mail yet">
-    Add a Gmail account in Settings ▸ Accounts. Mail shows here once the backfill copies it.
-  </EmptyState>
-);
+function NoMail() {
+  const { account } = useMailbox();
+  return (
+    <EmptyState icon={MailIcon} title="No mail yet">
+      {account
+        ? `Mail from ${account.email} shows here once the backfill copies it.`
+        : 'Add a Gmail account in Settings ▸ Accounts. Mail shows here once the backfill copies it.'}
+    </EmptyState>
+  );
+}
 /** The empty state once a rollup has loaded with no rows; nothing while it loads or fails. */
 const isEmpty = (query: { data?: unknown[] }) => !!query.data && !query.data.length;
 /** A page of an archive with nothing in it yet: the empty state alone, no charts or totals. */
 const EmptyPage = ({ title }: { title: string }) => (
-  <LumenLayout crumbs={[{ label: title }]} cards={[{ id: 'empty', title, kind: 'own', w: 6, link: false, children: NO_MAIL }]} />
+  <LumenLayout crumbs={[{ label: title }]} cards={[{ id: 'empty', title, kind: 'own', w: 6, link: false, children: <NoMail /> }]} />
 );
 
 function useArchive<V extends ArchiveView>(view: V, q = '') {
+  const id = useMailbox().account?.id ?? null;
   return useQuery({
-    queryKey: ['archive', view, q],
+    queryKey: ['archive', id, view, q],
+    // No mailbox: nothing to read, so the page shows its empty state.
     queryFn: async (): Promise<ArchiveRows[V][]> => {
-      const res = await fetch(`/api/archive/${view}${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+      if (!id) return [];
+      const res = await fetch(`/api/accounts/${id}/archive/${view}${q ? `?q=${encodeURIComponent(q)}` : ''}`);
       if (!res.ok) throw new Error(`Couldn't load ${view} (${res.status})`);
       return res.json();
     },
-    placeholderData: keepPreviousData,
+    // While a new search loads, keep the last results; never another mailbox's.
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === id ? prev : undefined),
   });
 }
 
