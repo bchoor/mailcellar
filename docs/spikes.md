@@ -126,6 +126,6 @@ write to R2.
 - S8, query cost: R2 SQL bills $2.50 per TB scanned. A full scan of a 200k-mail archive
   (about 1 GB of Parquet) costs well under a cent.
 
-**Decision**: the backfill doesn't need Basin. Raw mail in R2 is the record, and the DO
+**Proposal (Bikram to decide)**: the backfill doesn't need Basin. Raw mail in R2 is the record, and the DO
 holds the index. Basin can be filled from R2 later, when full-text search over bodies is
 built, so its token is asked for then.
