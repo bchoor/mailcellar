@@ -203,6 +203,9 @@ describe('Backfill by month', () => {
       await box.queueMonths(['2024-02'], 'Test');
       expect((await box.coverageMonths()).map((m) => [m.month, m.state])).toEqual([['2024-01', null], ['2024-02', 'queued']]);
       expect((await box.jobList()).map((j) => j.label)).toEqual(['Test']);
+      // Clear queue and Remove show at once too.
+      expect(await box.unqueueMonths(null)).toBe(1);
+      expect((await box.coverageMonths()).map((m) => [m.month, m.state])).toEqual([['2024-01', null], ['2024-02', 'canceled']]);
     } finally {
       keepFor.ms = 0;
     }

@@ -14,7 +14,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { addMonths, monthRange, type AccountCoverage, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { EmptyState } from './archive';
 import { AccountLimits, AccountLimitsTools } from './quota';
@@ -355,7 +355,7 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
 const NEXT_SHOWN = 3;
 
 /** One month's row: its bar and messages copied, why it failed, and its one action. */
-function BackfillRow({ m, note, action }: { m: MonthCoverage; note?: string; action?: { label: string; primary?: boolean; run: () => void } }) {
+function BackfillRow({ m, note, action }: { m: MonthCoverage; note?: string; action?: { label: string; primary?: boolean; busy?: boolean; disabled?: boolean; run: () => void } }) {
   const total = m.gmail ?? 0;
   const pct = total ? Math.min(100, (m.copied / total) * 100) : 0;
   return (
@@ -369,8 +369,8 @@ function BackfillRow({ m, note, action }: { m: MonthCoverage; note?: string; act
         </span>
       </span>
       {action ? (
-        <Button variant={action.primary ? 'default' : 'outline'} size="sm" className="w-full" onClick={action.run}>
-          {action.label}
+        <Button variant={action.primary ? 'default' : 'outline'} size="sm" className="w-full" disabled={action.busy || action.disabled} onClick={action.run}>
+          {action.busy ? <Loader2Icon className="animate-spin" /> : action.label}
         </Button>
       ) : (
         <span />
@@ -399,25 +399,50 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   const { data, error } = useQuery(useCoverage(id));
   const [problem, setProblem] = useState<string | null>(null);
   const refresh = () => Promise.all(['coverage', 'jobs', 'sync'].map((k) => client.invalidateQueries({ queryKey: k === 'sync' ? ['sync'] : [k, id] })));
-  const unqueue = async (months?: string[]) => {
-    const res = await fetch(`/api/accounts/${id}/backfill/cancel`, { method: 'POST', body: JSON.stringify(months ? { months } : {}) });
-    setProblem(res.ok ? null : `Not removed (${res.status})`);
-    await refresh();
+  /** The action in flight ('clear', 'pause', or a month), and what the last one did. */
+  const [inFlight, setInFlight] = useState<string | null>(null);
+  const [said, setSaid] = useState<string | null>(null);
+  const act = async (key: string, fn: () => Promise<string | null>) => {
+    setInFlight(key);
+    setSaid(null);
+    try {
+      setSaid(await fn());
+    } finally {
+      setInFlight(null);
+    }
   };
+  const unqueue = (key: string, months?: string[]) =>
+    act(key, async () => {
+      const res = await fetch(`/api/accounts/${id}/backfill/cancel`, { method: 'POST', body: JSON.stringify(months ? { months } : {}) });
+      setProblem(res.ok ? null : `Not removed (${res.status})`);
+      await refresh();
+      if (!res.ok) return null;
+      const { changed } = (await res.json()) as { changed: number };
+      return months ? `${monthName(months[0])} taken out. Copied mail stays.` : `${fmt(changed)} month${changed === 1 ? '' : 's'} cleared. Copied mail stays.`;
+    });
   const sync = useSync();
   const paused = !!sync.data?.paused;
   const { timeZone } = usePrefs();
   /** Pause or resume all backfill; nothing copies while paused. */
-  const setPaused = async (to: boolean) => {
-    const res = await fetch('/api/backfill/paused', { method: 'PUT', body: JSON.stringify({ paused: to }) });
-    if (!res.ok) return setProblem(`Not ${to ? 'paused' : 'resumed'} (${res.status})`);
-    setProblem(null);
-    client.setQueryData(['sync'], await res.json());
-  };
-  const retry = async (month: string) => {
-    setProblem(await queueBackfill(id, [month], 'Retry'));
-    await refresh();
-  };
+  const setPaused = (to: boolean) =>
+    act('pause', async () => {
+      const res = await fetch('/api/backfill/paused', { method: 'PUT', body: JSON.stringify({ paused: to }) });
+      if (!res.ok) {
+        setProblem(`Not ${to ? 'paused' : 'resumed'} (${res.status})`);
+        return null;
+      }
+      setProblem(null);
+      client.setQueryData(['sync'], await res.json());
+      await refresh();
+      return to ? 'Paused. Nothing new starts until you resume.' : 'Resumed. Queued months start copying.';
+    });
+  const retry = (month: string) =>
+    act(month, async () => {
+      const failed = await queueBackfill(id, [month], 'Retry');
+      setProblem(failed);
+      await refresh();
+      return failed ? null : `${monthName(month)} queued again.${paused ? ' It starts when you resume.' : ''}`;
+    });
   if (error) return <ErrorLine error={error} />;
   if (!data) return <p className="text-sm text-muted-foreground">Loading…</p>;
   // Newest first, as the backfill copies them.
@@ -433,7 +458,12 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   const busy = [...now, ...next];
   const toCopy = busy.reduce((n, m) => n + left(m), 0);
   if (!busy.length && !failed.length && !done.length)
-    return <p className="text-sm text-muted-foreground">Nothing queued. Pick months on the map, or use Select months.{paused ? ' Backfill is paused.' : ''}</p>;
+    return (
+      <div className="flex flex-col gap-1 text-sm">
+        {said && <span className="text-xs text-gain">{said}</span>}
+        <p className="text-muted-foreground">Nothing queued. Pick months on the map, or use Select months.{paused ? ' Backfill is paused.' : ''}</p>
+      </div>
+    );
   const each = rate && now.length ? rate / now.length : null;
   const rest = next.slice(NEXT_SHOWN);
   return (
@@ -448,14 +478,15 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
             {paused ? 'Paused: nothing copies until you resume' : `Copying ${fmt(now.length)} at once`} · {fmt(next.length)} waiting
             {failed.length > 0 && <> · <span className="text-loss">{fmt(failed.length)} failed</span></>}
           </span>
+          {said && <span className="text-xs text-gain">{said}</span>}
         </div>
         <span className="flex gap-2">
-          <Button variant={paused ? 'default' : 'outline'} size="sm" disabled={!sync.data} onClick={() => void setPaused(!paused)}>
-            {paused ? <PlayIcon /> : <PauseIcon />} {paused ? 'Resume' : 'Pause'}
+          <Button variant={paused ? 'default' : 'outline'} size="sm" disabled={!sync.data || inFlight !== null} onClick={() => void setPaused(!paused)}>
+            {inFlight === 'pause' ? <Loader2Icon className="animate-spin" /> : paused ? <PlayIcon /> : <PauseIcon />} {paused ? 'Resume' : 'Pause'}
           </Button>
           {busy.length + failed.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => void unqueue()}>
-              <ListXIcon /> Clear queue
+            <Button variant="outline" size="sm" disabled={inFlight !== null} onClick={() => void unqueue('clear')}>
+              {inFlight === 'clear' ? <Loader2Icon className="animate-spin" /> : <ListXIcon />} Clear queue
             </Button>
           )}
         </span>
@@ -463,21 +494,21 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
       {failed.length > 0 && (
         <BackfillSection title="Needs attention" count={failed.length}>
           {failed.map((m) => (
-            <BackfillRow key={m.month} m={m} note={m.error ? shortError(m.error) : 'Failed'} action={{ label: 'Retry', primary: true, run: () => void retry(m.month) }} />
+            <BackfillRow key={m.month} m={m} note={m.error ? shortError(m.error) : 'Failed'} action={{ label: 'Retry', primary: true, busy: inFlight === m.month, disabled: inFlight !== null, run: () => void retry(m.month) }} />
           ))}
         </BackfillSection>
       )}
       {now.length > 0 && (
         <BackfillSection title="Copying now" count={now.length}>
           {now.map((m) => (
-            <BackfillRow key={m.month} m={m} note={each ? `${duration(left(m) / each)} left` : undefined} action={{ label: 'Stop', run: () => void unqueue([m.month]) }} />
+            <BackfillRow key={m.month} m={m} note={each ? `${duration(left(m) / each)} left` : undefined} action={{ label: 'Stop', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) }} />
           ))}
         </BackfillSection>
       )}
       {next.length > 0 && (
         <BackfillSection title="Next" count={next.length}>
           {next.slice(0, NEXT_SHOWN).map((m) => (
-            <BackfillRow key={m.month} m={m} action={{ label: 'Remove', run: () => void unqueue([m.month]) }} />
+            <BackfillRow key={m.month} m={m} action={{ label: 'Remove', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) }} />
           ))}
           {rest.length > 0 && (
             <li className="py-2 text-xs text-muted-foreground">
