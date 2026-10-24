@@ -5,94 +5,37 @@ import { type CustomViewConfig, customViewConfigSchema } from '@columenlabs/lume
 import { useQuery } from '@tanstack/react-query';
 import {
   ActivityIcon,
-  AlertTriangleIcon,
   CalendarIcon,
   CloudIcon,
-  CpuIcon,
   GaugeIcon,
   HashIcon,
   HourglassIcon,
-  MailIcon,
   PercentIcon,
-  RowsIcon,
-  TimerIcon,
 } from 'lucide-react';
 import { useState } from 'react';
 import { FREE_DAILY, type UsageDay } from '@mailcellar/schema';
+import { EmptyState } from './archive';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 
-/** One sync run, as phase 2's backfill Workflow will report it. */
-interface Run {
-  id: string;
-  date: string;
-  started: string;
-  minutes: number;
-  messages: number;
-  steps: number;
-  rows_written: number;
-  cpu_ms: number;
-  errors: number;
-  status: string;
-}
-
-const RUN_DOMAIN: ViewDomain<Run> = {
-  id: 'sync_runs',
-  rowKey: (r) => r.id,
-  text: (r) => [r.id, r.status],
-  fields: [
-    { key: 'started', label: 'Started', icon: CalendarIcon, value: (r) => r.started, format: 'text' },
-    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.date, format: 'text', groupable: true },
-    { key: 'status', label: 'Status', icon: ActivityIcon, value: (r) => r.status, format: 'text', filterable: true, groupable: true },
-    { key: 'messages', label: 'Messages', icon: MailIcon, value: (r) => r.messages, format: 'integer', aggregate: 'sum' },
-    { key: 'steps', label: 'Workflow steps', icon: HashIcon, value: (r) => r.steps, format: 'integer', aggregate: 'sum' },
-    { key: 'rows_written', label: 'Rows written', icon: RowsIcon, value: (r) => r.rows_written, format: 'integer', aggregate: 'sum' },
-    { key: 'minutes', label: 'Minutes', icon: TimerIcon, value: (r) => r.minutes, format: 'integer', aggregate: 'sum' },
-    { key: 'cpu_ms', label: 'CPU per step (ms)', icon: CpuIcon, value: (r) => r.cpu_ms, format: 'number', aggregate: 'mean' },
-    { key: 'errors', label: 'Errors', icon: AlertTriangleIcon, value: (r) => r.errors, format: 'integer', aggregate: 'sum' },
-  ],
-} as ViewDomain<Run>;
-
-const RUN_VIEW: CustomViewConfig = {
-  name: 'Sync runs',
-  ...customViewConfigSchema.parse({
-    columns: ['started', 'status', 'messages', 'steps', 'rows_written', 'minutes', 'cpu_ms', 'errors'],
-    sort: { key: 'started', desc: true },
-    cards: [
-      { id: 'per_day', title: 'Messages synced per day', kind: 'chart', style: 'bars', date: 'date', values: ['messages'], bucket: 'day', agg: 'sum', w: 6 },
-      { id: 'table', kind: 'table', style: 'table', w: 6 },
-    ],
-  }),
-};
-
-// No backfill has run: it arrives with phase 2's sync Workflow. The page says so rather
-// than showing made-up progress; runs fill the table once they exist.
+// No sync has run yet: the Workflow arrives in phase 2 and reports real runs here.
+// Until then the page says so, and the status bar shows nothing.
 export function BackfillPage() {
-  const query = useQuery({ queryKey: ['runs'], queryFn: async (): Promise<Run[]> => [] });
-  const load = useLumenLoad(query);
-  const [config, setConfig] = useState(RUN_VIEW);
   return (
     <LumenLayout
       crumbs={[{ label: 'Backfill' }]}
       meta={<Badge variant="secondary">Not started</Badge>}
-      lead={[
+      cards={[
         {
-          id: 'progress', title: 'Backfill progress', icon: HourglassIcon, kind: 'widget', link: false,
+          id: 'progress', title: 'Backfill progress', icon: HourglassIcon, kind: 'widget', link: false, w: 6,
           children: (
-            <NoteLine
-              icon={HourglassIcon}
-              title="No backfill yet"
-              note="It starts once a Gmail account is connected and the sync is built. On the free tier it archives about 18,000 messages a day."
-            />
+            <EmptyState icon={HourglassIcon} title="No backfill yet">
+              It starts once you add a Gmail account in Settings ▸ Accounts and the sync is built. On the free tier it archives about
+              18,000 messages a day. Progress and each sync run show here.
+            </EmptyState>
           ),
         },
       ]}
-      domain={RUN_DOMAIN}
-      config={config}
-      rows={query.data ?? []}
-      load={load}
-      onConfigChange={setConfig}
-      rowTitle={(r) => r.id}
     />
   );
 }
@@ -136,9 +79,10 @@ const USAGE_DOMAIN: ViewDomain<UsageRow> = {
   fields: [
     { key: 'day', label: 'Day', icon: CalendarIcon, value: (r) => r.day, format: 'text', groupable: true },
     { key: 'metric', label: 'Metric', icon: ActivityIcon, value: (r) => r.metric, format: 'text', filterable: true, groupable: true },
-    { key: 'used', label: 'Used', icon: HashIcon, value: (r) => r.used, format: 'compact', aggregate: 'sum' },
-    { key: 'allowance', label: 'Free a day', icon: HashIcon, value: (r) => r.allowance, format: 'compact' },
-    { key: 'pct', label: '% of free', icon: PercentIcon, value: (r) => r.pct, format: 'number', aggregate: 'max', filterable: true },
+    // Rows read and rows written don't add up to anything, so no Total; a day's group shows its peak share.
+    { key: 'used', label: 'Used', icon: HashIcon, value: (r) => r.used, format: 'rounded' },
+    { key: 'allowance', label: 'Free a day', icon: HashIcon, value: (r) => r.allowance, format: 'rounded' },
+    { key: 'pct', label: 'Of free', icon: PercentIcon, value: (r) => r.pct, format: 'weight', filterable: true },
   ],
 } as ViewDomain<UsageRow>;
 
@@ -159,9 +103,9 @@ function LimitsCard({ days }: { days: UsageDay[] }) {
   return (
     <div className="flex flex-col gap-4">
       <TileRow>
-        <Tile label="Messages indexed today" value={fmt(indexed)} />
-        <Tile label="Rows written left today" value={fmt(left)} caption="the backfill's limit on Free" />
-        <Tile label="Bill this month" value="$0.00" caption="Workers Free plan" />
+        <Tile className="lg:flex-1" label="Messages indexed today" value={fmt(indexed)} />
+        <Tile className="lg:flex-1" label="Rows written left today" value={fmt(left)} caption="the backfill's limit on Free" />
+        <Tile className="lg:flex-1" label="Bill this month" value="$0.00" caption="Workers Free plan" />
       </TileRow>
       <div className="grid gap-3">
         {(Object.keys(FREE_DAILY) as (keyof typeof FREE_DAILY)[]).map((m) => {
@@ -204,7 +148,7 @@ export function UsagePage() {
   return (
     <LumenLayout
       crumbs={[{ label: 'Cloudflare usage' }]}
-      meta={<span className="text-xs text-muted-foreground">Today and the last 30 days, UTC</span>}
+      meta={<span className="text-xs text-muted-foreground">Days run midnight to midnight UTC</span>}
       lead={[{ id: 'limits', title: 'Against the free tier', icon: GaugeIcon, kind: 'widget', link: false, children: <LimitsCard days={query.data ?? []} /> }]}
       domain={USAGE_DOMAIN}
       config={config}
