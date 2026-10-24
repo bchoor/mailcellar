@@ -11,9 +11,9 @@ import {
   PercentIcon,
 } from 'lucide-react';
 import { useState } from 'react';
-import { FREE_DAILY, type UsageDay } from '@mailcellar/schema';
+import { FREE_DAILY, PLAN_NAMES, type UsageDay } from '@mailcellar/schema';
 import { EmptyState } from './archive';
-import { AccountLimits } from './quota';
+import { AccountLimits, useQuota } from './quota';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 
@@ -74,11 +74,17 @@ const USAGE_VIEW: CustomViewConfig = {
 function LimitsCard({ days }: { days: UsageDay[] }) {
   const today = new Date().toISOString().slice(0, 10);
   const indexed = days.find((d) => d.day === today && d.metric === 'messages_indexed')?.value ?? 0;
+  const plan = useQuota().data?.plan;
   return (
     <div className="flex flex-col gap-4">
       <TileRow>
         <Tile className="lg:flex-1" label="Messages indexed today" value={fmt(indexed)} />
-        <Tile className="lg:flex-1" label="Plan" value="Workers Free" caption="daily limits refuse work past them" />
+        <Tile
+          className="lg:flex-1"
+          label="Plan"
+          value={plan ? PLAN_NAMES[plan] : '…'}
+          caption={plan === 'paid' ? 'use past the allowance is billed' : 'daily limits refuse work past them'}
+        />
       </TileRow>
       <AccountLimits />
     </div>

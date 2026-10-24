@@ -1,4 +1,4 @@
-import { asUserId, mailboxName, QUOTA_LIMITS, type QuotaMetric, type QuotaOverview } from '@mailcellar/schema';
+import { asUserId, mailboxName, QUOTA_METRICS, type QuotaMetric, type QuotaOverview } from '@mailcellar/schema';
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { accountQuota, quotaDeps, readCloudflare } from '../src/quota';
@@ -6,12 +6,12 @@ import { accountMailbox, BATCH_BYTES, RUN_CALLS, runBatch, runCensus } from '../
 import { fakeGmail, fakeMessages } from './fixtures/gmail';
 import { mockFetch, signIn } from './helpers';
 
-const zero = Object.fromEntries(Object.keys(QUOTA_LIMITS).map((m) => [m, 0])) as Record<QuotaMetric, number>;
-const realRead = quotaDeps.readCloudflare;
+const zero = Object.fromEntries(QUOTA_METRICS.map((m) => [m, 0])) as Record<QuotaMetric, number>;
+const real = { ...quotaDeps };
 let n = 0;
 // Each test gets its own account meter, so figures never leak between tests.
 beforeEach(() => void (quotaDeps.name = `quota-test-${++n}`));
-afterEach(() => void Object.assign(quotaDeps, { readCloudflare: realRead, name: 'account' }));
+afterEach(() => void Object.assign(quotaDeps, real));
 
 /** Cloudflare's figures for the account, as a test sets them. */
 const cloudflare = (figures: Partial<Record<QuotaMetric, number>>) =>
@@ -67,7 +67,12 @@ describe('Account limits', () => {
       workers_requests: 1958, do_rows_written: 15929, do_rows_read: 6117, d1_rows_written: 3690, d1_rows_read: 27604,
       r2_class_a: 1000, r2_class_b: 5000,
     });
-    expect(sent!.variables).toEqual({ a: 'acct-1', day: '2026-10-24', from: '2026-10-24T00:00:00Z', to: now.toISOString(), month: '2026-10-01' });
+    // On Free, Workers, DO and D1 count today; R2 counts the month.
+    expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-24T00:00:00Z', to: now.toISOString(), dos: '2026-10-24', d1: '2026-10-24', r2: '2026-10-01' });
+    // On Paid, everything counts the month.
+    quotaDeps.plan = () => 'paid';
+    await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, now);
+    expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-01T00:00:00Z', to: now.toISOString(), dos: '2026-10-01', d1: '2026-10-01', r2: '2026-10-01' });
   });
 
   it('AC-Q3 a backfill pauses before a hard daily limit, says which, and resumes after the reset', async () => {
@@ -121,5 +126,19 @@ describe('Account limits', () => {
     const c = (await mailbox.censusState())!;
     expect(c.error).toBe("Paused before the account's daily limit (Durable Object rows read).");
     expect(Date.parse(c.resumesAt!)).toBeGreaterThan(Date.now());
+  });
+
+  it('AC-Q7 on Workers Paid, limits are monthly allowances that bill past them, so nothing pauses', async () => {
+    quotaDeps.plan = () => 'paid';
+    cloudflare({ do_rows_written: 60_000_000, workers_requests: 9_000_000 });
+    const quota = accountQuota(env);
+    expect(await quota.reserve({ do_rows_written: 100_000 })).toBeNull();
+    const q = await quota.overview();
+    expect(q.plan).toBe('paid');
+    expect(q.paused).toBeNull();
+    expect(q.meters.every((m) => !m.hard && m.period === 'month')).toBe(true);
+    const w = q.meters.find((m) => m.metric === 'do_rows_written')!;
+    expect(w).toMatchObject({ limit: 50_000_000, used: 60_000_000 });
+    expect(w.cost).toBeCloseTo(10);
   });
 });

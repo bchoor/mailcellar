@@ -75,16 +75,18 @@ describe('schema helpers', () => {
 });
 
 describe("what's new", () => {
-  it('lists merged PRs newest first, in pages', async () => {
+  it('lists releases (or merged PRs before the first release) newest first, in pages', async () => {
     const page = async (q: string) =>
       ((await (await exports.default.fetch(`https://mailcellar.icaruslab.dev/api/releases?${q}`)).json()) as {
         releases: { tag: string; published_at: string }[];
       }).releases;
-    const first = await page('limit=2');
-    expect(first).toHaveLength(2);
-    expect(first[0].tag).toMatch(/^#\d+ · [0-9a-f]{7}$/);
-    expect(first[0].published_at >= first[1].published_at).toBe(true);
-    const next = await page(`limit=2&before=${encodeURIComponent(first[1].published_at)}`);
-    expect(next[0].published_at < first[1].published_at).toBe(true);
+    const all = await page('limit=100');
+    expect(all.length).toBeGreaterThan(0);
+    // The newest entry's tag is the status bar's label: a version or a PR, then the deployed commit.
+    expect(all[0].tag).toMatch(/^(v\d+\.\d+\.\d+|#\d+) · [0-9a-f]{7}$/);
+    for (let i = 1; i < all.length; i++) expect(all[i - 1].published_at >= all[i].published_at).toBe(true);
+    const first = await page('limit=1');
+    expect(first).toEqual(all.slice(0, 1));
+    expect(await page(`limit=1&before=${encodeURIComponent(first[0].published_at)}`)).toEqual(all.slice(1, 2));
   });
 });

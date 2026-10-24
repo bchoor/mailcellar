@@ -69,7 +69,11 @@ export function AccountLimits() {
         title={data.readAt ? `Whole Cloudflare account, read ${time(data.readAt)}` : 'Counted by MailCellar only'}
         note={
           data.readAt
-            ? `Every project on the account counts. Backfills pause at ${Math.round(QUOTA_STOP * 100)}% of a daily limit. R2 is billed past its free tier, never paused.${data.readError ? ` The last read failed: ${data.readError}` : ''}`
+            ? `Every project on the account counts. ${
+                data.plan === 'paid'
+                  ? 'On Workers Paid nothing pauses: use past the allowance is billed.'
+                  : `Backfills pause at ${Math.round(QUOTA_STOP * 100)}% of a daily limit. R2 is billed past its free tier, never paused.`
+              }${data.readError ? ` The last read failed: ${data.readError}` : ''}`
             : `${data.readError ?? 'Cloudflare’s figures aren’t read yet.'} Other projects on the account aren’t counted.`
         }
       />

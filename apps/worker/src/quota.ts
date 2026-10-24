@@ -1,27 +1,29 @@
-// The account's free-tier meters, one Durable Object for every user and mailbox (name
+// The account's meters for its Workers plan (CF_PLAN), one Durable Object for every user and mailbox (name
 // 'account'). Each sync and census run asks it for room before its batch and reports what the
 // batch used after. It reads Cloudflare's analytics for the whole account (every project on
 // it) at most every 5 minutes, and adds what MailCellar has counted since.
 import { DurableObject } from 'cloudflare:workers';
-import { QUOTA_LIMITS, QUOTA_STOP, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, type QuotaMetric, type QuotaOverview } from '@mailcellar/schema';
+import { QUOTA_METRICS, QUOTA_STOP, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, type QuotaMetric, type QuotaOverview, type QuotaPlan } from '@mailcellar/schema';
 import type { Env } from './env';
 
 export type QuotaUse = Partial<Record<QuotaMetric, number>>;
 
-const metrics = Object.keys(QUOTA_LIMITS) as QuotaMetric[];
+const metrics = QUOTA_METRICS;
+type Limits = ReturnType<typeof quotaLimits>;
 /** Cloudflare's figures are read again after this. */
 export const CF_READ_MS = 5 * 60_000;
 /** The UTC day or month a meter counts in now. */
-const periodKey = (metric: QuotaMetric, now = new Date()) => now.toISOString().slice(0, QUOTA_LIMITS[metric].period === 'day' ? 10 : 7);
+const periodKey = (limits: Limits, metric: QuotaMetric, now = new Date()) => now.toISOString().slice(0, limits[metric].period === 'day' ? 10 : 7);
 
 
 const GRAPHQL = 'https://api.cloudflare.com/client/v4/graphql';
-const QUERY = `query($a: String!, $day: Date!, $from: Time!, $to: Time!, $month: Date!) {
+// Each family is read from the start of its period on the plan: today on Free, the month on Paid.
+const QUERY = `query($a: String!, $workers: Time!, $to: Time!, $dos: Date!, $d1: Date!, $r2: Date!) {
   viewer { accounts(filter: {accountTag: $a}) {
-    workers: workersInvocationsAdaptive(limit: 10000, filter: {datetime_geq: $from, datetime_lt: $to}) { sum { requests } }
-    dos: durableObjectsPeriodicGroups(limit: 10000, filter: {date_geq: $day}) { sum { rowsRead rowsWritten } }
-    d1: d1AnalyticsAdaptiveGroups(limit: 10000, filter: {date_geq: $day}) { sum { rowsRead rowsWritten } }
-    r2: r2OperationsAdaptiveGroups(limit: 10000, filter: {date_geq: $month}) { dimensions { actionType } sum { requests } }
+    workers: workersInvocationsAdaptive(limit: 10000, filter: {datetime_geq: $workers, datetime_lt: $to}) { sum { requests } }
+    dos: durableObjectsPeriodicGroups(limit: 10000, filter: {date_geq: $dos}) { sum { rowsRead rowsWritten } }
+    d1: d1AnalyticsAdaptiveGroups(limit: 10000, filter: {date_geq: $d1}) { sum { rowsRead rowsWritten } }
+    r2: r2OperationsAdaptiveGroups(limit: 10000, filter: {date_geq: $r2}) { dimensions { actionType } sum { requests } }
   } }
 }`;
 
@@ -32,16 +34,21 @@ interface CfAccount {
   r2: { dimensions: { actionType: string }; sum: { requests: number } }[];
 }
 
-/** The account's use this day and month, from Cloudflare's GraphQL analytics. */
+/** The account's use this period of each meter on the plan, from Cloudflare's GraphQL analytics. */
 export async function readCloudflare(env: Env, now = new Date()): Promise<Record<QuotaMetric, number>> {
   if (!env.CF_ANALYTICS_TOKEN) throw new Error('No Cloudflare analytics token is set.');
+  const limits = quotaLimits(quotaDeps.plan(env));
   const day = now.toISOString().slice(0, 10);
+  const from = (m: QuotaMetric) => (limits[m].period === 'day' ? day : `${day.slice(0, 8)}01`);
   const res = await fetch(GRAPHQL, {
     method: 'POST',
     headers: { authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`, 'content-type': 'application/json' },
     body: JSON.stringify({
       query: QUERY,
-      variables: { a: env.CF_ACCOUNT_ID, day, from: `${day}T00:00:00Z`, to: now.toISOString(), month: `${day.slice(0, 8)}01` },
+      variables: {
+        a: env.CF_ACCOUNT_ID, workers: `${from('workers_requests')}T00:00:00Z`, to: now.toISOString(),
+        dos: from('do_rows_written'), d1: from('d1_rows_written'), r2: from('r2_class_a'),
+      },
     }),
   });
   if (!res.ok) throw new Error(`Cloudflare analytics answered HTTP ${res.status}.`);
@@ -61,8 +68,8 @@ export async function readCloudflare(env: Env, now = new Date()): Promise<Record
   };
 }
 
-/** Swapped in tests: each test gets its own meter, and none calls Cloudflare. */
-export const quotaDeps = { readCloudflare, name: 'account' };
+/** Swapped in tests: each test gets its own meter and plan, and none calls Cloudflare. */
+export const quotaDeps = { readCloudflare, name: 'account', plan: (env: Env): QuotaPlan => (env.CF_PLAN === 'paid' ? 'paid' : 'free') };
 
 /** The one meter for the whole Cloudflare account. */
 export const accountQuota = (env: Env) => env.QUOTA.getByName(quotaDeps.name);
@@ -71,6 +78,7 @@ export class QuotaDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`
+      -- MailCellar's own count, by UTC day.
       CREATE TABLE IF NOT EXISTS usage (period TEXT NOT NULL, metric TEXT NOT NULL, value INTEGER NOT NULL, PRIMARY KEY (period, metric)) STRICT, WITHOUT ROWID;
       -- Cloudflare's figure for a period when last read, and MailCellar's own count at that moment.
       CREATE TABLE IF NOT EXISTS cloudflare (metric TEXT PRIMARY KEY, period TEXT NOT NULL, value INTEGER NOT NULL, ours INTEGER NOT NULL) STRICT, WITHOUT ROWID;
@@ -78,10 +86,15 @@ export class QuotaDO extends DurableObject<Env> {
     `);
   }
 
+  private get limits() {
+    return quotaLimits(quotaDeps.plan(this.env));
+  }
+
+  /** MailCellar's own count this period. It is kept by UTC day, so a plan change keeps it. */
   private ours(metric: QuotaMetric, now: Date): number {
     return (
       this.ctx.storage.sql
-        .exec<{ value: number }>(`SELECT value FROM usage WHERE period = ? AND metric = ?`, periodKey(metric, now), metric)
+        .exec<{ value: number }>(`SELECT sum(value) AS value FROM usage WHERE period LIKE ? AND metric = ?`, `${periodKey(this.limits, metric, now)}%`, metric)
         .toArray()[0]?.value ?? 0
     );
   }
@@ -103,7 +116,7 @@ export class QuotaDO extends DurableObject<Env> {
     try {
       const cf = await quotaDeps.readCloudflare(this.env, now);
       for (const m of metrics)
-        this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO cloudflare VALUES (?, ?, ?, ?)`, m, periodKey(m, now), cf[m], this.ours(m, now));
+        this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO cloudflare VALUES (?, ?, ?, ?)`, m, periodKey(this.limits, m, now), cf[m], this.ours(m, now));
       this.setMeta('read_at', now.toISOString());
       this.setMeta('read_error', null);
     } catch (e) {
@@ -115,7 +128,7 @@ export class QuotaDO extends DurableObject<Env> {
   private used(metric: QuotaMetric, now: Date): { used: number; ours: number } {
     const ours = this.ours(metric, now);
     const cf = this.ctx.storage.sql
-      .exec<{ value: number; ours: number }>(`SELECT value, ours FROM cloudflare WHERE metric = ? AND period = ?`, metric, periodKey(metric, now))
+      .exec<{ value: number; ours: number }>(`SELECT value, ours FROM cloudflare WHERE metric = ? AND period = ?`, metric, periodKey(this.limits, metric, now))
       .toArray()[0];
     return { used: cf ? Math.max(ours, cf.value + ours - cf.ours) : ours, ours };
   }
@@ -128,7 +141,7 @@ export class QuotaDO extends DurableObject<Env> {
     const now = new Date();
     await this.refresh(now);
     for (const m of metrics) {
-      const { limit, label, period, hard } = QUOTA_LIMITS[m];
+      const { limit, label, period, hard } = this.limits[m];
       if (hard && this.used(m, now).used + (cost[m] ?? 0) > limit * QUOTA_STOP)
         return { metric: m, label, resumesAt: quotaReset(period, now).toISOString() };
     }
@@ -145,7 +158,7 @@ export class QuotaDO extends DurableObject<Env> {
       const value = (use[m] ?? 0) + (m === 'do_rows_written' ? own : 0);
       this.ctx.storage.sql.exec(
         `INSERT INTO usage VALUES (?, ?, ?) ON CONFLICT (period, metric) DO UPDATE SET value = value + excluded.value`,
-        periodKey(m, now), m, value,
+        now.toISOString().slice(0, 10), m, value,
       );
     }
   }
@@ -154,12 +167,13 @@ export class QuotaDO extends DurableObject<Env> {
     const now = new Date();
     await this.refresh(now);
     const meters = metrics.map((m) => {
-      const { label, limit, period, hard } = QUOTA_LIMITS[m];
+      const { label, limit, period, hard } = this.limits[m];
       const { used, ours } = this.used(m, now);
-      return { metric: m, label, used, ours, limit, period, hard, cost: quotaCost(m, used) };
+      return { metric: m, label, used, ours, limit, period, hard, cost: quotaCost(this.limits[m], used) };
     });
     const over = meters.find((m) => m.hard && m.used >= m.limit * QUOTA_STOP);
     return {
+      plan: quotaDeps.plan(this.env),
       readAt: this.meta('read_at'),
       readError: this.meta('read_error'),
       day: now.toISOString().slice(0, 10),
