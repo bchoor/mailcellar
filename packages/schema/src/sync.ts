@@ -37,6 +37,8 @@ export interface SyncState {
   error: string | null;
   /** The month the backfill is copying now (listing it with `pageToken`), and the backfill job it belongs to. */
   part?: SyncPart | null;
+  /** The account limit a pause waits for (QUOTA_LIMITS label); null when not paused for one. */
+  pausedFor?: string | null;
 }
 
 /** One month of one backfill job: the unit a backfill copies. */
@@ -84,6 +86,8 @@ export interface SyncSummary {
   error: string | null;
   /** The month being copied now, if any. */
   month: string | null;
+  /** The account limit a pause waits for, if any. */
+  pausedFor: string | null;
 }
 
 export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary {
@@ -98,6 +102,7 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
     resumesAt: s?.resumesAt ?? null,
     error: s?.error ?? null,
     month: s?.part?.month ?? null,
+    pausedFor: s?.pausedFor ?? null,
   };
 }
 
@@ -158,6 +163,8 @@ export interface CensusState {
   updatedAt: string;
   finishedAt: string | null;
   error: string | null;
+  /** A census paused for an account limit resumes after this. */
+  resumesAt?: string | null;
 }
 
 /** A backfill month's state. Copied months are `done`. */

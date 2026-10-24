@@ -1,8 +1,10 @@
 import { ARCHIVE_VIEWS, monthNow, type ArchiveView, type Health } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import type { Env } from './env';
+import { accountQuota } from './quota';
 
 export { MailboxDO } from './mailbox';
+export { QuotaDO } from './quota';
 export { SyncWorkflow } from './sync';
 
 // Static assets serve the app; only /api/* reaches this handler (run_worker_first).
@@ -118,6 +120,8 @@ async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox
     const q = (url.searchParams.get('q') ?? '').slice(0, 200);
     return Response.json(await mailbox.archive(archive[1] as ArchiveView, q), { headers: noStore });
   }
+  if (url.pathname === '/api/quota' && request.method === 'GET')
+    return Response.json(await accountQuota(env).overview(), { headers: noStore });
   if (url.pathname === '/api/usage' && request.method === 'GET')
     return Response.json(await mailbox.usage(), { headers: noStore });
   if (url.pathname === '/api/schedules' && request.method === 'GET')

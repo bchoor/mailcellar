@@ -13,9 +13,10 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { addMonths, monthRange, type AccountCoverage, type BackfillJob, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { CalendarRangeIcon, ChevronDownIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListPlusIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListPlusIcon, RefreshCwIcon } from 'lucide-react';
 import { useState } from 'react';
 import { EmptyState } from './archive';
+import { AccountLimits } from './quota';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 const size = (bytes: number) =>
@@ -68,6 +69,7 @@ const STATUS: Record<SyncSummary['status'], { label: string; variant: 'default' 
 /** What a sync is doing, in a few words; null when the badge says it all. */
 function headline(s: SyncSummary): string | null {
   if (s.phase === null || s.status === 'stopped') return null;
+  if (s.phase === 'paused' && s.resumesAt && s.pausedFor) return `Paused before the account's daily limit (${s.pausedFor}). Resumes ${when(s.resumesAt)}.`;
   if (s.phase === 'paused' && s.resumesAt) return `Paused at today's free limit. Resumes ${when(s.resumesAt)}.`;
   if (s.status === 'waiting' && s.resumesAt) return `Trying again ${when(s.resumesAt)}.`;
   if (s.phase === 'live') return 'New mail is copied on each sync. Pick months below to copy older mail.';
@@ -491,6 +493,10 @@ export function BackfillPage() {
                 id: 'jobs', title: 'Backfills', icon: ListChecksIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
                 children: (f: FilterToken[]) => <Jobs key={followed(data.accounts, f).id} id={followed(data.accounts, f).id} />,
               },
+              {
+                id: 'limits', title: 'Account limits', icon: GaugeIcon, kind: 'widget' as const, link: false as const, w: 6,
+                children: <AccountLimits />,
+              },
             ]
           : []),
       ]}
@@ -516,7 +522,7 @@ export function SyncStatus() {
           : syncs.every((s) => s.phase === null)
             ? 'Not started'
             : syncs.some((s) => s.phase === 'paused')
-              ? 'Paused'
+              ? 'Paused (limit)'
               : 'Not running';
   const ok = !data.basin || syncs.some((s) => s.status === 'stopped') ? false : syncs.every((s) => s.phase === 'live') ? true : null;
   return (

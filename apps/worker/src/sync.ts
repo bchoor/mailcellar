@@ -9,6 +9,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloud
 import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId } from '@mailcellar/schema';
 import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
+import { accountQuota, type QuotaUse } from './quota';
 import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, headers, indexRow, labels, listPage, packBySize, parseAddresses, profile, type RawMessage } from './gmail';
 
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
@@ -19,6 +20,8 @@ export const RUN_CALLS = 45;
 export const BATCH_BYTES = 8 * 1024 * 1024;
 /** Messages up to this size are gzipped; larger ones are mostly already-compressed attachments. */
 export const GZIP_MAX = 256 * 1024;
+/** What a full run may use, asked of the account's meters before it starts: about 6 DO rows a message (spike S4). */
+export const RUN_COST: QuotaUse = { do_rows_written: RUN_SIZE * 6 + 50, do_rows_read: RUN_SIZE * 4, r2_class_a: RUN_SIZE + 30, r2_class_b: 50 };
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
 /** The DO holding one Gmail account's index and sync state. */
@@ -172,6 +175,17 @@ export async function runBatch(
   const refreshToken = await env.MAILBOX.getByName(mailboxName(user)).accountToken(account);
   if (!refreshToken) return stop('This account was removed from MailCellar.');
 
+  // The account's daily limits are shared by every user: pause before one, resume after it resets.
+  const quota = accountQuota(env);
+  const full = await quota.reserve(RUN_COST);
+  if (full) {
+    state.pausedFor = full.label;
+    return later(new Date(full.resumesAt), 'paused', null);
+  }
+  state.pausedFor = null;
+  let r2a = 0;
+  let r2b = 0;
+
   const rows: IndexedMessage[] = [];
   const basin: BasinRow[] = [];
   const syncedAt = new Date().toISOString();
@@ -242,6 +256,7 @@ export async function runBatch(
         const raw = b64urlBytes(m.raw);
         const small = raw.length <= GZIP_MAX;
         const rawKey = r2Keys.raw(user, account, m.id);
+        r2a++;
         await env.ARCHIVE.put(rawKey, small ? await gzip(raw) : raw, {
           httpMetadata: { contentType: 'message/rfc822', contentEncoding: small ? 'gzip' : undefined },
         });
@@ -259,8 +274,9 @@ export async function runBatch(
 
   let copied = 0;
   let addedIds: string[] = [];
+  let rowsWritten = 0;
   try {
-    if (rows.length) ({ added: copied, addedIds } = await mailbox.ingest(rows));
+    if (rows.length) ({ added: copied, addedIds, rowsWritten } = await mailbox.ingest(rows));
   } catch (e) {
     if (!isDailyLimit(e)) throw e;
     return later(nextReset(), 'paused', null);
@@ -272,6 +288,7 @@ export async function runBatch(
   const staged = basin.filter((r) => fresh.has(r.id));
   if (staged.length) {
     const key = r2Keys.basinQueue(user, account, `${runId}-${Date.now().toString(36)}`);
+    r2a++;
     await env.ARCHIVE.put(key, await gzipJson(staged));
     state.basinQueue = [...state.basinQueue, key];
   }
@@ -286,10 +303,13 @@ export async function runBatch(
       }
       const queued: BasinRow[] = [];
       for (const key of state.basinQueue) {
+        r2b++;
         const obj = await env.ARCHIVE.get(key);
         if (obj) queued.push(...(await gunzipJson<BasinRow[]>(obj.body)));
       }
       await target.append(queued);
+      // A Basin commit writes data and metadata files through the catalog: about 10 R2 writes.
+      r2a += 10 + state.basinQueue.length;
       await env.ARCHIVE.delete(state.basinQueue);
       state.basinQueue = [];
     } catch (e) {
@@ -319,6 +339,8 @@ export async function runBatch(
   // Months queued while new mail was being copied: back to the backfill.
   const requeued = next.phase === 'live' && !rest.length && (await mailbox.hasQueued());
   if (requeued) next.phase = 'backfill';
+  // Sync-state saves and month bookkeeping: a few rows each run.
+  await quota.add({ do_rows_written: rowsWritten + 6, do_rows_read: rowsWritten * 2 + 20, r2_class_a: r2a, r2_class_b: r2b });
   if (!(await save(next))) return replaced;
   const more = requeued || rest.length > 0 || (next.phase === 'backfill' && next.pageToken !== null) || next.basinQueue.length > 0;
   return { copied, phase: next.phase, more, resumesAt: next.resumesAt };
@@ -337,7 +359,7 @@ export async function startCensus(env: Env, user: UserId, account: string, mode:
   const runId = `${account}-census-${Date.now().toString(36)}`;
   const resume = prev && prev.month !== null;
   const next: CensusState = resume
-    ? { ...prev, runId, error: null, updatedAt: now }
+    ? { ...prev, runId, error: null, resumesAt: null, updatedAt: now }
     : { runId, month: monthNow(), pageToken: null, n: 0, empty: 0, mode, startedAt: now, updatedAt: now, finishedAt: null, error: null };
   await mailbox.saveCensus(next);
   await env.SYNC.create({ id: runId, params: { user, account, census: true } });
@@ -353,6 +375,13 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
   const c = await mailbox.censusState();
   if (!c || c.runId !== runId || c.month === null) return { more: false, counted: [] };
   const counted: string[] = [];
+  const quota = accountQuota(env);
+  const full = await quota.reserve({ do_rows_written: budget + 10, do_rows_read: budget * 2 });
+  if (full) {
+    const now = new Date().toISOString();
+    await mailbox.saveCensus({ ...c, error: `Paused before the account's daily limit (${full.label}).`, resumesAt: full.resumesAt, updatedAt: now }, runId);
+    return { more: false, counted };
+  }
   const refreshToken = await env.MAILBOX.getByName(mailboxName(user)).accountToken(account);
   let calls = 1;
   try {
@@ -391,6 +420,7 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
     // The census resumes from here the next time the coverage map is opened.
     c.error = e instanceof GmailError && (e.status === 401 || e.status === 403) ? e.message : `Gmail didn't answer (${e instanceof GmailError ? `HTTP ${e.status}` : 'network'}).`;
   }
+  await quota.add({ do_rows_written: counted.length * 2 + 2, do_rows_read: calls * 2 });
   const now = new Date().toISOString();
   if (c.month === null) c.finishedAt = now;
   if (!(await mailbox.saveCensus({ ...c, updatedAt: now }, runId))) return { more: false, counted };

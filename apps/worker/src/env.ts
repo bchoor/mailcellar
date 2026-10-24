@@ -1,9 +1,12 @@
 import type { SyncParams } from '@mailcellar/schema';
 import type { MailboxDO } from './mailbox';
+import type { QuotaDO } from './quota';
 
 export interface Env {
   ASSETS: Fetcher;
   MAILBOX: DurableObjectNamespace<MailboxDO>;
+  /** The account's free-tier meters, one object for every user (quota.ts). */
+  QUOTA: DurableObjectNamespace<QuotaDO>;
   ARCHIVE: R2Bucket;
   /** Basin (R2 Data Catalog): the catalog, its warehouse and bucket, and the write token (a Worker secret). */
   BASIN_CATALOG_URI: string;
@@ -13,6 +16,9 @@ export interface Env {
   /** Copies one Gmail account, a batch a run (sync.ts). */
   SYNC: Workflow<SyncParams>;
   APP_VERSION: string;
+  /** Cloudflare's analytics for the whole account (quota.ts): the account and a read-only Account Analytics token (a Worker secret). */
+  CF_ACCOUNT_ID: string;
+  CF_ANALYTICS_TOKEN?: string;
   /** Google OAuth client: Worker secrets in production, .dev.vars locally. Never in the repo. */
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
@@ -30,7 +36,7 @@ declare global {
     interface Env extends WorkerEnv {}
     interface GlobalProps {
       mainModule: typeof import('./index');
-      durableNamespaces: 'MailboxDO';
+      durableNamespaces: 'MailboxDO' | 'QuotaDO';
     }
   }
 }

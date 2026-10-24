@@ -616,7 +616,8 @@ export class MailboxDO extends DurableObject<Env> {
     let c = await mailbox.censusState();
     const now = Date.now();
     const stale = c && now - Date.parse(c.updatedAt) >= SYNC_STALE_MS;
-    const mode = !c ? 'full' : c.month !== null && (c.error || stale) ? 'resume' : c.finishedAt && now - Date.parse(c.finishedAt) >= 6 * 3_600_000 ? 'refresh' : null;
+    const held = !!c?.resumesAt && Date.parse(c.resumesAt) > now;
+    const mode = held ? null : !c ? 'full' : c.month !== null && (c.error || stale) ? 'resume' : c.finishedAt && now - Date.parse(c.finishedAt) >= 6 * 3_600_000 ? 'refresh' : null;
     if (mode) {
       await syncDeps.census(this.env, user, account, mode === 'refresh' ? 'refresh' : 'full');
       c = await mailbox.censusState();
