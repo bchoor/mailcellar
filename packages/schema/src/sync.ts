@@ -39,6 +39,34 @@ export interface SyncState {
   part?: SyncPart | null;
   /** The account limit a pause waits for (QUOTA_LIMITS label); null when not paused for one. */
   pausedFor?: string | null;
+  /** When each recent save happened and `copied` then, oldest first, kept for RATE_WINDOW_MS and a little more. */
+  recent?: { at: string; copied: number }[];
+}
+
+/** The copy rate is measured over this window. */
+export const RATE_WINDOW_MS = 10 * 60_000;
+
+/** `recent` with a save at `at` added, trimmed to what the rate can still use. */
+export function withRecent(s: SyncState, at: string): { at: string; copied: number }[] {
+  const keep = Date.parse(at) - RATE_WINDOW_MS * 1.5;
+  return [...(s.recent ?? []).filter((r) => Date.parse(r.at) >= keep), { at, copied: s.copied }].slice(-60);
+}
+
+/**
+ * Messages copied a minute over the last RATE_WINDOW_MS: from the oldest save in the window (or
+ * the last one before it) to now, so a stall shows as a falling rate. Null until there is a minute
+ * of history to measure.
+ */
+export function copyRate(s: SyncState | null, now = Date.now()): number | null {
+  const recent = s?.recent ?? [];
+  if (!s || !recent.length) return null;
+  const from = now - RATE_WINDOW_MS;
+  const before = recent.filter((r) => Date.parse(r.at) <= from).at(-1);
+  const base = before ?? recent[0];
+  const since = Math.max(Date.parse(base.at), from);
+  const minutes = (now - since) / 60_000;
+  if (minutes < 1) return null;
+  return Math.max(0, s.copied - base.copied) / minutes;
 }
 
 /** One month of one backfill job: the unit a backfill copies. */
@@ -94,6 +122,8 @@ export interface SyncSummary {
   month: string | null;
   /** The account limit a pause waits for, if any. */
   pausedFor: string | null;
+  /** Messages copied a minute over the last 10 minutes; null until measured. */
+  ratePerMin: number | null;
 }
 
 export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary {
@@ -109,6 +139,7 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
     error: s?.error ?? null,
     month: s?.part?.month ?? null,
     pausedFor: s?.pausedFor ?? null,
+    ratePerMin: copyRate(s, now),
   };
 }
 

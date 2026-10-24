@@ -6,7 +6,7 @@
 // every message's row to Basin, the system of record. Basin rows are staged in R2 first, so
 // a failed commit is retried by the next run instead of losing the batch.
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
-import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId } from '@mailcellar/schema';
+import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent } from '@mailcellar/schema';
 import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
@@ -194,7 +194,10 @@ export async function runBatch(
   const state = await mailbox.syncState();
   const replaced: RunResult = { copied: 0, phase: 'replaced', more: false, resumesAt: null };
   if (!state || state.runId !== runId) return replaced;
-  const save = (next: SyncState) => mailbox.saveSync({ ...next, updatedAt: new Date().toISOString() }, runId);
+  const save = (next: SyncState) => {
+    const at = new Date().toISOString();
+    return mailbox.saveSync({ ...next, updatedAt: at, recent: withRecent(next, at) }, runId);
+  };
   // A stop fails the month being copied; Retry copies it again (copied mail is skipped).
   const stop = async (error: string): Promise<RunResult> => {
     const part = state.part;

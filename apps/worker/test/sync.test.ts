@@ -1,4 +1,4 @@
-import { asUserId, mailboxName, r2Keys, type SyncState } from '@mailcellar/schema';
+import { asUserId, mailboxName, r2Keys, type SyncState, copyRate, withRecent } from '@mailcellar/schema';
 import { introspectWorkflowInstance } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -277,5 +277,17 @@ describe('backfill by month', () => {
     expect([c.month, c.finishedAt !== null]).toEqual([null, true]);
     expect(calls.filter((x) => x.startsWith('q=before:'))).toHaveLength(1);
     expect((await mailbox.coverageMonths()).find((m) => m.month === '2004-04')?.gmail).toBe(1);
+  });
+
+  it('AC-RATE1 the rate is messages a minute over the last 10 minutes, and a stall brings it down', () => {
+    const t = (min: number) => new Date(Date.UTC(2026, 9, 24, 20, min)).toISOString();
+    let s = { copied: 0 } as SyncState;
+    for (const [min, copied] of [[0, 0], [5, 400], [10, 800], [15, 1200]] as const) {
+      s = { ...s, copied };
+      s = { ...s, recent: withRecent(s, t(min)) };
+    }
+    expect(copyRate(s, Date.parse(t(15)))).toBe(80);
+    expect(copyRate(s, Date.parse(t(25)))).toBe(0);
+    expect(copyRate({ ...s, recent: [{ at: t(15), copied: 1200 }] }, Date.parse(t(15)))).toBeNull();
   });
 });

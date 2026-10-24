@@ -84,12 +84,30 @@ function badge(s: SyncSummary): { label: string; variant: 'default' | 'secondary
   return STATUS[s.status];
 }
 
+/** A wait in words, from minutes. */
+const duration = (min: number) =>
+  min < 60 ? `about ${Math.max(1, Math.round(min))} min` : min < 48 * 60 ? `about ${Math.round(min / 60)} h` : `about ${Math.round(min / 1440)} days`;
+/** Messages in a month Gmail has and MailCellar hasn't copied yet. */
+const left = (m: MonthCoverage) => Math.max(0, (m.gmail ?? 0) - m.copied);
+
+/** The copy rate over the last 10 minutes, or why there is none. */
+function rateTile(s: SyncSummary): { value: string; caption: string } {
+  if (s.phase === 'paused') return { value: 'Paused', caption: s.pausedFor ? `for ${s.pausedFor}${s.resumesAt ? `, resumes ${when(s.resumesAt)}` : ''}` : s.resumesAt ? `resumes ${when(s.resumesAt)}` : 'waiting' };
+  if (s.status === 'stopped') return { value: 'Stopped', caption: 'see the error below' };
+  if (s.ratePerMin === null) return { value: '—', caption: s.status === 'running' ? 'measuring' : 'not copying' };
+  return { value: `${fmt(Math.round(s.ratePerMin))} / min`, caption: 'last 10 minutes' };
+}
+
 const pct = (s: SyncSummary) => (s.total ? Math.min(100, Math.round((s.copied / s.total) * 1000) / 10) : 0);
 
 function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; basin: boolean }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
+  const { data: cov } = useQuery(useCoverage(id));
+  const queued = cov?.months.filter(busyMonth) ?? [];
+  const toCopy = queued.reduce((n, m) => n + left(m), 0);
+  const rate = rateTile(s);
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -124,6 +142,13 @@ function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; ba
       )}
       {s.phase !== null && (
         <TileRow>
+          <Tile className="lg:flex-1" label="Rate" value={rate.value} caption={rate.caption} />
+          <Tile
+            className="lg:flex-1"
+            label="Queued to copy"
+            value={`${fmt(toCopy)}`}
+            caption={!queued.length ? 'nothing queued' : `messages in ${fmt(queued.length)} month${queued.length > 1 ? 's' : ''}${s.ratePerMin ? ` · ${duration(toCopy / s.ratePerMin)} left` : ''}`}
+          />
           <Tile className="lg:flex-1" label="Size" value={size(s.bytes)} caption="as Gmail counts it" />
           <Tile className="lg:flex-1" label="Started" value={s.startedAt ? when(s.startedAt) : '—'} />
           <Tile className="lg:flex-1" label="Last saved" value={s.updatedAt ? when(s.updatedAt) : '—'} />
