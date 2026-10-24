@@ -14,6 +14,8 @@ import { accountMailbox, basinRow, launchLanes, syncDeps } from './sync';
 
 /** Raw mail bigger than this is fetched alone; between MEDIUM and this, MEDIUM_BATCH at a time. */
 export const HUGE = 2 * 1024 * 1024;
+/** Raw mail a run copies before it stops fetching huge messages (the CPU budget may stop it sooner). */
+export const HUGE_RUN_BYTES = 60 * 1024 * 1024;
 export const MEDIUM = 128 * 1024;
 export const SMALL_BATCH = 25;
 export const MEDIUM_BATCH = 8;
@@ -232,15 +234,20 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
         stats.waitMs += pace.waitMs;
         await scheduler.wait(pace.waitMs);
       }
-      // A huge message is fetched alone and on its own, and noted first, so a run it kills doesn't repeat it.
+      // A huge message is fetched alone, and noted first, so a run it kills doesn't repeat it.
       if (wave.tier === 'huge') {
-        // Only as a run's first copy, so the note saved is the run's whole state: nothing copied is lost with it.
-        if (rows.length || stats.copied) {
+        if (stats.bytes >= HUGE_RUN_BYTES) {
           putBack(p, wave.tier, wave.batches);
           break;
         }
+        // Stage what the run copied so far, so the note saved is the run's whole state: nothing is lost with it.
+        if (rows.length) {
+          await env.ARCHIVE.put(r2Keys.staged(user, account, month, `${runId}-${p.packs}`), JSON.stringify(rows.splice(0)));
+          classA++;
+        }
         const id = wave.batches[0][0];
-        const marked = await saveLane(env, user, account, { ...p, huge: [id, ...p.huge], trying: id, updatedAt: new Date().toISOString() }, etag);
+        const note = { ...p, copied: p.copied + stats.copied, bytes: p.bytes + stats.bytes, huge: [id, ...p.huge], trying: id, updatedAt: new Date().toISOString() };
+        const marked = await saveLane(env, user, account, note, etag);
         if (!marked) return { ...none('replaced'), copied: stats.copied };
         etag = marked;
         classA++;
