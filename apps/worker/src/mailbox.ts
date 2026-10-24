@@ -572,6 +572,17 @@ export class MailboxDO extends DurableObject<Env> {
     return changed;
   }
 
+  /** Take months out of the queue (all of them when `months` is null). Mail already copied stays. Returns months changed. */
+  async unqueueMonths(months: string[] | null): Promise<number> {
+    const sql = this.ctx.storage.sql;
+    const cursor = months
+      ? sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running') AND month IN (SELECT value FROM json_each(?)) RETURNING month`, JSON.stringify(months))
+      : sql.exec(`UPDATE job_months SET state = 'canceled' WHERE state IN ('queued', 'running') RETURNING month`);
+    const changed = cursor.toArray().length;
+    if (changed) this.count({ do_rows_written: cursor.rowsWritten });
+    return changed;
+  }
+
   /**
    * Index a batch of messages in one transaction. Messages already indexed are skipped,
    * so a retried batch never double-counts. Rollups are written once a batch, not once a
@@ -893,6 +904,13 @@ export class MailboxDO extends DurableObject<Env> {
     if (changed === null) return null;
     if (action === 'retry' && changed && this.env.BASIN_TOKEN) await this.syncAccount(account, true);
     return { changed };
+  }
+
+  /** Take months out of an account's queue, or all when `months` is null. Null: not this user's account. */
+  async unqueue(account: string, months: string[] | null): Promise<{ changed: number } | null> {
+    const user = this.userId();
+    if (!user || !this.hasAccount(account)) return null;
+    return { changed: await accountMailbox(this.env, user, account).unqueueMonths(months) };
   }
 
   private hasAccount(id: string): boolean {
