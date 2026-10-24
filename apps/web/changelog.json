@@ -1,5 +1,43 @@
 [
   {
+    "tag": "v0.0.2",
+    "sha": "4782111458b5e34f10e242630c28b2df7511a843",
+    "published_at": "2026-10-24T18:21:49Z",
+    "takeaways": [
+      {
+        "text": "**Backfill by month**: On the Backfill page, a coverage map shows each month's Gmail count against what MailCellar has, and you can click months or choose a preset (Missing, Last 3 months, Last 12 months, All) to copy them, newest first, then Cancel or Retry from the jobs list.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**One sidebar section per Gmail account**: In the sidebar, each connected Gmail account has its own foldable section headed by its address, holding that account's Overview, Messages, Senders, Domains, Labels, Time and Gmail settings pages.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Gmail accounts and Access login**: In Settings ▸ Accounts, you can connect any number of Gmail accounts, use Test to check Read and Modify access, and use Remove to disconnect one and revoke its Google token, while sign-in itself now goes only through Cloudflare Access.",
+        "types": [
+          "feature",
+          "security"
+        ]
+      },
+      {
+        "text": "**Scheduled Gmail sync and Sync now**: On the Backfill page, each account's card shows its sync status and progress with a Sync now button, Schedules ▸ Gmail sync ▸ Run now syncs every account, and syncing also runs on the schedule you set.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Every copied message is stored in Basin**: Every message copied from Gmail now also gets a row in your own Basin table, which is the archive's system of record, so this affects archive storage and has no screen of its own.",
+        "types": [
+          "feature"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.1",
     "sha": "4ee991df03678740b82a0037091ea5e763d4622e",
     "published_at": "2026-10-24T18:19:47Z",
