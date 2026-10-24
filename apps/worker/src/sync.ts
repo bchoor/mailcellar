@@ -188,7 +188,8 @@ export const syncDeps: {
   basin: catalogTarget,
   start: (env, user, account) => startSync(env, user, account),
   census: (env, user, account, mode) => startCensus(env, user, account, mode),
-  launch: async (env, params, id) => void (await env.SYNC.create({ id, params })),
+  // From the account's alarm, not from the caller: a run started by a run counts as nested in it (MailboxDO.launchLater).
+  launch: (env, params, id) => accountMailbox(env, asUserId(params.user), params.account).launchLater(id, params),
 };
 
 /** Basin rows staged this many batches behind: the run commits instead of copying more. */
@@ -582,7 +583,7 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
           if (!c || c.runId !== runId) return null;
           const nextId = `${account}-census-${Date.now().toString(36)}`;
           if (!(await mailbox.saveCensus({ ...c, runId: nextId }, runId))) return null;
-          await this.env.SYNC.create({ id: nextId, params: { user, account, census: true } });
+          await mailbox.launchLater(nextId, { user, account, census: true });
           return nextId;
         });
       return counted;
@@ -600,7 +601,7 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       if (!state || state.runId !== runId) return null;
       const nextId = `${account}-${Date.now().toString(36)}`;
       await mailbox.saveSync({ ...state, runId: nextId, phase: resumePhase(state), resumesAt: null }, runId, { copied: 0, bytes: 0 });
-      await this.env.SYNC.create({ id: nextId, params: { user, account } });
+      await mailbox.launchLater(nextId, { user, account });
       return nextId;
     });
     return result;
