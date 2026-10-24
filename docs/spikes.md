@@ -1,7 +1,8 @@
 # Spikes
 
 De-risking tests from the build plan. Each one answers a question the design rests on,
-so we find the wall before we build into it. Phase 1 covers S4, S5, S6 and S9.
+so we find the wall before we build into it. Phase 1 covers S4, S5, S6 and S9; phase 2
+(the backfill) covers S1, S2, S3, S7 and S8.
 
 ## S9: CI on OpenShip — done (2026-10-24)
 
@@ -64,3 +65,67 @@ figure is per object: folded into the first deploy rather than run as its own sp
 that expire after 7 days, which would break every backfill. The test is to hold a refresh
 token for 8 days and use it. It needs a Google Cloud OAuth client, which only Bikram can
 create, and 8 calendar days, so it gates PR 4 rather than this PR.
+
+## Phase 2 spikes: the backfill on Workers Free (2026-10-24)
+
+Run against a throwaway Worker, `mailcellar-spike`, on the real account (Workers Free), with
+its own bucket and synthetic test mail only. The Worker is `scripts/spikes/backfill-worker.js`;
+it was deployed and driven through the Cloudflare API, and CPU was read from Workers
+Observability. Each test ran 4 steps; numbers are CPU per message.
+
+### S3: CPU per message
+
+Work per message: read the Gmail-shaped JSON, decode `raw`, read the headers, SHA-256, gzip,
+write to R2.
+
+| Message size | Full work | Without gzip |
+| --- | --- | --- |
+| 5 KB (10 a step) | 1.1 ms | |
+| 50 KB (10 a step) | 2.5 ms | |
+| 500 KB | 19 ms | 4.3 ms |
+| 5 MB | 180 ms | 26 ms |
+
+- Gzip is about 80% of the CPU.
+- The documented 10 ms per step was **not enforced**. One invocation used 1.9 s of CPU and
+  finished `ok`. Cloudflare allows short bursts; we don't build on it.
+- Locally (Node): MIME parsing with postal-mime costs about half of gzip. A Parquet row
+  (hyparquet-writer) costs 0.1 to 0.8 ms.
+
+**Decisions**
+
+- Gzip messages up to 256 KB. Store larger ones as they are; most of their bytes are
+  attachments that are already compressed.
+- Don't parse MIME during the backfill. The index comes from Gmail's response (labels, size,
+  date, snippet) plus From and Subject read from the raw headers, which costs about 0.02 ms.
+  Bodies are parsed when a message is opened.
+
+### S7: invocations, Gmail calls and chaining
+
+- **A Workflow instance runs all its steps in one invocation.** Sleeps of 2 s and 65 s
+  between steps did not start a new one.
+- So the Free cap of **50 external requests applies to the whole instance**, not to each
+  step. Measured: 30 fetches in step 1, then 20 in step 2, then `Too many subrequests`.
+  The 1,000 Cloudflare-service calls (R2, DO) are counted the same way.
+- An instance can start the next one. Chained 3 times, at 2 ms CPU each, and each new
+  instance gets a fresh budget.
+
+**Decisions**
+
+- **One instance = one batch**: a token refresh, one `messages.list` page and Gmail batch
+  requests (up to 50 messages each). Then it starts the next instance.
+- **500 messages an instance**: 12 Gmail calls and about 510 R2 and DO calls, well inside both caps.
+- The daily pace is set by DO writes: 100,000 rows a day for the **whole Cloudflare account**,
+  shared with every other app on it. At 5.56 rows a message that is about 18,000 messages a
+  day, or 36 instances. The Workflow stops for the day near the cap and resumes after 00:00 UTC.
+
+### S1, S2, S8: Basin (R2 Data Catalog)
+
+- S1, writing Parquet in a Worker: cheap (see S3), so not a blocker.
+- S2, committing to the catalog: **blocked**. Catalog writes need a Cloudflare API token with
+  Data Catalog Write and R2 write. The Cloudflare connection used here can't create API tokens.
+- S8, query cost: R2 SQL bills $2.50 per TB scanned. A full scan of a 200k-mail archive
+  (about 1 GB of Parquet) costs well under a cent.
+
+**Decision**: the backfill doesn't need Basin. Raw mail in R2 is the record, and the DO
+holds the index. Basin can be filled from R2 later, when full-text search over bodies is
+built, so its token is asked for then.
