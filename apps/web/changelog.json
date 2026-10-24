@@ -1,5 +1,43 @@
 [
   {
+    "tag": "v0.0.5",
+    "sha": "f03e81fea71e3e150b108edeaf8f893aae661477",
+    "published_at": "2026-10-24T23:12:28Z",
+    "takeaways": [
+      {
+        "text": "**Messages pages through all your mail**: On the Messages page, you can now page through your whole archive instead of only the newest 1,000, narrow it with filter chips, and pick dates with the new Period field.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Refresh on every Backfill card**: On the Backfill page, the Mailboxes, Sync and Backfills cards each have a Refresh button that re-reads that card's data and spins until it answers.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Stop shows \"Stopping…\" until the month is released**: In the Backfills card on the Backfill page, a month you stop now shows \"Stopping…\" with a spinner instead of staying under \"Copying now\" until its copy lane lets go.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Faster, steadier copying from Gmail**: When MailCellar copies a month of Gmail into your archive (the backfill shown on the Backfill page), it now runs closer to its target speed, copes with very large messages, and no longer stalls partway through a month.",
+        "types": [
+          "fix",
+          "performance"
+        ]
+      },
+      {
+        "text": "**Lighter search indexing**: When a month's search index is built from stored mail, it writes about half as many database rows per message, which affects how fast months become searchable and how quickly the free-tier quota is used.",
+        "types": [
+          "performance"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.4",
     "sha": "6768c995c6b8cfde9b0b861cf7b1c4a16f013be4",
     "published_at": "2026-10-24T22:18:20Z",
