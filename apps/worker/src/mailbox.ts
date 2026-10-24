@@ -153,21 +153,29 @@ function tally(into: Tally, key: string, m: IndexedMessage, name = '') {
 }
 
 /** One per user and mailbox (see mailboxName). Holds that user's index, rollups, sync state and schedule. */
+/** Tables kept answers read (MailboxDO.keep). */
+type KeptTable = 'gmail_months' | 'months' | 'basin_months' | 'job_months';
+
 export class MailboxDO extends DurableObject<Env> {
   /**
-   * Answers the Backfill page polls (coverage, jobs), kept in memory. The page asks every 15 s,
-   * and coverage reads every month row (~900 rows a call), which an open page turned into ~10M
-   * rows read a day. A kept answer is served until a write to what it shows drops it (`kept.clear()`
-   * where months, jobs, Basin or Gmail counts change); any other write (lanes' alarms, usage)
-   * leaves it, since lanes' progress is laid over it from memory.
+   * Answers the Backfill and Messages pages poll (coverage, jobs, totals), kept in memory with
+   * the tables each reads. A write drops only what reads the table it wrote (`drop`), so an index
+   * chunk re-reads the month counts (a row a month), not every backfill job's months. Lanes'
+   * progress is laid over coverage from memory, so their saves drop nothing.
    */
-  private kept = new Map<string, unknown>();
+  private kept = new Map<string, { tables: readonly KeptTable[]; value: unknown }>();
 
-  private keep<T>(key: string, read: () => T): T {
-    if (this.kept.has(key)) return this.kept.get(key) as T;
+  private keep<T>(key: string, tables: readonly KeptTable[], read: () => T): T {
+    const got = this.kept.get(key);
+    if (got) return got.value as T;
     const value = read();
-    this.kept.set(key, value);
+    this.kept.set(key, { tables, value });
     return value;
+  }
+
+  /** Drop kept answers that read any of these tables: they changed. */
+  private drop(...tables: KeptTable[]): void {
+    for (const [key, k] of this.kept) if (k.tables.some((t) => tables.includes(t))) this.kept.delete(key);
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -426,7 +434,7 @@ export class MailboxDO extends DurableObject<Env> {
         if (parts.every((p) => busy.has(p.month))) this.noneQueued = true;
         if (fresh.length) {
           this.active = null;
-          this.kept.clear();
+          this.drop('job_months');
           written += this.setLanes();
         }
         if (written) this.count({ do_rows_written: written });
@@ -500,7 +508,7 @@ export class MailboxDO extends DurableObject<Env> {
   private changedMonths(): void {
     this.active = null;
     this.noneQueued = false;
-    this.kept.clear();
+    this.drop('job_months');
   }
 
   /** Take Gmail units from the bucket; the answer is how long to wait first. */
@@ -591,6 +599,7 @@ export class MailboxDO extends DurableObject<Env> {
       if (main && added.copied) written += this.putMeta('sync', { ...main, copied: main.copied + added.copied, bytes: main.bytes + added.bytes, updatedAt: new Date().toISOString() });
       this.live.delete(part.month);
       this.changedMonths();
+      this.drop('basin_months');
       this.count({ do_rows_written: written });
     });
   }
@@ -647,7 +656,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** Messages in the index, from the month counts (a row a month read, not a row a message). */
   async indexedCount(): Promise<number> {
-    return this.ctx.storage.sql.exec<{ n: number }>(`SELECT coalesce(sum(n), 0) AS n FROM months`).toArray()[0].n;
+    return this.monthCounts().reduce((t, r) => t + r.n, 0);
   }
 
   /** Take a month out of the index, to build it again from Basin. Rollups follow at the next rebuildRollups. */
@@ -670,7 +679,7 @@ export class MailboxDO extends DurableObject<Env> {
       written += sql.exec(`DELETE FROM messages WHERE ts >= ? AND ts < ?`, after, before).rowsWritten;
       written += sql.exec(`DELETE FROM months WHERE month = ?`, month).rowsWritten;
       written += sql.exec(`UPDATE basin_months SET indexed_at = NULL WHERE month = ?`, month).rowsWritten;
-      this.kept.clear();
+      this.drop('months', 'basin_months');
       this.count({ do_rows_written: written });
       return { removed: rows.length, rowsWritten: written };
     });
@@ -685,7 +694,7 @@ export class MailboxDO extends DurableObject<Env> {
     const { rowsWritten } = this.ctx.storage.sql.exec(
       `UPDATE basin_months SET indexed_at = ?, copied = ? WHERE month = ?`, new Date().toISOString(), inBasin, month,
     );
-    this.kept.clear();
+    this.drop('basin_months');
     this.count({ do_rows_written: rowsWritten });
   }
 
@@ -812,13 +821,13 @@ export class MailboxDO extends DurableObject<Env> {
       `INSERT INTO gmail_months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
       month, n, new Date().toISOString(),
     );
-    this.kept.clear();
+    this.drop('gmail_months');
     this.count({ do_rows_written: rowsWritten });
   }
 
   /** Each month's Gmail count, copied count and latest backfill state, oldest first. */
   async coverageMonths(): Promise<MonthCoverage[]> {
-    const months = structuredClone(this.keep('coverage', () => this.readCoverage()));
+    const months = structuredClone(this.readCoverage());
     await this.liveFromFiles();
     // Lanes report what they've copied from memory; a month shows it until it lands.
     for (const m of months) {
@@ -860,40 +869,52 @@ export class MailboxDO extends DurableObject<Env> {
       await this.endLane(month);
       if (user) await this.env.ARCHIVE.delete(r2Keys.lane(user, this.laneAccount!, month));
     }
-    this.kept.clear();
+    this.drop('basin_months');
+  }
+
+  /** One table's rows for coverage, kept until a write to that table drops them. */
+  private part<T>(table: KeptTable, query: string): T[] {
+    return this.keep(`cov:${table}`, [table], () => {
+      const cursor = this.ctx.storage.sql.exec<T & Record<string, SqlStorageValue>>(query);
+      const rows = cursor.toArray();
+      this.count({ do_rows_read: cursor.rowsRead });
+      return rows;
+    });
   }
 
   private readCoverage(): MonthCoverage[] {
-    const sql = this.ctx.storage.sql;
     const by = new Map<string, MonthCoverage>();
     const at = (month: string) =>
       by.get(month) ?? by.set(month, { month, gmail: null, copied: 0, inBasin: 0, landed: false, indexed: 0, state: null, error: null, finishedAt: null }).get(month)!;
-    // The latest job to touch a month decides its state. One pass over job_months: the old
-    // correlated max(job) per row scanned the table once a row (~70k rows read a call at 265 months).
-    let read = 0;
-    const each = <T>(query: string) => {
-      const cursor = sql.exec<T & Record<string, SqlStorageValue>>(query);
-      const rows = cursor.toArray();
-      read += cursor.rowsRead;
-      return rows;
-    };
-    for (const r of each<{ month: string; n: number }>(`SELECT month, n FROM gmail_months`)) at(r.month).gmail = r.n;
-    for (const r of each<{ month: string; n: number }>(`SELECT month, n FROM months`)) Object.assign(at(r.month), { copied: r.n, indexed: r.n });
+    for (const r of this.part<{ month: string; n: number }>('gmail_months', `SELECT month, n FROM gmail_months`)) at(r.month).gmail = r.n;
+    for (const r of this.monthCounts()) Object.assign(at(r.month), { copied: r.n, indexed: r.n });
     const basin = new Set<string>();
-    for (const r of each<{ month: string; copied: number; landed_at: string | null }>(`SELECT month, copied, landed_at FROM basin_months`)) {
+    for (const r of this.basinMonths()) {
       const m = at(r.month);
       basin.add(r.month);
       Object.assign(m, { inBasin: r.copied, landed: r.landed_at !== null, copied: Math.max(m.copied, r.copied) });
     }
-    for (const r of each<{ month: string; state: PartState; error: string | null; finished_at: string | null }>(
+    // The latest job to touch a month decides its state, in one pass over job_months.
+    for (const r of this.part<{ month: string; state: PartState; error: string | null; finished_at: string | null }>(
+      'job_months',
       `SELECT month, state, error, finished_at FROM (
          SELECT month, state, error, finished_at, row_number() OVER (PARTITION BY month ORDER BY job DESC) AS latest FROM job_months
        ) WHERE latest = 1`,
     )) Object.assign(at(r.month), { state: r.state, error: r.error, finishedAt: r.finished_at });
     // Months copied before Basin came first went to Basin and the index together.
     for (const m of by.values()) if (!basin.has(m.month)) Object.assign(m, { inBasin: m.indexed, landed: m.indexed > 0 && m.state === 'done' });
-    this.count({ do_rows_read: read });
     return [...by.values()].sort((a, b) => a.month.localeCompare(b.month));
+  }
+
+  /** Indexed messages a month (the `months` rollup). */
+  private monthCounts() {
+    return this.part<{ month: string; n: number }>('months', `SELECT month, n FROM months`);
+  }
+
+  private basinMonths() {
+    return this.part<{ month: string; copied: number; landed_at: string | null; indexed_at: string | null }>(
+      'basin_months', `SELECT month, copied, landed_at, indexed_at FROM basin_months`,
+    );
   }
 
   /**
@@ -920,7 +941,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** The latest backfill jobs, newest first. */
   async jobList(limit = 20): Promise<BackfillJob[]> {
-    return structuredClone(this.keep(`jobs:${limit}`, () => this.readJobs(limit)));
+    return structuredClone(this.keep(`jobs:${limit}`, ['job_months'], () => this.readJobs(limit)));
   }
 
   private readJobs(limit: number): BackfillJob[] {
@@ -1051,7 +1072,7 @@ export class MailboxDO extends DurableObject<Env> {
         );
       const added = addedIds.length;
       if (added) {
-        this.kept.clear();
+        this.drop('months');
         this.count({ messages_indexed: added, do_rows_written: rowsWritten });
       }
       return { added, skipped: batch.length - added, rowsWritten, addedIds };
@@ -1191,11 +1212,9 @@ export class MailboxDO extends DurableObject<Env> {
     const full = rows.length > size;
     if (full) rows.length = size;
     const end = full ? rows[rows.length - 1] : more ? last : null;
-    const total = filters.length
-      ? null
-      : (exec<{ n: number }>(`SELECT coalesce(sum(n), 0) AS n FROM months`)[0]?.n ?? 0);
-    const unindexed =
-      exec<{ n: number }>(`SELECT count(*) AS n FROM basin_months WHERE copied > 0 AND indexed_at IS NULL`)[0]?.n ?? 0;
+    // Totals from the kept month rows: no read unless a write changed them.
+    const total = filters.length ? null : this.monthCounts().reduce((t, r) => t + r.n, 0);
+    const unindexed = this.basinMonths().filter((r) => r.copied > 0 && r.indexed_at === null).length;
     this.count({ do_rows_read: read });
     return {
       rows,

@@ -515,10 +515,12 @@ async function landMonth(env: Env, user: UserId, account: string, p: LaneProgres
   const key = r2Keys.copied(user, account, p.month);
   const before = await env.ARCHIVE.get(key);
   const ids = new Set(before ? ((await before.json()) as string[]) : []);
+  const had = ids.size;
   for (const id of p.copiedIds) ids.add(id);
   await env.ARCHIVE.put(key, JSON.stringify([...ids]));
   const mailbox = accountMailbox(env, user, account);
-  await mailbox.landMonth({ job: p.job, month: p.month }, { copied: p.copied, bytes: p.bytes });
+  // Messages new to the month, each once: a run's count can repeat one it copied again after a retry.
+  await mailbox.landMonth({ job: p.job, month: p.month }, { copied: ids.size - had, bytes: p.bytes });
   await syncDeps.launch(env, { user, account, index: p.month }, `${account}-index-${p.month}-${Date.now().toString(36)}`);
   await env.ARCHIVE.delete(r2Keys.lane(user, account, p.month));
   await mailbox.endLane(p.month);
