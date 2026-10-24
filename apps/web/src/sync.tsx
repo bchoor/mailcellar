@@ -4,10 +4,11 @@ import { ErrorLine, LumenLayout, NoteLine, StatusItem, Tile, TileRow, type Sched
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Progress } from '@columenlabs/lumen-ui/ui/progress';
-import type { SyncOverview, SyncSummary } from '@mailcellar/schema';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
+import type { SyncOverview, SyncRange, SyncSummary } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { DatabaseIcon, HourglassIcon, RefreshCwIcon } from 'lucide-react';
+import { ChevronDownIcon, DatabaseIcon, HourglassIcon, RefreshCwIcon } from 'lucide-react';
 import { useState } from 'react';
 import { EmptyState } from './archive';
 
@@ -29,9 +30,11 @@ export function useSync() {
   });
 }
 
-/** Start a sync for one account. Resolves to what happened, in words. */
-async function syncNow(id: string): Promise<{ ok: boolean; detail: string }> {
-  const res = await fetch(`/api/accounts/${id}/sync`, { method: 'POST' });
+const day = (ymd: string) => new Date(`${ymd}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+/** Start a sync for one account, over `range` if given. Resolves to what happened, in words. */
+async function syncNow(id: string, range?: SyncRange): Promise<{ ok: boolean; detail: string }> {
+  const res = await fetch(`/api/accounts/${id}/sync`, { method: 'POST', body: range ? JSON.stringify({ range }) : undefined });
   if (res.status === 409) return { ok: false, detail: 'Waiting for Basin write access' };
   if (!res.ok) return { ok: false, detail: `Not started (${res.status})` };
   const body = (await res.json()) as { started: boolean; sync: SyncSummary };
@@ -40,7 +43,7 @@ async function syncNow(id: string): Promise<{ ok: boolean; detail: string }> {
 
 /** Schedules ▸ Gmail sync ▸ Run now: Sync now for every account. */
 export async function syncAllNow(ids: string[]): Promise<ScheduleRun> {
-  const results = await Promise.all(ids.map(syncNow));
+  const results = await Promise.all(ids.map((id) => syncNow(id)));
   const started = results.filter((r) => r.detail === 'Started').length;
   const failed = results.filter((r) => !r.ok);
   return {
@@ -62,8 +65,8 @@ function headline(s: SyncSummary): string | null {
   if (s.phase === null || s.status === 'stopped') return null;
   if (s.phase === 'paused' && s.resumesAt) return `Paused at today's free limit. Resumes ${when(s.resumesAt)}.`;
   if (s.status === 'waiting' && s.resumesAt) return `Trying again ${when(s.resumesAt)}.`;
-  if (s.phase === 'live') return 'Backfill done. New mail is copied on each sync.';
-  if (s.status === 'running') return 'Copying existing mail.';
+  if (s.phase === 'live') return s.since ? `Mail since ${day(s.since)} copied. New mail is copied on each sync.` : 'All mail copied. New mail is copied on each sync.';
+  if (s.status === 'running') return s.since ? `Copying mail since ${day(s.since)}.` : 'Copying all mail.';
   return 'Not running. Sync now or the next scheduled run continues it.';
 }
 
@@ -88,28 +91,43 @@ function AccountSync({ id, sync: s, basin }: { id: string; sync: SyncSummary; ba
           <Badge variant={badge(s).variant}>{badge(s).label}</Badge>
           {headline(s) && <span className="text-muted-foreground">{headline(s)}</span>}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy || !basin || s.status === 'running'}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              setResult(await syncNow(id));
-              await client.invalidateQueries({ queryKey: ['sync'] });
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <RefreshCwIcon className={busy ? 'animate-spin' : undefined} /> Sync now
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" disabled={busy || !basin || s.status === 'running'}>
+              <RefreshCwIcon className={busy ? 'animate-spin' : undefined} /> Sync now <ChevronDownIcon />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuLabel>Copy</DropdownMenuLabel>
+            {(
+              [
+                ['30d', 'Last 30 days'],
+                ['all', 'All mail'],
+              ] as const
+            ).map(([range, label]) => (
+              <DropdownMenuItem
+                key={range}
+                onSelect={async () => {
+                  setBusy(true);
+                  try {
+                    setResult(await syncNow(id, range));
+                    await client.invalidateQueries({ queryKey: ['sync'] });
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                {label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       {s.total !== null && (
         <div className="grid grid-cols-[1fr_auto] items-center gap-3 text-sm">
           <Progress value={done ? 100 : pct(s)} className="h-2" />
           <span className="tabular-nums text-muted-foreground">
-            {fmt(s.copied)} / {fmt(s.total)} · {done ? 100 : pct(s)}%
+            {fmt(s.copied)} / {s.since ? 'about ' : ''}{fmt(s.total)} · {done ? 100 : pct(s)}%
           </span>
         </div>
       )}

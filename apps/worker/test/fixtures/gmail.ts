@@ -30,7 +30,7 @@ export const fakeMessages = (n: number, from = 1): FakeMessage[] =>
   Array.from({ length: n }, (_, k) => ({ id: (0x1000 + from + k).toString(16), raw: fakeRaw(from + k) }));
 
 /** Install the fake. `opts.fail` answers a batch part with that status, once per message ID. */
-export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; historyAdded?: string[]; failOnce?: Record<string, number>; tokenError?: string } = {}) {
+export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; historyAdded?: string[]; failOnce?: Record<string, number>; tokenError?: string; estimate?: number } = {}) {
   const calls: string[] = [];
   const failed = new Set<string>();
   const byId = new Map(mail.map((m) => [m.id, m]));
@@ -47,7 +47,9 @@ export function fakeGmail(mail: FakeMessage[], opts: { pageSize?: number; histor
       const start = Number(u.searchParams.get('pageToken') ?? 0);
       const ids = mail.slice(start, start + pageSize).map((m) => ({ id: m.id, threadId: m.id }));
       const next = start + pageSize < mail.length ? String(start + pageSize) : undefined;
-      return Response.json({ messages: ids, nextPageToken: next });
+      const q = u.searchParams.get('q');
+      if (q) calls.push(`q=${q}`);
+      return Response.json({ messages: ids, nextPageToken: next, resultSizeEstimate: opts.estimate ?? mail.length });
     }
     if (u.pathname === '/gmail/v1/users/me/history')
       return Response.json({ history: (opts.historyAdded ?? []).map((id) => ({ messagesAdded: [{ message: { id } }] })), historyId: '200' });

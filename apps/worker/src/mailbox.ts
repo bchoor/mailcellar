@@ -19,6 +19,7 @@ import {
   type SyncState,
   type SyncSummary,
   type SyncOverview,
+  type SyncRange,
   type ScheduleRun,
   type UserId,
   asUserId,
@@ -414,13 +415,13 @@ export class MailboxDO extends DurableObject<Env> {
    * Start syncing an account unless a run is going or waiting to resume. Sync now (`manual`)
    * also restarts a sync that stopped on an error; the schedule leaves those for the person.
    */
-  async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
+  async syncAccount(account: string, manual: boolean, range?: SyncRange): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' }> {
     const user = this.userId();
     if (!user || !this.hasAccount(account)) return { error: 'not_found' };
     const status = syncStatus(await accountMailbox(this.env, user, account).syncState());
     if (status === 'running' || status === 'waiting' || (status === 'stopped' && !manual)) return { status };
     try {
-      await syncDeps.start(this.env, user, account);
+      await syncDeps.start(this.env, user, account, range);
     } catch (e) {
       if (e instanceof BasinNotReady) return { error: 'basin_not_ready' };
       throw e;

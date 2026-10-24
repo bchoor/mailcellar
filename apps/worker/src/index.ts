@@ -1,4 +1,4 @@
-import { ARCHIVE_VIEWS, type ArchiveView, type Health } from '@mailcellar/schema';
+import { ARCHIVE_VIEWS, type ArchiveView, type Health, type SyncRange } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import type { Env } from './env';
 
@@ -74,7 +74,18 @@ async function mailboxApi(request: Request, env: Env, url: URL, { email, mailbox
   }
   if (sync && request.method === 'POST') {
     // Sync now: start a run unless one is going; answers with where the sync stands.
-    const r = await mailbox.syncAccount(sync[1], true);
+    // Optional body {"range": "30d" | "all"}: what the backfill covers. Left out, it continues as it was.
+    let range: SyncRange | undefined;
+    const text = await request.text();
+    if (text) {
+      try {
+        range = (JSON.parse(text) as { range?: SyncRange }).range;
+      } catch {
+        return Response.json({ error: 'bad_json' }, { status: 400 });
+      }
+      if (range !== undefined && range !== '30d' && range !== 'all') return Response.json({ error: 'bad_range' }, { status: 400 });
+    }
+    const r = await mailbox.syncAccount(sync[1], true, range);
     if ('error' in r) return Response.json({ error: r.error }, { status: r.error === 'not_found' ? 404 : 409, headers: noStore });
     return Response.json({ started: r.status === 'started', sync: await mailbox.syncInfo(sync[1]) }, { headers: noStore });
   }

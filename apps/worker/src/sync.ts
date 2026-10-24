@@ -6,7 +6,7 @@
 // every message's row to Basin, the system of record. Basin rows are staged in R2 first, so
 // a failed commit is retried by the next run instead of losing the batch.
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
-import { asUserId, mailboxName, r2Keys, type IndexedMessage, type SyncParams, type SyncState, type UserId } from '@mailcellar/schema';
+import { asUserId, mailboxName, r2Keys, rangeSince, type IndexedMessage, type SyncParams, type SyncRange, type SyncState, type UserId } from '@mailcellar/schema';
 import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, headers, indexRow, labels, listPage, packBySize, parseAddresses, profile, type RawMessage } from './gmail';
@@ -94,6 +94,17 @@ const isDailyLimit = (e: unknown) => /exceeded|limit/i.test(String(e));
 const resumePhase = (s: SyncState): SyncState['phase'] =>
   s.phase === 'paused' || s.phase === 'error' ? (s.pageToken !== null || s.pending.length || s.historyId === null ? 'backfill' : 'live') : s.phase;
 
+/**
+ * A sync set to copy `range`. A different range lists Gmail again from the newest message (mail
+ * already copied is skipped); a finished copy of all mail already covers any range.
+ */
+export function withRange(state: SyncState, range: SyncRange, now = new Date()): SyncState {
+  const since = rangeSince(range, now);
+  const current = state.since ?? null;
+  if (since === current || (current === null && state.phase === 'live')) return state;
+  return { ...state, since, phase: 'backfill', pending: [], pageToken: state.historyId === null ? null : '' };
+}
+
 /** Basin is the system of record, so no sync starts until it can be written. */
 export class BasinNotReady extends Error {}
 
@@ -101,14 +112,15 @@ export class BasinNotReady extends Error {}
  * Start (or restart) syncing an account. The new run takes over: a run already going finds
  * another run ID in the sync state and stops at its next save.
  */
-export async function startSync(env: Env, user: UserId, account: string): Promise<string> {
+export async function startSync(env: Env, user: UserId, account: string, range?: SyncRange): Promise<string> {
   if (!env.BASIN_TOKEN) throw new BasinNotReady('Basin has no write token yet');
   const mailbox = accountMailbox(env, user, account);
   const now = new Date().toISOString();
-  const state: SyncState = (await mailbox.syncState()) ?? {
+  let state: SyncState = (await mailbox.syncState()) ?? {
     phase: 'backfill', runId: '', total: null, copied: 0, bytes: 0, pending: [], pageToken: null, historyId: null,
-    basinQueue: [], basinReady: false, startedAt: now, updatedAt: now, resumesAt: null, error: null,
+    basinQueue: [], basinReady: false, startedAt: now, updatedAt: now, resumesAt: null, error: null, since: null,
   };
+  if (range !== undefined) state = withRange(state, range);
   const runId = `${account}-${Date.now().toString(36)}`;
   await mailbox.saveSync({ ...state, runId, phase: resumePhase(state), error: null, resumesAt: null, updatedAt: now });
   await env.SYNC.create({ id: runId, params: { user, account } });
@@ -129,8 +141,8 @@ export interface RunOptions {
 /** Where Basin rows go, and how a sync starts. Tests swap in a local table and a stand-in start. */
 export const syncDeps: {
   basin: (env: Env, user: UserId) => Promise<BasinTarget | null>;
-  start: (env: Env, user: UserId, account: string) => Promise<string>;
-} = { basin: catalogTarget, start: (env, user, account) => startSync(env, user, account) };
+  start: (env: Env, user: UserId, account: string, range?: SyncRange) => Promise<string>;
+} = { basin: catalogTarget, start: (env, user, account, range) => startSync(env, user, account, range) };
 
 /** Staged Basin batches allowed to wait; past this, copying stops until Basin takes them. */
 export const BASIN_QUEUE_MAX = 20;
@@ -179,8 +191,17 @@ export async function runBatch(
     }
     if (!state.pending.length) {
       if (state.phase === 'backfill' && state.pageToken !== null) {
-        const page = await listPage(token, state.pageToken || undefined);
+        const first = !state.pageToken;
+        const since = state.since ?? null;
+        // Listing all mail again (after a 30-day backfill): the total is the whole mailbox.
+        if (first && !since && state.total !== null && state.copied > 0) {
+          state.total = (await profile(token)).messagesTotal;
+          calls++;
+        }
+        const page = await listPage(token, state.pageToken || undefined, 500, since ? `after:${since.replaceAll('-', '/')}` : undefined);
         calls++;
+        // For a date range Gmail only estimates how many messages match.
+        if (first && since) state.total = page.estimate ?? state.total;
         state.pending = page.ids;
         state.pageToken = page.next;
       } else if (state.phase === 'live') {

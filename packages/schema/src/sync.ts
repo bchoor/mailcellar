@@ -35,6 +35,16 @@ export interface SyncState {
   /** When a paused sync resumes. */
   resumesAt: string | null;
   error: string | null;
+  /** The backfill copies mail from this day on (YYYY-MM-DD, UTC); null or missing: all mail. */
+  since?: string | null;
+}
+
+/** What Sync now copies: the last 30 days, or all mail. */
+export type SyncRange = '30d' | 'all';
+
+/** The first day a range covers, as SyncState.since. */
+export function rangeSince(range: SyncRange, now = new Date()): string | null {
+  return range === 'all' ? null : new Date(now.getTime() - 30 * 86_400_000).toISOString().slice(0, 10);
 }
 
 /** What starts a sync Workflow run. */
@@ -71,6 +81,8 @@ export interface SyncSummary {
   updatedAt: string | null;
   resumesAt: string | null;
   error: string | null;
+  /** First day the backfill copies; null: all mail. When set, `total` is Gmail's estimate. */
+  since: string | null;
 }
 
 export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary {
@@ -84,6 +96,7 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
     updatedAt: s?.updatedAt ?? null,
     resumesAt: s?.resumesAt ?? null,
     error: s?.error ?? null,
+    since: s?.since ?? null,
   };
 }
 

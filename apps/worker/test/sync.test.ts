@@ -2,7 +2,7 @@ import { asUserId, mailboxName, r2Keys, type SyncState } from '@mailcellar/schem
 import { introspectWorkflowInstance } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { accountMailbox, BATCH_BYTES, nextReset, RUN_CALLS, RUN_SIZE, runBatch as run, syncDeps } from '../src/sync';
+import { accountMailbox, BATCH_BYTES, nextReset, RUN_CALLS, RUN_SIZE, runBatch as run, syncDeps, withRange } from '../src/sync';
 import { fileTarget } from './fixtures/basin';
 import { fakeGmail, fakeMessages, fakeRaw } from './fixtures/gmail';
 
@@ -156,5 +156,31 @@ describe('basin check', () => {
   it('reports a missing token instead of failing', async () => {
     const { basinCheck } = await import('../src/basin');
     expect(await basinCheck(env)).toEqual({ ok: false, ms: 0, error: 'BASIN_TOKEN is not set' });
+  });
+});
+
+describe('date range', () => {
+  beforeEach(() => void vi.spyOn(scheduler, 'wait').mockResolvedValue(undefined));
+  const base = (s: Partial<SyncState>): SyncState => ({
+    phase: 'backfill', runId: 'r', total: 100, copied: 10, bytes: 0, pending: ['x'], pageToken: 'p2', historyId: '100',
+    basinQueue: [], basinReady: true, startedAt: '', updatedAt: '', resumesAt: null, error: null, ...s,
+  });
+  const now = new Date('2026-10-24T12:00:00Z');
+
+  it('lists Gmail again when the range changes, and leaves a finished full copy alone', () => {
+    expect(withRange(base({}), '30d', now)).toMatchObject({ since: '2026-09-24', phase: 'backfill', pending: [], pageToken: '' });
+    expect(withRange(base({ since: '2026-09-24', phase: 'live', pending: [] }), 'all', now)).toMatchObject({ since: null, phase: 'backfill', pageToken: '' });
+    const done = base({ phase: 'live', pending: [], pageToken: null });
+    expect(withRange(done, '30d', now)).toBe(done);
+    const fresh = base({ historyId: null, pageToken: null, pending: [] });
+    expect(withRange(fresh, '30d', now).pageToken).toBeNull();
+  });
+
+  it('copies only the range, with Gmail’s estimate as the total', async () => {
+    const calls = fakeGmail(fakeMessages(3), { estimate: 2 });
+    const { user, account, mailbox } = await setup('run-1', { since: '2026-09-24' });
+    await runBatch(env, user, account, 'run-1');
+    expect(calls).toContain('q=after:2026/09/24');
+    expect((await mailbox.syncState())!.total).toBe(2);
   });
 });
