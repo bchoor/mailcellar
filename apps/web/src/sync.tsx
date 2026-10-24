@@ -4,7 +4,7 @@
 // preset, then Start backfill; picked queued months can be taken back out.
 // Everything shown is what the sync state says now; nothing is estimated.
 import {
-  ErrorLine, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow, usePrefs,
+  ErrorLine, IconButton, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow, usePrefs,
   type CoverageData, type CoverageFact, type CoveragePick, type FilterToken, type ScheduleRun,
 } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
@@ -532,6 +532,28 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   );
 }
 
+/** A card's Refresh: reads its queries again now, spinning until they answer. */
+function RefreshTool({ keys }: { keys: string[][] }) {
+  const client = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  return (
+    <IconButton
+      icon={RefreshCwIcon}
+      label="Refresh"
+      busy={busy}
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await Promise.all(keys.map((queryKey) => client.refetchQueries({ queryKey })));
+        } finally {
+          setBusy(false);
+        }
+      }}
+    />
+  );
+}
+
 /** How fresh a mailbox's copy is: when its sync last saved, in words. */
 function freshness(s: SyncSummary, now = Date.now()): string {
   if (!s.updatedAt) return 'Never synced';
@@ -671,6 +693,7 @@ export function BackfillPage() {
               {
                 id: 'mailboxes', title: 'Mailboxes', icon: MailIcon, kind: 'widget' as const, color: 'teal' as const, w: 6,
                 publishes: [{ key: 'mailbox', value: shown!.email }],
+                tools: <RefreshTool keys={[['sync']]} />,
                 children: <MailboxList accounts={data.accounts} picked={shown!.email} onPick={setPicked} />,
               },
               ...(data.accounts.length > 1
@@ -685,6 +708,7 @@ export function BackfillPage() {
           ? [
               {
                 id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                tools: <RefreshTool keys={[['sync'], ['coverage']]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
                   return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} paused={data.paused} />;
@@ -699,6 +723,7 @@ export function BackfillPage() {
               },
               {
                 id: 'jobs', title: 'Backfills', icon: ListChecksIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                tools: <RefreshTool keys={[['sync'], ['coverage']]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
                   return <Backfills key={a.id} id={a.id} rate={a.sync.ratePerMin} copying={a.sync.months} />;
