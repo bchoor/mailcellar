@@ -50,6 +50,10 @@ export function NoIdentity() {
   );
 }
 
+/** A green ✓ or a red ✗ for one kind of Gmail access. */
+const Mark = ({ ok }: { ok: boolean }) =>
+  ok ? <span className="text-green-600 dark:text-green-400">✓</span> : <span className="text-red-600 dark:text-red-400">✗</span>;
+
 const added = (iso: string) => new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 
 export function AccountsSettings() {
@@ -83,9 +87,10 @@ export function AccountsSettings() {
                   ? 'MailCellar copies all mail from this account, and removes it from Gmail when you archive it.'
                   : 'MailCellar copies all mail from this account.'}
               </p>
-              {a.read && !a.modify && (
-                <p className="text-sm text-amber-600 dark:text-amber-400">Read only: archiving and deleting in Gmail aren’t available.</p>
-              )}
+              <p className="text-sm">
+                Read <Mark ok={a.read} /> · Modify <Mark ok={a.modify} />
+                {a.read && !a.modify && <span className="text-muted-foreground"> · Archiving and deleting in Gmail aren’t available.</span>}
+              </p>
               <KeyTestLine
                 test={a.test}
                 run={async () => {

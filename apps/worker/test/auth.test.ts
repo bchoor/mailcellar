@@ -94,11 +94,11 @@ describe('connecting Gmail accounts', () => {
 
     const me = (await (await api('/api/me')).json()) as Me;
     expect(me.accounts.map((a) => a.email)).toEqual(['home@gmail.com', 'work@example.org']);
-    expect(me.accounts[0].test).toMatchObject({ ok: true, detail: 'Read ✓ · Modify ✓' });
+    expect(me.accounts[0].test).toMatchObject({ ok: true, error: null });
     const work = me.accounts[1];
     // Read only is fine: the account passes, and the app warns that Gmail cleanup is unavailable.
     expect([work.read, work.modify, work.test.ok]).toEqual([true, false, true]);
-    expect(work.test).toMatchObject({ detail: 'Read ✓ · Modify ✗', error: null });
+    expect(work.test.error).toBeNull();
     expect(JSON.stringify(me)).not.toMatch(/rt-home|rt-work/);
 
     // The connection test asks Google which scopes the token carries now.
@@ -109,7 +109,7 @@ describe('connecting Gmail accounts', () => {
       throw new Error(`unexpected fetch ${url}`);
     });
     const tested = (await (await api(`/api/accounts/${work.id}/test`, { method: 'POST' })).json()) as Me['accounts'][number];
-    expect(tested.test).toMatchObject({ ok: true, detail: 'Read ✓ · Modify ✓', error: null });
+    expect(tested).toMatchObject({ modify: true, test: { ok: true, error: null } });
     vi.restoreAllMocks();
 
     mockFetch(() => Response.json({ error: 'invalid_grant' }, { status: 400 }));
