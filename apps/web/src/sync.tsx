@@ -11,11 +11,11 @@ import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Progress } from '@columenlabs/lumen-ui/ui/progress';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
-import { addMonths, monthRange, type AccountCoverage, type BackfillJob, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
+import { addMonths, monthRange, type AccountCoverage, type MonthCoverage, type SyncOverview, type SyncSummary } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, RefreshCwIcon, XIcon } from 'lucide-react';
-import { useState } from 'react';
+import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, RefreshCwIcon } from 'lucide-react';
+import { type ReactNode, useState } from 'react';
 import { EmptyState } from './archive';
 import { AccountLimits, AccountLimitsTools } from './quota';
 
@@ -349,61 +349,120 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
   );
 }
 
-const JOB_STATUS: Record<BackfillJob['status'], { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
-  queued: { label: 'Queued', variant: 'outline' },
-  running: { label: 'Copying', variant: 'default' },
-  done: { label: 'Done', variant: 'secondary' },
-  failed: { label: 'Failed', variant: 'destructive' },
-  canceled: { label: 'Removed', variant: 'outline' },
-};
+/** Months in the Next section before the rest fold into one line. */
+const NEXT_SHOWN = 3;
 
-/** An account's latest backfills, with Cancel and Retry. */
-function Jobs({ id }: { id: string }) {
+/** One month's row: its bar and messages copied, why it failed, and its one action. */
+function BackfillRow({ m, note, action }: { m: MonthCoverage; note?: string; action: { label: string; primary?: boolean; run: () => void } }) {
+  const total = m.gmail ?? 0;
+  const pct = total ? Math.min(100, (m.copied / total) * 100) : 0;
+  return (
+    <li className="grid grid-cols-[5.5rem_minmax(0,1fr)_5.5rem] items-center gap-3 py-2 text-sm">
+      <span className="tabular-nums">{monthName(m.month)}</span>
+      <span className="flex min-w-0 flex-col gap-1">
+        <Progress value={pct} className="h-1.5" />
+        <span className="tabular-nums text-xs text-muted-foreground">
+          {fmt(m.copied)} of {fmt(total)} messages
+          {note && <> · <span className={m.error ? 'text-loss' : undefined}>{note}</span></>}
+        </span>
+      </span>
+      <Button variant={action.primary ? 'default' : 'outline'} size="sm" className="w-full" onClick={action.run}>
+        {action.label}
+      </Button>
+    </li>
+  );
+}
+
+function BackfillSection({ title, count, children }: { title: string; count: number; children: ReactNode }) {
+  return (
+    <section className="flex flex-col">
+      <h3 className="flex gap-2 text-xs font-medium text-muted-foreground">
+        {title} <span className="tabular-nums">{fmt(count)}</span>
+      </h3>
+      <ul className="flex flex-col divide-y">{children}</ul>
+    </section>
+  );
+}
+
+/**
+ * An account's backfill by month: what failed and why (Retry), what is copying now (Stop), and
+ * what is next (Remove). Progress is in messages. Mail already copied stays when a month is taken out.
+ */
+function Backfills({ id, rate, copying }: { id: string; rate: number | null; copying: string[] }) {
   const client = useQueryClient();
-  const { data, error } = useQuery({
-    queryKey: ['jobs', id],
-    queryFn: async (): Promise<BackfillJob[]> => {
-      const res = await fetch(`/api/accounts/${id}/jobs`);
-      if (!res.ok) throw new Error(`Couldn't load the backfills (${res.status})`);
-      return res.json();
-    },
-    refetchInterval: (q) => (q.state.data?.some((j) => j.status === 'queued' || j.status === 'running') ? 15_000 : false),
-  });
-  const act = async (job: number, action: 'cancel' | 'retry') => {
-    await fetch(`/api/accounts/${id}/jobs/${job}/${action}`, { method: 'POST' });
-    await Promise.all([client.invalidateQueries({ queryKey: ['jobs', id] }), client.invalidateQueries({ queryKey: ['coverage', id] }), client.invalidateQueries({ queryKey: ['sync'] })]);
+  const { data, error } = useQuery(useCoverage(id));
+  const [problem, setProblem] = useState<string | null>(null);
+  const refresh = () => Promise.all(['coverage', 'jobs', 'sync'].map((k) => client.invalidateQueries({ queryKey: k === 'sync' ? ['sync'] : [k, id] })));
+  const unqueue = async (months?: string[]) => {
+    const res = await fetch(`/api/accounts/${id}/backfill/cancel`, { method: 'POST', body: JSON.stringify(months ? { months } : {}) });
+    setProblem(res.ok ? null : `Not removed (${res.status})`);
+    await refresh();
+  };
+  const retry = async (month: string) => {
+    setProblem(await queueBackfill(id, [month], 'Retry'));
+    await refresh();
   };
   if (error) return <ErrorLine error={error} />;
-  if (!data?.length) return <p className="text-sm text-muted-foreground">No backfills yet. Pick months on the map, or use Select months.</p>;
+  if (!data) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  // Newest first, as the backfill copies them.
+  const months = [...data.months].sort((a, b) => b.month.localeCompare(a.month));
+  const now = months.filter((m) => copying.includes(m.month) || m.state === 'running');
+  const next = months.filter((m) => m.state === 'queued' && !copying.includes(m.month));
+  const failed = months.filter((m) => m.state === 'failed');
+  const busy = [...now, ...next];
+  const toCopy = busy.reduce((n, m) => n + left(m), 0);
+  if (!busy.length && !failed.length)
+    return <p className="text-sm text-muted-foreground">Nothing queued. Pick months on the map, or use Select months.</p>;
+  const each = rate && now.length ? rate / now.length : null;
+  const rest = next.slice(NEXT_SHOWN);
   return (
-    <ul className="flex flex-col divide-y text-sm">
-      {data.map((j) => {
-        const total = Object.values(j.months).reduce((a, b) => a + b, 0);
-        const span = j.from === j.to ? monthName(j.from) : `${monthName(j.from)} to ${monthName(j.to)}`;
-        return (
-          <li key={j.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
-            <Badge variant={JOB_STATUS[j.status].variant}>{JOB_STATUS[j.status].label}</Badge>
-            <span className="font-medium">{j.label}</span>
-            <span className="text-muted-foreground">{span}</span>
-            <span className="tabular-nums text-muted-foreground">
-              {fmt(j.months.done)} of {fmt(total)} months
-              {j.months.failed ? ` · ${fmt(j.months.failed)} failed` : ''}
-              {j.months.canceled ? ` · ${fmt(j.months.canceled)} removed` : ''}
-            </span>
-            <span className="ml-auto flex gap-2">
-              {(j.months.queued > 0 || j.months.running > 0) && (
-                <Button variant="outline" size="sm" onClick={() => act(j.id, 'cancel')}>
-                  <XIcon /> Cancel
-                </Button>
-              )}
-              {(j.months.failed > 0 || j.months.canceled > 0) && (
-                <Button variant="outline" size="sm" onClick={() => act(j.id, 'retry')}>Retry</Button>
-              )}
-            </span>
-          </li>
-        );
-      })}
-    </ul>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex flex-col gap-0.5 text-sm">
+          <span>
+            <b className="tabular-nums">{fmt(toCopy)}</b> messages left in <b className="tabular-nums">{fmt(busy.length)}</b> month{busy.length === 1 ? '' : 's'}
+            {rate && toCopy ? ` · ${duration(toCopy / rate)} at ${fmt(Math.round(rate))} a minute` : ''}
+          </span>
+          <span className="text-xs text-muted-foreground">
+            Copying {fmt(now.length)} at once · {fmt(next.length)} waiting
+            {failed.length > 0 && <> · <span className="text-loss">{fmt(failed.length)} failed</span></>}
+          </span>
+        </div>
+        {busy.length > 0 && (
+          <Button variant="outline" size="sm" onClick={() => void unqueue()}>
+            <ListXIcon /> Clear queue
+          </Button>
+        )}
+      </div>
+      {failed.length > 0 && (
+        <BackfillSection title="Needs attention" count={failed.length}>
+          {failed.map((m) => (
+            <BackfillRow key={m.month} m={m} note={m.error ? shortError(m.error) : 'Failed'} action={{ label: 'Retry', primary: true, run: () => void retry(m.month) }} />
+          ))}
+        </BackfillSection>
+      )}
+      {now.length > 0 && (
+        <BackfillSection title="Copying now" count={now.length}>
+          {now.map((m) => (
+            <BackfillRow key={m.month} m={m} note={each ? `${duration(left(m) / each)} left` : undefined} action={{ label: 'Stop', run: () => void unqueue([m.month]) }} />
+          ))}
+        </BackfillSection>
+      )}
+      {next.length > 0 && (
+        <BackfillSection title="Next" count={next.length}>
+          {next.slice(0, NEXT_SHOWN).map((m) => (
+            <BackfillRow key={m.month} m={m} action={{ label: 'Remove', run: () => void unqueue([m.month]) }} />
+          ))}
+          {rest.length > 0 && (
+            <li className="py-2 text-xs text-muted-foreground">
+              and {fmt(rest.length)} more: {monthName(rest[0].month)}
+              {rest.length > 1 ? ` to ${monthName(rest[rest.length - 1].month)}` : ''}
+            </li>
+          )}
+        </BackfillSection>
+      )}
+      {problem && <ErrorLine error={new Error(problem)} />}
+    </div>
   );
 }
 
@@ -574,7 +633,10 @@ export function BackfillPage() {
               },
               {
                 id: 'jobs', title: 'Backfills', icon: ListChecksIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
-                children: (f: FilterToken[]) => <Jobs key={followed(data.accounts, f).id} id={followed(data.accounts, f).id} />,
+                children: (f: FilterToken[]) => {
+                  const a = followed(data.accounts, f);
+                  return <Backfills key={a.id} id={a.id} rate={a.sync.ratePerMin} copying={a.sync.months} />;
+                },
               },
               {
                 id: 'limits', title: 'Account limits', icon: GaugeIcon, kind: 'widget' as const, link: false as const, w: 6,
