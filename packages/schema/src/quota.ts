@@ -111,6 +111,75 @@ export interface BillingPeriod {
   end: string;
 }
 
+/** Refresh reads Cloudflare at most once this often. */
+export const QUOTA_REFRESH_MS = 60_000;
+
+/**
+ * What the account holds now rather than uses up per period: bytes stored, and Workflow
+ * instances running. The level is what Cloudflare last read.
+ */
+export type LevelMetric = 'do_storage' | 'd1_storage' | 'r2_storage' | 'workflows_running';
+
+export interface LevelLimit {
+  label: string;
+  unit: 'bytes' | 'count';
+  /** Included on the plan: bytes, or instances at once. */
+  limit: number;
+  /** Dollars a GB-month past it; none where nothing is billed. */
+  perGbMonth?: number;
+}
+
+const GB = 1024 ** 3;
+const R2_STORED: LevelLimit = { label: 'R2 storage', unit: 'bytes', limit: 10 * GB, perGbMonth: 0.015 };
+
+/** Each plan's levels, from Cloudflare's pricing and limits pages (checked 2026-10-24). */
+export const LEVEL_LIMITS_BY_PLAN: Record<QuotaPlan, Record<LevelMetric, LevelLimit>> = {
+  free: {
+    do_storage: { label: 'Durable Object storage', unit: 'bytes', limit: 5 * GB },
+    d1_storage: { label: 'D1 storage', unit: 'bytes', limit: 5 * GB },
+    r2_storage: R2_STORED,
+    workflows_running: { label: 'Workflows running', unit: 'count', limit: 100 },
+  },
+  paid: {
+    do_storage: { label: 'Durable Object storage', unit: 'bytes', limit: 5 * GB, perGbMonth: 0.2 },
+    d1_storage: { label: 'D1 storage', unit: 'bytes', limit: 5 * GB, perGbMonth: 0.75 },
+    r2_storage: R2_STORED,
+    workflows_running: { label: 'Workflows running', unit: 'count', limit: 50_000 },
+  },
+};
+export const levelLimits = (plan: string | undefined) => LEVEL_LIMITS_BY_PLAN[plan === 'paid' ? 'paid' : 'free'];
+export const LEVEL_METRICS = Object.keys(LEVEL_LIMITS_BY_PLAN.free) as LevelMetric[];
+
+export interface LevelMeter {
+  metric: LevelMetric;
+  label: string;
+  unit: 'bytes' | 'count';
+  /** Account-wide, as last read. */
+  used: number;
+  limit: number;
+  /** Dollars a month past the allowance at this level; null where nothing is billed. */
+  cost: number | null;
+  /** Who holds it: namespaces and databases by project, buckets, Workflows by Worker. */
+  parts: QuotaPart[];
+}
+
+/** Dollars a month for storing `used` bytes past the allowance. */
+export function levelCost(l: LevelLimit, used: number): number | null {
+  return l.perGbMonth === undefined ? null : (Math.max(0, used - l.limit) / GB) * l.perGbMonth;
+}
+
+/** The CPU time one Worker request may use, in ms: Free's is 10 ms, Paid's default 30 s. */
+export const CPU_LIMIT_MS: Record<QuotaPlan, number> = { free: 10, paid: 30_000 };
+
+/** One Worker's CPU time per request today (UTC), in ms. */
+export interface CpuRow {
+  name: string;
+  mine: boolean;
+  requests: number;
+  p50: number;
+  p99: number;
+}
+
 /** GET /api/quota: the account's meters now, and whether backfills are paused for a limit. */
 export interface QuotaOverview {
   plan: QuotaPlan;
@@ -127,6 +196,12 @@ export interface QuotaOverview {
   /** The billing period monthly meters count in; null when it can't be read (then the calendar month). */
   billing: BillingPeriod | null;
   meters: QuotaMeter[];
+  /** Storage and Workflows running, as last read; empty until read. */
+  levels: LevelMeter[];
+  /** CPU per request by Worker, most requests first, as last read; empty until read. */
+  cpu: { limitMs: number; rows: CpuRow[] };
+  /** When Refresh may read Cloudflare again (at most one read a minute). */
+  refreshAt: string;
   paused: { metric: QuotaMetric; label: string; resumesAt: string } | null;
 }
 

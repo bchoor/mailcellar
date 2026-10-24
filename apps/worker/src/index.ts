@@ -147,6 +147,8 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
   }
   if (url.pathname === '/api/quota' && request.method === 'GET')
     return Response.json(await accountQuota(env).overview(), { headers: noStore });
+  if (url.pathname === '/api/quota/refresh' && request.method === 'POST')
+    return Response.json(await accountQuota(env).readNow(), { headers: noStore });
   if (url.pathname === '/api/schedules' && request.method === 'GET')
     return Response.json(await mailbox.schedules(), { headers: noStore });
   const schedule = url.pathname.match(/^\/api\/schedules\/([a-z-]{1,40})$/);

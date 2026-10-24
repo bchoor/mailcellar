@@ -3,7 +3,7 @@
 // batch used after. It reads Cloudflare's analytics for the whole account (every project on
 // it) at most every 5 minutes, and adds what MailCellar has counted since.
 import { DurableObject } from 'cloudflare:workers';
-import { QUOTA_METRICS, QUOTA_STOP, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS } from '@mailcellar/schema';
+import { QUOTA_METRICS, QUOTA_STOP, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, CPU_LIMIT_MS, type CpuRow, type LevelMetric } from '@mailcellar/schema';
 import type { Env } from './env';
 
 export type QuotaUse = Partial<Record<QuotaMetric, number>>;
@@ -18,9 +18,14 @@ const periodKey = (limits: Limits, metric: QuotaMetric, now: Date, billing: Bill
 
 const GRAPHQL = 'https://api.cloudflare.com/client/v4/graphql';
 // Each family is read from the start of its period on the plan: today on Free, the month on Paid.
-const QUERY = `query($a: String!, $workers: Time!, $to: Time!, $dos: Date!, $d1: Date!, $r2: Date!) {
+// Storage is read for the last two days, and each store's latest day counts; CPU is today's (UTC).
+const QUERY = `query($a: String!, $workers: Time!, $to: Time!, $dos: Date!, $d1: Date!, $r2: Date!, $today: Time!, $stored: Date!) {
   viewer { accounts(filter: {accountTag: $a}) {
     workers: workersInvocationsAdaptive(limit: 10000, filter: {datetime_geq: $workers, datetime_lt: $to}) { dimensions { scriptName } sum { requests } }
+    cpu: workersInvocationsAdaptive(limit: 10000, filter: {datetime_geq: $today, datetime_lt: $to}) { dimensions { scriptName } sum { requests } quantiles { cpuTimeP50 cpuTimeP99 } }
+    doStored: durableObjectsSqlStorageGroups(limit: 10000, filter: {date_geq: $stored}) { dimensions { namespaceId date } max { storedBytes } }
+    d1Stored: d1StorageAdaptiveGroups(limit: 10000, filter: {date_geq: $stored}) { dimensions { databaseId date } max { databaseSizeBytes } }
+    r2Stored: r2StorageAdaptiveGroups(limit: 10000, filter: {date_geq: $stored}) { dimensions { bucketName date } max { payloadSize metadataSize } }
     dos: durableObjectsPeriodicGroups(limit: 10000, filter: {date_geq: $dos}) { dimensions { namespaceId } sum { rowsRead rowsWritten } }
     d1: d1AnalyticsAdaptiveGroups(limit: 10000, filter: {date_geq: $d1}) { dimensions { databaseId } sum { rowsRead rowsWritten } }
     r2: r2OperationsAdaptiveGroups(limit: 10000, filter: {date_geq: $r2}) { dimensions { actionType bucketName } sum { requests } }
@@ -32,10 +37,19 @@ interface CfAccount {
   dos: { dimensions?: { namespaceId?: string }; sum: { rowsRead: number; rowsWritten: number } }[];
   d1: { dimensions?: { databaseId?: string }; sum: { rowsRead: number; rowsWritten: number } }[];
   r2: { dimensions: { actionType: string; bucketName: string }; sum: { requests: number } }[];
+  cpu?: { dimensions?: { scriptName?: string }; sum: { requests: number }; quantiles?: { cpuTimeP50: number; cpuTimeP99: number } }[];
+  doStored?: { dimensions: { namespaceId?: string; date: string }; max: { storedBytes: number } }[];
+  d1Stored?: { dimensions: { databaseId?: string; date: string }; max: { databaseSizeBytes: number } }[];
+  r2Stored?: { dimensions: { bucketName?: string; date: string }; max: { payloadSize: number; metadataSize: number } }[];
 }
 
-/** Cloudflare's figures: each meter's use this period, and who used it. */
-export type CloudflareFigures = Record<QuotaMetric, number> & { parts?: Partial<Record<QuotaMetric, QuotaPart[]>> };
+/** Cloudflare's figures: each meter's use this period, and who used it; storage, Workflows running and CPU now. */
+export type CloudflareFigures = Record<QuotaMetric, number> & {
+  parts?: Partial<Record<QuotaMetric, QuotaPart[]>>;
+  /** Each level by who holds it; a level left out couldn't be read. */
+  levels?: Partial<Record<LevelMetric, QuotaPart[]>>;
+  cpu?: CpuRow[];
+};
 
 /** Totals by name, most first, the rest past QUOTA_PARTS summed as Other. MailCellar's own always shows. */
 export function topParts(by: Map<string, number>): QuotaPart[] {
@@ -51,7 +65,7 @@ export function topParts(by: Map<string, number>): QuotaPart[] {
 /**
  * Names for Durable Object namespaces and D1 databases, which analytics know only by ID: the
  * names kept in the meter (SyncParams.names), then what the token may list (Workers Scripts
- * Read and D1 Read). An ID with no name shows shortened.
+ * Read and D1 Read). An ID with no name shows as Unnamed DO or Unnamed database.
  */
 async function names(env: Env, known: Record<string, string>): Promise<Map<string, string>> {
   const out = new Map(Object.entries(known));
@@ -63,9 +77,37 @@ async function names(env: Env, known: Record<string, string>): Promise<Map<strin
     get<{ id: string; script?: string; class?: string; name?: string }>('/workers/durable_objects/namespaces?per_page=1000').catch(() => []),
     get<{ uuid: string; name: string }>('/d1/database?per_page=1000').catch(() => []),
   ]);
-  for (const n of ns) out.set(n.id, n.script && n.class ? `${n.script} ${n.class}` : (n.name ?? n.id));
+  // A namespace counts under its Worker, so each project keeps one colour across meters.
+  for (const n of ns) if (n.script || n.name) out.set(n.id, n.script ?? n.name!);
   for (const d of dbs) out.set(d.uuid, d.name);
   return out;
+}
+
+/** The latest day's value for each key: storage is a level, so days don't add up. */
+function latest<T extends { dimensions: { date: string } }>(rows: T[], key: (r: T) => string, f: (r: T) => number): Map<string, number> {
+  const day = new Map<string, string>();
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    const k = key(r);
+    const d = day.get(k);
+    if (d && d > r.dimensions.date) continue;
+    out.set(k, d === r.dimensions.date ? Math.max(out.get(k)!, f(r)) : f(r));
+    day.set(k, r.dimensions.date);
+  }
+  return out;
+}
+
+/** Workflow instances running now, by Worker (needs Workflows Read on the analytics token). */
+export async function readWorkflows(env: Env): Promise<QuotaPart[]> {
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/workflows?per_page=100`, { headers: { authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}` } });
+  if (!res.ok) throw new Error(`Workflows answered HTTP ${res.status}.`);
+  const body = (await res.json()) as { result?: { script_name?: string; name: string; instances?: { running?: number } }[] };
+  const by = new Map<string, number>();
+  for (const w of body.result ?? []) {
+    const k = w.script_name || w.name;
+    by.set(k, (by.get(k) ?? 0) + (w.instances?.running ?? 0));
+  }
+  return topParts(by);
 }
 
 /** The account's use this period of each meter on the plan, from Cloudflare's GraphQL analytics. */
@@ -73,6 +115,7 @@ export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()
   if (!env.CF_ANALYTICS_TOKEN) throw new Error('No Cloudflare analytics token is set.');
   const limits = quotaLimits(plan);
   const from = (m: QuotaMetric) => quotaStart(limits[m].period, now, billing);
+  const today = now.toISOString().slice(0, 10);
   const res = await fetch(GRAPHQL, {
     method: 'POST',
     headers: { authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`, 'content-type': 'application/json' },
@@ -81,6 +124,7 @@ export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()
       variables: {
         a: env.CF_ACCOUNT_ID, workers: `${from('workers_requests')}T00:00:00Z`, to: now.toISOString(),
         dos: from('do_rows_written'), d1: from('d1_rows_written'), r2: from('r2_class_a'),
+        today: `${today}T00:00:00Z`, stored: new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10),
       },
     }),
   });
@@ -90,19 +134,43 @@ export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()
   const a = body.data?.viewer.accounts[0];
   if (!a) throw new Error('Cloudflare analytics returned no account.');
   const sum = <T>(rows: T[], f: (r: T) => number) => rows.reduce((n, r) => n + f(r), 0);
-  const named = a.dos.length || a.d1.length ? await names(env, known) : new Map<string, string>();
-  const label = (id: string | undefined) => (id ? (named.get(id) ?? id.slice(0, 8)) : 'Unnamed');
+  const ids = a.dos.length || a.d1.length || a.doStored?.length || a.d1Stored?.length;
+  const named = ids ? await names(env, known) : new Map<string, string>();
+  const label = (id: string | undefined, kind: 'DO' | 'database') => (id && named.get(id)) || `Unnamed ${kind}`;
   const by = <T>(rows: T[], key: (r: T) => string, f: (r: T) => number) => {
     const m = new Map<string, number>();
     for (const r of rows) m.set(key(r), (m.get(key(r)) ?? 0) + f(r));
     return topParts(m);
   };
-  const script = (r: CfAccount['workers'][number]) => (r.dimensions?.scriptName && r.dimensions.scriptName !== '__unknown__' ? r.dimensions.scriptName : 'Unnamed');
-  const ns = (r: CfAccount['dos'][number]) => label(r.dimensions?.namespaceId);
-  const db = (r: CfAccount['d1'][number]) => label(r.dimensions?.databaseId);
-  const bucket = (r: CfAccount['r2'][number]) => r.dimensions.bucketName || 'Unnamed';
+  /** Levels by who holds them, once each store's latest day is taken. */
+  const held = (levels: Map<string, number>, name: (id: string) => string) => {
+    const m = new Map<string, number>();
+    for (const [id, v] of levels) m.set(name(id), (m.get(name(id)) ?? 0) + v);
+    return topParts(m);
+  };
+  const scriptName = (s: string | undefined) => (s && s !== '__unknown__' ? s : 'Unnamed Worker');
+  const script = (r: CfAccount['workers'][number]) => scriptName(r.dimensions?.scriptName);
+  const ns = (r: CfAccount['dos'][number]) => label(r.dimensions?.namespaceId, 'DO');
+  const db = (r: CfAccount['d1'][number]) => label(r.dimensions?.databaseId, 'database');
+  const bucket = (r: CfAccount['r2'][number]) => r.dimensions.bucketName || 'Unnamed bucket';
   const classA = (r: CfAccount['r2'][number]) => (R2_CLASS_A.has(r.dimensions.actionType) ? r.sum.requests : 0);
   const classB = (r: CfAccount['r2'][number]) => (R2_CLASS_B.has(r.dimensions.actionType) ? r.sum.requests : 0);
+  const levels: CloudflareFigures['levels'] = {
+    do_storage: held(latest(a.doStored ?? [], (r) => r.dimensions.namespaceId ?? '', (r) => r.max.storedBytes), (id) => label(id, 'DO')),
+    d1_storage: held(latest(a.d1Stored ?? [], (r) => r.dimensions.databaseId ?? '', (r) => r.max.databaseSizeBytes), (id) => label(id, 'database')),
+    r2_storage: held(latest(a.r2Stored ?? [], (r) => r.dimensions.bucketName ?? '', (r) => r.max.payloadSize + r.max.metadataSize), (id) => id || 'Unnamed bucket'),
+  };
+  try {
+    levels.workflows_running = await readWorkflows(env);
+  } catch {
+    // Left out: the page says Workflows running couldn't be read.
+  }
+  const cpu = (a.cpu ?? [])
+    .filter((r) => r.sum.requests > 0 && r.quantiles)
+    .map((r) => ({ name: scriptName(r.dimensions?.scriptName), mine: isMailCellar(scriptName(r.dimensions?.scriptName)), requests: r.sum.requests, p50: r.quantiles!.cpuTimeP50 / 1000, p99: r.quantiles!.cpuTimeP99 / 1000 }))
+    .sort((x, y) => y.requests - x.requests)
+    // The busiest Workers, and MailCellar's always.
+    .filter((r, i) => i < QUOTA_PARTS || r.mine);
   return {
     parts: {
       workers_requests: by(a.workers, script, (r) => r.sum.requests),
@@ -113,13 +181,15 @@ export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()
       r2_class_a: by(a.r2, bucket, classA),
       r2_class_b: by(a.r2, bucket, classB),
     },
+    levels,
+    cpu,
     workers_requests: sum(a.workers, (r) => r.sum.requests),
     do_rows_written: sum(a.dos, (r) => r.sum.rowsWritten),
     do_rows_read: sum(a.dos, (r) => r.sum.rowsRead),
     d1_rows_written: sum(a.d1, (r) => r.sum.rowsWritten),
     d1_rows_read: sum(a.d1, (r) => r.sum.rowsRead),
-    r2_class_a: sum(a.r2, (r) => (R2_CLASS_A.has(r.dimensions.actionType) ? r.sum.requests : 0)),
-    r2_class_b: sum(a.r2, (r) => (R2_CLASS_B.has(r.dimensions.actionType) ? r.sum.requests : 0)),
+    r2_class_a: sum(a.r2, classA),
+    r2_class_b: sum(a.r2, classB),
   };
 }
 
@@ -245,17 +315,19 @@ export class QuotaDO extends DurableObject<Env> {
     else this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO meta VALUES (?, ?)`, key, value);
   }
 
-  /** Read Cloudflare's figures at most once every CF_READ_MS, whether the last try worked or not. */
-  private async refresh(now: Date) {
+  /** Read Cloudflare's figures at most once every `every` ms, whether the last try worked or not. */
+  private async refresh(now: Date, every = CF_READ_MS) {
     await this.refreshPlan(now);
     const tried = this.meta('tried_at');
-    if (tried && now.getTime() - Date.parse(tried) < CF_READ_MS) return;
+    if (tried && now.getTime() - Date.parse(tried) < every) return;
     this.setMeta('tried_at', now.toISOString());
     try {
       const cf = await quotaDeps.readCloudflare(this.env, this.plan, now, this.billing(now), this.names());
       for (const m of metrics)
         this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO cloudflare VALUES (?, ?, ?, ?)`, m, this.start(m, now), cf[m], this.ours(m, now));
       this.setMeta('parts', JSON.stringify(cf.parts ?? {}));
+      this.setMeta('levels', JSON.stringify(cf.levels ?? {}));
+      this.setMeta('cpu', JSON.stringify(cf.cpu ?? []));
       this.setMeta('read_at', now.toISOString());
       this.setMeta('read_error', null);
     } catch (e) {
@@ -315,9 +387,14 @@ export class QuotaDO extends DurableObject<Env> {
     }
   }
 
-  async overview(): Promise<QuotaOverview> {
+  /** Refresh: read Cloudflare now, unless it was read in the last QUOTA_REFRESH_MS. */
+  async readNow(): Promise<QuotaOverview> {
+    return this.overview(QUOTA_REFRESH_MS);
+  }
+
+  async overview(every = CF_READ_MS): Promise<QuotaOverview> {
     const now = new Date();
-    await this.refresh(now);
+    await this.refresh(now, every);
     const stored = this.meta('parts');
     const parts = (stored ? JSON.parse(stored) : {}) as Partial<Record<QuotaMetric, QuotaPart[]>>;
     const meters = metrics.map((m) => {
@@ -326,6 +403,18 @@ export class QuotaDO extends DurableObject<Env> {
       const resetsAt = quotaReset(period, now, this.billing(now)).toISOString();
       return { metric: m, label, used, ours, limit, period, hard, cost: quotaCost(this.limits[m], used), resetsAt, parts: withOurs(parts[m] ?? [], used) };
     });
+    const read = this.meta('read_at') !== null;
+    const held = JSON.parse(this.meta('levels') ?? '{}') as Partial<Record<LevelMetric, QuotaPart[]>>;
+    const levelPlan = levelLimits(this.plan);
+    // A level shows once read; Workflows running is left out when the token can't list Workflows.
+    const levels = read
+      ? LEVEL_METRICS.filter((m) => held[m]).map((m) => {
+          const l = levelPlan[m];
+          const used = held[m]!.reduce((n, p) => n + p.value, 0);
+          return { metric: m, label: l.label, unit: l.unit, used, limit: l.limit, cost: levelCost(l, used), parts: held[m]! };
+        })
+      : [];
+    const tried = this.meta('tried_at');
     const over = meters.find((m) => m.hard && m.used >= m.limit * QUOTA_STOP);
     return {
       plan: this.plan,
@@ -336,6 +425,9 @@ export class QuotaDO extends DurableObject<Env> {
       day: now.toISOString().slice(0, 10),
       billing: this.billing(now),
       meters,
+      levels,
+      cpu: { limitMs: CPU_LIMIT_MS[this.plan], rows: read ? (JSON.parse(this.meta('cpu') ?? '[]') as CpuRow[]) : [] },
+      refreshAt: new Date((tried ? Date.parse(tried) : now.getTime()) + QUOTA_REFRESH_MS).toISOString(),
       paused: over ? { metric: over.metric, label: over.label, resumesAt: over.resetsAt } : null,
     };
   }

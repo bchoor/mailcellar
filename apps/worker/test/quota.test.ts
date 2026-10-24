@@ -44,6 +44,7 @@ describe('Account limits', () => {
   it("AC-Q2 reads the whole account from Cloudflare's analytics, R2 by class", async () => {
     let sent: { query: string; variables: Record<string, string> } | undefined;
     mockFetch(async (url, init) => {
+      if (String(url).endsWith('/workflows?per_page=100')) return new Response('', { status: 403 });
       expect(url).toBe('https://api.cloudflare.com/client/v4/graphql');
       expect(new Headers(init?.headers).get('authorization')).toBe('Bearer test-token');
       sent = JSON.parse(String(init?.body));
@@ -69,20 +70,23 @@ describe('Account limits', () => {
       r2_class_a: 1000, r2_class_b: 5000,
       // Who used each meter, most first, so the page shows which project drives it.
       parts: {
-        workers_requests: [{ name: 'Unnamed', value: 1958, mine: false }],
-        do_rows_written: [{ name: 'Unnamed', value: 15929, mine: false }],
-        do_rows_read: [{ name: 'Unnamed', value: 6117, mine: false }],
-        d1_rows_written: [{ name: 'Unnamed', value: 3690, mine: false }],
-        d1_rows_read: [{ name: 'Unnamed', value: 27604, mine: false }],
+        workers_requests: [{ name: 'Unnamed Worker', value: 1958, mine: false }],
+        do_rows_written: [{ name: 'Unnamed DO', value: 15929, mine: false }],
+        do_rows_read: [{ name: 'Unnamed DO', value: 6117, mine: false }],
+        d1_rows_written: [{ name: 'Unnamed database', value: 3690, mine: false }],
+        d1_rows_read: [{ name: 'Unnamed database', value: 27604, mine: false }],
         r2_class_a: [{ name: 'mailcellar', value: 800, mine: true }, { name: 'other', value: 200, mine: false }],
         r2_class_b: [{ name: 'other', value: 5000, mine: false }],
       },
+      // No storage or CPU rows came back; Workflows running couldn't be listed, so it's left out.
+      levels: { do_storage: [], d1_storage: [], r2_storage: [] },
+      cpu: [],
     });
     // On Free, Workers, DO and D1 count today; R2 counts the month.
-    expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-24T00:00:00Z', to: now.toISOString(), dos: '2026-10-24', d1: '2026-10-24', r2: '2026-10-01' });
+    expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-24T00:00:00Z', to: now.toISOString(), dos: '2026-10-24', d1: '2026-10-24', r2: '2026-10-01', today: '2026-10-24T00:00:00Z', stored: '2026-10-23' });
     // On Paid, everything counts the month.
     await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, 'paid', now);
-    expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-01T00:00:00Z', to: now.toISOString(), dos: '2026-10-01', d1: '2026-10-01', r2: '2026-10-01' });
+    expect(sent!.variables).toEqual({ a: 'acct-1', workers: '2026-10-01T00:00:00Z', to: now.toISOString(), dos: '2026-10-01', d1: '2026-10-01', r2: '2026-10-01', today: '2026-10-24T00:00:00Z', stored: '2026-10-23' });
     // With a billing period, monthly meters count from its first day.
     await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, 'free', now, { start: '2026-10-09T00:00:00.000Z', end: '2026-11-09T00:00:00.000Z' });
     expect(sent!.variables).toMatchObject({ dos: '2026-10-24', r2: '2026-10-09' });
@@ -208,6 +212,63 @@ describe('Account limits', () => {
       { name: 'd', value: 700, mine: false }, { name: 'e', value: 600, mine: false },
       { name: 'mailcellar', value: 15, mine: true }, { name: 'Other', value: 900, mine: false },
     ]);
+  });
+
+  it('AC-Q12 storage by project at its latest day, Workflows running, and CPU per request by Worker', async () => {
+    mockFetch(async (url) => {
+      const u = String(url);
+      if (u.endsWith('/workflows?per_page=100'))
+        return Response.json({ result: [{ name: 'mailcellar-sync', script_name: 'mailcellar', instances: { running: 2 } }, { name: 'jobs', script_name: 'appflare', instances: { running: 1 } }] });
+      if (u.includes('/durable_objects/namespaces')) return Response.json({ result: [{ id: 'ns1', script: 'mailcellar', class: 'MailboxDO' }, { id: 'ns2', script: 'mailcellar', class: 'QuotaDO' }] });
+      if (u.includes('/d1/database')) return new Response('', { status: 403 });
+      return Response.json({
+        data: { viewer: { accounts: [{
+          workers: [], dos: [], d1: [], r2: [],
+          cpu: [
+            { dimensions: { scriptName: 'mailcellar' }, sum: { requests: 40 }, quantiles: { cpuTimeP50: 1900, cpuTimeP99: 1_680_000 } },
+            { dimensions: { scriptName: 'appflare' }, sum: { requests: 900 }, quantiles: { cpuTimeP50: 11_900, cpuTimeP99: 121_000 } },
+          ],
+          doStored: [
+            { dimensions: { namespaceId: 'ns1', date: '2026-10-23' }, max: { storedBytes: 100 } },
+            { dimensions: { namespaceId: 'ns1', date: '2026-10-24' }, max: { storedBytes: 300 } },
+            { dimensions: { namespaceId: 'ns2', date: '2026-10-24' }, max: { storedBytes: 20 } },
+            { dimensions: { namespaceId: 'ns9', date: '2026-10-23' }, max: { storedBytes: 50 } },
+          ],
+          d1Stored: [{ dimensions: { databaseId: 'db1', date: '2026-10-24' }, max: { databaseSizeBytes: 4096 } }],
+          r2Stored: [{ dimensions: { bucketName: 'mailcellar', date: '2026-10-24' }, max: { payloadSize: 1000, metadataSize: 24 } }],
+        }] } },
+      });
+    });
+    const cf = await readCloudflare({ ...env, CF_ANALYTICS_TOKEN: 'test-token', CF_ACCOUNT_ID: 'acct-1' }, 'free', new Date('2026-10-24T18:00:00Z'));
+    // A namespace counts under its Worker; days don't add up, the latest one counts; unknown IDs say Unnamed.
+    expect(cf.levels).toEqual({
+      do_storage: [{ name: 'mailcellar', value: 320, mine: true }, { name: 'Unnamed DO', value: 50, mine: false }],
+      d1_storage: [{ name: 'Unnamed database', value: 4096, mine: false }],
+      r2_storage: [{ name: 'mailcellar', value: 1024, mine: true }],
+      workflows_running: [{ name: 'mailcellar', value: 2, mine: true }, { name: 'appflare', value: 1, mine: false }],
+    });
+    // Busiest first, in ms.
+    expect(cf.cpu).toEqual([
+      { name: 'appflare', mine: false, requests: 900, p50: 11.9, p99: 121 },
+      { name: 'mailcellar', mine: true, requests: 40, p50: 1.9, p99: 1680 },
+    ]);
+  });
+
+  it('AC-Q13 /api/quota shows storage against the plan, CPU against its cap, and Refresh reads at most once a minute', async () => {
+    let reads = 0;
+    quotaDeps.readCloudflare = async () => (reads++, {
+      ...zero,
+      levels: { r2_storage: [{ name: 'backup', value: 12 * 1024 ** 3, mine: false }] },
+      cpu: [{ name: 'mailcellar', mine: true, requests: 5, p50: 2, p99: 9 }],
+    });
+    const { api } = await signIn('quota13@example.com');
+    const q = (await (await api('/api/quota')).json()) as QuotaOverview;
+    expect(q.levels).toEqual([{ metric: 'r2_storage', label: 'R2 storage', unit: 'bytes', used: 12 * 1024 ** 3, limit: 10 * 1024 ** 3, cost: 0.03, parts: [{ name: 'backup', value: 12 * 1024 ** 3, mine: false }] }]);
+    expect(q.cpu).toEqual({ limitMs: 10, rows: [{ name: 'mailcellar', mine: true, requests: 5, p50: 2, p99: 9 }] });
+    expect(Date.parse(q.refreshAt) - Date.parse(q.readAt!)).toBe(60_000);
+    // Refresh within the minute doesn't read again.
+    await api('/api/quota/refresh', { method: 'POST' });
+    expect(reads).toBe(1);
   });
 
   it('AC-Q11 names for namespace and database IDs, kept through the Workflows API', async () => {

@@ -16,7 +16,7 @@ import { Link } from '@tanstack/react-router';
 import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListPlusIcon, RefreshCwIcon } from 'lucide-react';
 import { useState } from 'react';
 import { EmptyState } from './archive';
-import { AccountLimits } from './quota';
+import { AccountLimits, AccountLimitsTools } from './quota';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 const size = (bytes: number) =>
@@ -521,6 +521,7 @@ export function BackfillPage() {
               },
               {
                 id: 'limits', title: 'Account limits', icon: GaugeIcon, kind: 'widget' as const, link: false as const, w: 6,
+                tools: <AccountLimitsTools />,
                 children: <AccountLimits />,
               },
             ]
