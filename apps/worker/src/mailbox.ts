@@ -46,6 +46,11 @@ import {
   type MessageFilter,
   type MessageRow,
   type MessagePage,
+  type MessageSort,
+  type MessageGroup,
+  type MessageGroupBy,
+  type MessageGroups,
+  MESSAGE_SORTS,
 } from '@mailcellar/schema';
 import type { Env } from './env';
 import { accountMailbox, accessToken, BasinNotReady, INDEX_CHUNK, INDEX_ROWS, launchLanes, RUN_COST, runDied, syncDeps } from './sync';
@@ -1366,12 +1371,104 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
-   * One page of messages under the Messages page's filters, keyset-paged on (ts, id) over the
-   * ts index. Free text narrows through FTS; every other filter is checked on rows read in ts
-   * order, at most SCAN_BUDGET rows a page, so a rare filter returns a partial page and a cursor
-   * that keeps searching instead of reading the whole mailbox.
+   * One page of Messages groups, largest first, from the rollups: no message is read. Counts are
+   * the rollup's, so they hold for the whole mailbox only: under other filters each is null.
+   * Senders and domains page on their n index, GROUPS_PAGE at a time; the rest come whole.
    */
-  async messagePage(filters: MessageFilter[], cursor: string | null, size: number, asc: boolean): Promise<MessagePage> {
+  async messageGroups(by: MessageGroupBy, filtered: boolean, after: string | null): Promise<MessageGroups> {
+    const sql = this.ctx.storage.sql;
+    let read = 0;
+    const exec = <R extends Record<string, SqlStorageValue>>(query: string, ...args: (string | number)[]) => {
+      const c = sql.exec<R>(query, ...args);
+      read += c.rowsRead;
+      return c.toArray();
+    };
+    const all = this.indexedTotal();
+    const count = (n: number) => (filtered ? null : n);
+    let groups: MessageGroup[] = [];
+    let next: string | null = null;
+    if (by === 'from' || by === 'domain') {
+      const [table, key] = by === 'from' ? ['senders', 'addr'] : ['domains', 'domain'];
+      // The cursor is the last group's (n, key): shaped like a Size cursor, (number, string).
+      const at = after ? decodeCursor(after, 'size') : null;
+      const got = exec<{ k: string; n: number }>(
+        `SELECT ${key} AS k, n FROM ${table} WHERE n > 0 ${at ? `AND (n, ${key}) < (?, ?)` : ''} ORDER BY n DESC, ${key} DESC LIMIT ?`,
+        ...(at ? [at[0], at[1]] : []),
+        GROUPS_PAGE + 1,
+      );
+      if (got.length > GROUPS_PAGE) {
+        got.length = GROUPS_PAGE;
+        next = JSON.stringify([got[GROUPS_PAGE - 1].n, got[GROUPS_PAGE - 1].k]);
+      }
+      groups = got.map((g) => ({ key: g.k, n: count(g.n), filter: { key: by, values: [g.k], ...(by === 'from' ? { op: 'eq' as const } : {}) } }));
+    } else if (by === 'label') {
+      groups = exec<{ id: string; name: string; n: number }>(`SELECT id, name, n FROM labels WHERE type = 'user' AND n > 0 ORDER BY n DESC`).map((l) => ({
+        key: l.name,
+        n: count(l.n),
+        filter: { key: 'label', values: [l.id] },
+      }));
+    } else {
+      const ids = by === 'category' ? CATEGORY_IDS : ['UNREAD'];
+      const n = new Map(exec<{ id: string; n: number }>(`SELECT id, n FROM labels WHERE id IN (${ids.map(() => '?').join(', ')})`, ...ids).map((r) => [r.id, r.n]));
+      const sum = ids.reduce((t, id) => t + (n.get(id) ?? 0), 0);
+      groups =
+        by === 'category'
+          ? [
+              { key: 'Primary', n: count(Math.max(0, all - sum)), filter: { key: 'label', values: ids, not: true } },
+              ...ids.map((id) => ({ key: categoryName(id), n: count(n.get(id) ?? 0), filter: { key: 'label' as const, values: [id] } })),
+            ]
+          : [
+              { key: 'Unread', n: count(sum), filter: { key: 'label', values: ['UNREAD'] } },
+              { key: 'Read', n: count(Math.max(0, all - sum)), filter: { key: 'label', values: ['UNREAD'], not: true } },
+            ];
+      if (!filtered) groups = groups.filter((g) => g.n !== 0).sort((a, b) => (b.n ?? 0) - (a.n ?? 0));
+    }
+    this.count({ do_rows_read: read });
+    return { groups, next };
+  }
+
+  /** Sorts this mailbox can serve now; null until read from the schema. */
+  private sortsReady: Set<MessageSort> | null = null;
+  private sortsTried = 0;
+
+  /**
+   * The orders Messages can ask for: Date, and each sort index built. A missing index is built
+   * when the day's DO writes have room for it (one write per message indexed), tried at most
+   * every 5 minutes, so a mailbox with mail already indexed gets it within the daily limit.
+   */
+  async buildSorts(): Promise<MessageSort[]> {
+    const sql = this.ctx.storage.sql;
+    if (!this.sortsReady) {
+      const have = new Set(
+        sql.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('messages_from', 'messages_size')`).toArray().map((r) => r.name),
+      );
+      this.sortsReady = new Set<MessageSort>(['date', ...SORT_INDEXES.filter((x) => have.has(x.name)).map((x) => x.sort)]);
+    }
+    const ready = this.sortsReady;
+    const missing = SORT_INDEXES.filter((x) => !ready.has(x.sort));
+    if (missing.length && Date.now() - this.sortsTried >= 5 * 60_000) {
+      this.sortsTried = Date.now();
+      const quota = accountQuota(this.env);
+      for (const x of missing) {
+        if (await quota.reserve({ do_rows_written: this.indexedTotal() + 100 })) break;
+        const c = sql.exec(x.create);
+        this.count({ do_rows_written: c.rowsWritten, do_rows_read: c.rowsRead });
+        await quota.add({ do_rows_written: c.rowsWritten, do_rows_read: c.rowsRead });
+        console.log(JSON.stringify({ sortIndex: { name: x.name, rowsWritten: c.rowsWritten, rowsRead: c.rowsRead } }));
+        ready.add(x.sort);
+      }
+    }
+    return MESSAGE_SORTS.filter((s) => ready.has(s));
+  }
+
+  /**
+   * One page of messages under the Messages page's filters, keyset-paged over the index of the
+   * order asked for: (ts, id), (from_addr, ts, id) or (size, id). Free text narrows through FTS;
+   * every other filter is checked on rows read in that order, at most SCAN_BUDGET rows a page, so
+   * a rare filter returns a partial page and a cursor that keeps searching instead of reading the
+   * whole mailbox.
+   */
+  async messagePage(filters: MessageFilter[], cursor: string | null, size: number, asc: boolean, sort: MessageSort = 'date'): Promise<MessagePage> {
     const sql = this.ctx.storage.sql;
     let read = 0;
     const exec = <R extends Record<string, SqlStorageValue>>(query: string, ...args: (string | number)[]) => {
@@ -1380,52 +1477,65 @@ export class MailboxDO extends DurableObject<Env> {
       read += c.rowsRead;
       return out;
     };
+    const sorts = await this.buildSorts();
+    const by = sorts.includes(sort) ? sort : 'date';
+    const keys = SORT_KEYS[by];
     const text = filters.filter((f) => f.key === 'text' && !f.not).flatMap((f) => f.values).join(' ');
-    const match = ftsQuery(text);
     const rest = filters.filter((f) => !(f.key === 'text' && !f.not));
     // Label chips name labels as the page shows them (Inbox, Promotions, yours by name).
     const labelIds = rest.some((f) => f.key === 'label')
-      ? exec<{ id: string; name: string; type: string }>(`SELECT id, name, type FROM labels`)
+      ? exec<{ id: string; name: string; type: string; n: number }>(`SELECT id, name, type, n FROM labels`)
       : [];
+    // A rare label (a Labels group) is found through search, not by reading mail in order:
+    // under 5% of the mailbox, reading in order would mostly read other mail.
+    const one = rest.length && rest.every((f) => f.key === 'label' && !f.not && f.values.length === 1) ? rest : [];
+    const rare = one.map((f) => labelIds.find((l) => l.id === f.values[0])).filter((l) => !!l && l.n < this.indexedTotal() * 0.05);
+    const match = [ftsQuery(text), ...rare.map((l) => `labels : "${l!.id.replaceAll('"', '""')}"`)].filter(Boolean).join(' ');
+    // One sender (a Sender group) seeks its index rather than checking rows read in order.
+    const sender = sorts.includes('from') ? rest.find((f) => f.key === 'from' && f.op === 'eq' && !f.not && f.values.length === 1) : undefined;
     const keep = messageTest(rest, labelIds);
-    // Date chips bound the ts range read, so an old period is a seek, not a scan from today.
+    // Date chips bound the ts range read (by date), so an old period is a seek, not a scan from today.
     const spans = filters
       .filter((f) => f.key === 'range' && !f.not)
       .map((f) => f.values.map((v) => v.split('..').map(Number)))
       .map((r) => [Math.min(...r.map((x) => x[0])), Math.max(...r.map((x) => x[1]))]);
-    const lo = spans.length ? Math.max(...spans.map((x) => x[0])) : null;
-    const hi = spans.length ? Math.min(...spans.map((x) => x[1])) : null;
+    // Another order reads its own index and checks dates on the rows: bounding ts there would sort
+    // the whole period again for every chunk.
+    const lo = spans.length && by === 'date' ? Math.max(...spans.map((x) => x[0])) : null;
+    const hi = spans.length && by === 'date' ? Math.min(...spans.map((x) => x[1])) : null;
     const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
       subject, snippet, size, attachments, labels, state`;
     const [cmp, dir] = asc ? ['>', 'ASC'] : ['<', 'DESC'];
-    let at = cursor ? decodeCursor(cursor) : null;
+    let at = cursor ? decodeCursor(cursor, by) : null;
     const rows: MessageRow[] = [];
     let scanned = 0;
     let more = true;
-    let last: { ts: number; id: string } | null = null;
+    let last: SortKey | null = null;
     while (rows.length <= size && scanned < SCAN_BUDGET && more) {
       const chunk = rest.length ? SCAN_CHUNK : size + 1 - rows.length;
       const where = [
-        at ? `(ts, id) ${cmp} (?, ?)` : '1',
+        at ? `(${keys.join(', ')}) ${cmp} (${keys.map(() => '?').join(', ')})` : '1',
         lo !== null && Number.isFinite(lo) ? 'ts >= ?' : '1',
         hi !== null && Number.isFinite(hi) ? 'ts < ?' : '1',
         match ? `id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?)` : '1',
+        sender ? 'lower(from_addr) = ?' : '1',
       ];
       const args: (string | number)[] = [
-        ...(at ? [at.ts, at.id] : []),
+        ...(at ?? []),
         ...(lo !== null && Number.isFinite(lo) ? [lo] : []),
         ...(hi !== null && Number.isFinite(hi) ? [hi] : []),
         ...(match ? [match] : []),
+        ...(sender ? [sender.values[0].toLowerCase()] : []),
       ];
       const got = exec<Record<string, SqlStorageValue>>(
-        `SELECT ${cols} FROM messages WHERE ${where.join(' AND ')} ORDER BY ts ${dir}, id ${dir} LIMIT ?`,
+        `SELECT ${cols} FROM messages WHERE ${where.join(' AND ')} ORDER BY ${keys.map((k) => `${k} ${dir}`).join(', ')} LIMIT ?`,
         ...args,
         chunk,
       ) as unknown as (Omit<MessageRow, 'labels'> & { labels: string })[];
       more = got.length === chunk;
       scanned += got.length;
       for (const g of got) {
-        last = { ts: g.ts, id: g.id };
+        last = sortKey(by, g);
         const m = { ...g, labels: g.labels.split(' ').filter(Boolean) } as MessageRow;
         if (!keep(m)) continue;
         rows.push(m);
@@ -1435,26 +1545,47 @@ export class MailboxDO extends DurableObject<Env> {
     }
     const full = rows.length > size;
     if (full) rows.length = size;
-    const end = full ? rows[rows.length - 1] : more ? last : null;
-    // Totals from the status row: no table read. A category tab alone counts from the labels
-    // rollup (four rows at most); Primary is everything outside the other four.
-    const cat = filters.length === 1 && filters[0].key === 'label' && filters[0].values.every((v) => CATEGORY_LABEL.test(v)) ? filters[0] : null;
-    let total: number | null = filters.length ? null : this.indexedTotal();
-    if (cat) {
-      const n = exec<{ n: number }>(
-        `SELECT n FROM labels WHERE id IN (${cat.values.map(() => '?').join(', ')})`, ...cat.values,
-      ).reduce((t, r) => t + r.n, 0);
-      total = cat.not ? Math.max(0, this.indexedTotal() - n) : n;
-    }
+    const end = full ? sortKey(by, rows[rows.length - 1]) : more ? last : null;
     const unindexed = Object.values(this.status().months).filter((m) => m.inBasin > 0 && m.indexState !== null && m.indexState !== 'done').length;
+    const total = this.filteredTotal(filters, labelIds, exec);
     this.count({ do_rows_read: read });
     return {
       rows,
-      next: end ? encodeCursor(end) : null,
+      next: end ? JSON.stringify(end) : null,
       total,
       partial: !full && !!end,
       unindexed,
+      sorts,
     };
+  }
+
+  /**
+   * Every message the filters match, when a rollup holds it without a scan: no filter (the
+   * status row), or one chip that is a rollup's key: categories, one label (Unread is the
+   * UNREAD label), domains. Anything else is null: the pager shows "50+".
+   */
+  private filteredTotal(
+    filters: MessageFilter[],
+    labelIds: { id: string; name: string; type: string }[],
+    exec: <R extends Record<string, SqlStorageValue>>(query: string, ...args: (string | number)[]) => R[],
+  ): number | null {
+    const all = this.indexedTotal();
+    if (!filters.length) return all;
+    if (filters.length !== 1 || filters[0].op) return null;
+    const f = filters[0];
+    const sum = (table: string, key: string, values: string[]) =>
+      exec<{ n: number }>(`SELECT n FROM ${table} WHERE ${key} IN (${values.map(() => '?').join(', ')})`, ...values).reduce((t, r) => t + r.n, 0);
+    let n: number | null = null;
+    // Categories are exclusive, so their counts add; Primary is everything outside the other four.
+    if (f.key === 'label' && f.values.every((v) => CATEGORY_LABEL.test(v))) n = sum('labels', 'id', f.values);
+    else if (f.key === 'label' && f.values.length === 1) {
+      const byName = new Map(labelIds.map((l) => [shownLabel(l), l.id]));
+      const v = f.values[0];
+      const id = labelIds.some((l) => l.id === v) ? v : byName.get(v.toLowerCase());
+      if (id) n = sum('labels', 'id', [id]);
+    } else if (f.key === 'domain') n = sum('domains', 'domain', [...new Set(f.values.map((v) => v.toLowerCase()))]);
+    if (n === null) return null;
+    return f.not ? Math.max(0, all - n) : Math.min(n, all);
   }
 
   /** The schedules with the person's changes applied, when Gmail sync next runs, and how it last went. */
@@ -1556,11 +1687,14 @@ export class MailboxDO extends DurableObject<Env> {
     if (retry) await this.ctx.storage.setAlarm(Date.now() + 30_000);
     const user = this.userId();
     if (!user) return;
-    // Unknown after a restart: not due (the restart's watchdog alarm isn't the schedule's); the next slot runs.
-    const due = this.syncDue != null && Date.now() >= this.syncDue - 1000;
+    // Due when a slot has passed since the last run. Read from the saved run, not the alarm kept
+    // in memory: a deploy restarts this DO, and a slot due across a restart was skipped.
+    const sync = this.schedule('gmail-sync')!;
+    const slot = sync.last ? nextRun(sync, new Date(sync.last.at)) : this.syncDue != null ? new Date(this.syncDue) : null;
+    const due = !!slot && Date.now() >= slot.getTime() - 1000;
     this.watching = await this.recover(user);
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
-    if (due && ids.length && this.schedule('gmail-sync')!.on) {
+    if (due && ids.length && sync.on) {
       let run: ScheduleRun;
       if (this.isPaused()) run = { at: new Date().toISOString(), ok: true, detail: 'Backfill paused' };
       else if (!this.env.BASIN_TOKEN) run = { at: new Date().toISOString(), ok: false, detail: 'Waiting for Basin write access' };
@@ -1991,11 +2125,33 @@ function censusView(c: CensusState | null): AccountCoverage['census'] {
 const SCAN_BUDGET = 2000;
 /** Gmail's four category labels; Primary is a message with none of them. */
 const CATEGORY_LABEL = /^CATEGORY_(PROMOTIONS|SOCIAL|UPDATES|FORUMS)$/;
+const CATEGORY_IDS = ['CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS'];
+/** CATEGORY_SOCIAL as the page names it: Social. */
+const categoryName = (id: string) => id.charAt(9) + id.slice(10).toLowerCase();
+/** Senders or domains a page of Messages groups lists. */
+const GROUPS_PAGE = 50;
 const SCAN_CHUNK = 250;
-const encodeCursor = (k: { ts: number; id: string }) => `${k.ts}.${k.id}`;
-function decodeCursor(c: string): { ts: number; id: string } | null {
-  const m = /^(-?\d{1,15})\.([0-9a-f]{1,32})$/.exec(c);
-  return m ? { ts: Number(m[1]), id: m[2] } : null;
+/** Each order's keyset columns, matching its index (a WITHOUT ROWID index ends in the key, id). Senders sort as the rollup keys them: lower case. */
+const SORT_KEYS: Record<MessageSort, readonly string[]> = { date: ['ts', 'id'], from: ['lower(from_addr)', 'ts', 'id'], size: ['size', 'id'] };
+/** The sort indexes built after the fact (buildSorts), one DO write per message indexed each. */
+const SORT_INDEXES: readonly { sort: MessageSort; name: string; create: string }[] = [
+  { sort: 'from', name: 'messages_from', create: `CREATE INDEX IF NOT EXISTS messages_from ON messages (lower(from_addr), ts)` },
+  { sort: 'size', name: 'messages_size', create: `CREATE INDEX IF NOT EXISTS messages_size ON messages (size)` },
+];
+type SortKey = (string | number)[];
+const sortKey = (by: MessageSort, m: { ts: number; id: string; fromAddr: string; size: number }): SortKey =>
+  by === 'from' ? [m.fromAddr.toLowerCase(), m.ts, m.id] : by === 'size' ? [m.size, m.id] : [m.ts, m.id];
+/** A cursor is the last row's keys as JSON; one of another order or shape is ignored (page one). */
+function decodeCursor(c: string, by: MessageSort): SortKey | null {
+  if (c.length > 600) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(c);
+  } catch {
+    return null;
+  }
+  const like = sortKey(by, { ts: 0, id: '', fromAddr: '', size: 0 });
+  return Array.isArray(v) && v.length === like.length && v.every((x, i) => typeof x === typeof like[i]) ? (v as SortKey) : null;
 }
 
 /** Gmail's built-in label ids as the pages name them: INBOX is Inbox, CATEGORY_SOCIAL is Social. */
@@ -2018,7 +2174,8 @@ export function messageTest(filters: MessageFilter[], labels: { id: string; name
     const one = (m: MessageRow): boolean => {
       switch (f.key) {
         case 'from':
-          return has(m.fromAddr) || has(m.fromName);
+          // eq: the one address (a Sender group), any case; else a part of the address or name.
+          return f.op === 'eq' ? vs.includes(m.fromAddr.toLowerCase()) : has(m.fromAddr) || has(m.fromName);
         case 'domain':
           return vs.includes((m.fromAddr.split('@')[1] ?? '').toLowerCase());
         case 'subject':

@@ -88,7 +88,7 @@ function LimitsCard({ days }: { days: UsageDay[] }) {
             quota && !quota.planReadAt
               ? 'taken as Free until Cloudflare billing can be read'
               : plan === 'paid'
-                ? 'use past the allowance is billed'
+                ? `use past the allowance is billed${quota?.paidPeriodEnd ? `; period ends ${new Date(quota.paidPeriodEnd).toLocaleString()}` : ''}`
                 : 'daily limits refuse work past them'
           }
         />

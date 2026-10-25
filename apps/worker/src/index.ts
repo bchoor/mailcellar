@@ -1,4 +1,4 @@
-import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, messageFilters, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
+import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, MESSAGE_GROUPS, MESSAGE_SORTS, messageFilters, type MessageGroupBy, type MessageSort, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
@@ -170,6 +170,16 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     // A message never changes once copied: the app keeps it for the day.
     return detail ? Response.json(detail, { headers: { 'cache-control': 'private, max-age=86400' } }) : Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
   }
+  // One page of an account's Messages groups (Group by), from the rollups.
+  const grouped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/groups$/);
+  if (grouped && request.method === 'GET') {
+    if (!(await mailbox.accountToken(grouped[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    const by = url.searchParams.get('by') ?? '';
+    const filters = messageFilters(url.searchParams.get('f'));
+    if (!filters || !(MESSAGE_GROUPS as readonly string[]).includes(by)) return Response.json({ error: 'bad_group' }, { status: 400, headers: noStore });
+    const body = await accountMailbox(env, who.user, grouped[1]).messageGroups(by as MessageGroupBy, filters.length > 0, url.searchParams.get('after'));
+    return Response.json(body, { headers: noStore });
+  }
   // One page of an account's messages under the Messages page's filters.
   const paged = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages$/);
   if (paged && request.method === 'GET') {
@@ -182,6 +192,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
       url.searchParams.get('cursor'),
       (MESSAGE_PAGE_SIZES as readonly number[]).includes(size) ? size : 50,
       url.searchParams.get('asc') === '1',
+      (MESSAGE_SORTS as readonly string[]).includes(url.searchParams.get('sort') ?? '') ? (url.searchParams.get('sort') as MessageSort) : 'date',
     );
     return Response.json(page, { headers: noStore });
   }

@@ -1,5 +1,42 @@
 [
   {
+    "tag": "v0.0.9",
+    "sha": "4ea6edfb5256768e79f4465d0d593f28ae531701",
+    "published_at": "2026-10-25T02:00:28Z",
+    "takeaways": [
+      {
+        "text": "**One Mailboxes card, opening by year**: On the Backfill page, the new Mailboxes card replaces the mailbox list and the by-month map, so you can see each mailbox's status and last sync in one place and click a block to show that mailbox in the cards below.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Faster message opening**: On the Messages page, opening a message no longer re-reads the search catalog each time, so messages from months you've already viewed should open much faster.",
+        "types": [
+          "performance"
+        ]
+      },
+      {
+        "text": "**Counts on category tabs**: On the Messages page, each category tab (Primary through Forums) now shows its message count, and the pager shows the real total instead of \"50+\".",
+        "types": [
+          "improvement"
+        ]
+      },
+      {
+        "text": "**Gmail, copied and searchable counts agree**: On the Backfill page, the Gmail, copied and searchable counts should now match, because live sync recounts the month new mail lands in and copied is capped on the total.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Bigger backfill runs on Workers Paid**: This affects how fast a backfill copies and indexes mail, since each run now makes more Gmail and storage calls and saves larger batches, with a daily write guard in place of the old hard stop.",
+        "types": [
+          "performance"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.8",
     "sha": "2a3ab23fef5f7da776dddc80784d7c4876b97ac5",
     "published_at": "2026-10-25T01:02:08Z",
