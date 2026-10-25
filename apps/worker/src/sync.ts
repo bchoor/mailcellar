@@ -58,8 +58,8 @@ export const BASIN_COMMIT_KEYS = 2;
  * index build waits for them (INDEX_COST, runIndex).
  */
 export const RUN_COST: QuotaUse = { workers_requests: 10, r2_class_a: RUN_SIZE + 30, r2_class_b: 50 };
-/** DO rows indexing a message takes (measured ~3.0 rows a message after the slim index, #49), with room to spare. */
-export const INDEX_ROWS = 4;
+/** DO rows indexing a message takes (measured ~3.0 rows a message after the slim index, #49, and +2 for the Sender and Size sort indexes), with room to spare. */
+export const INDEX_ROWS = 6;
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
 /** The DO holding one Gmail account's index and sync state. */
@@ -452,6 +452,8 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   const mailbox = accountMailbox(env, user, account);
   // Indexing from now, not from the first chunk: reading the month back from Basin takes a while.
   await mailbox.indexStarted(month);
+  // The Sender and Size sort indexes first, so each message is indexed once with all of them.
+  await mailbox.buildSorts();
   const target = await syncDeps.basin(env, user);
   if (!target) return { indexed: 0, next: from, resumesAt: new Date(Date.now() + 5 * 60_000).toISOString() };
   // Gmail's month decides what the month holds: listed on the first run, kept in R2 for the rest.
