@@ -2,7 +2,7 @@ import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, messageFilters, monthNow, type Archi
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
-import { attachment, openMessage } from './message';
+import { attachment, openMessage, warmMonth } from './message';
 import { accountQuota } from './quota';
 import { accountMailbox } from './sync';
 
@@ -153,6 +153,13 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
   }
   // One message, opened from the Messages page: read from its raw file, not from Gmail. The month
   // (YYYY-MM, UTC) says which of Basin's partitions holds its row.
+  // Where a month's messages are in the raw files, found before one is opened, so the open is quick.
+  const warm = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/locations$/);
+  if (warm && request.method === 'GET') {
+    const month = url.searchParams.get('month') ?? '';
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return Response.json({ error: 'bad_month' }, { status: 400, headers: noStore });
+    return Response.json({ messages: await warmMonth(env, who.user, warm[1], month) }, { headers: noStore });
+  }
   const opened = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/([0-9a-f]{1,16})(?:\/attachments\/(\d{1,4}))?$/);
   if (opened && request.method === 'GET') {
     const month = url.searchParams.get('month') ?? '';

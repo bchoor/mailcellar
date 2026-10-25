@@ -1,5 +1,6 @@
 // One message opened from the Messages page. Its Basin row says which raw file holds it and
-// at which bytes; only those bytes are read, then parsed here. No Gmail call and no Durable
+// at which bytes (kept per month in a raw file of its own, so later opens skip Basin); only
+// those bytes are read, then parsed here. No Gmail call and no Durable
 // Object read or write: the raw files and Basin are under the person's own prefix.
 import { basinNamespace, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
 import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
@@ -8,69 +9,111 @@ import PostalMime, { type Address, type Attachment, type Email } from 'postal-mi
 import { MESSAGES_TABLE, monthFiles, r2Resolver, type TableMetadata } from './basin';
 import type { Env } from './env';
 
-/** Where a message's bytes are: the whole of `key`, or `len` bytes from `offset` of a pack. */
-interface RawAt {
-  key: string;
-  offset: number | null;
-  len: number | null;
-}
-
 /** Inline images past this many bytes, all told, stay as cid: links rather than data URLs. */
 const INLINE_MAX = 4 * 1024 * 1024;
 
-// Opened messages are read again for their attachments: keep where each one is for this isolate.
-const located = new Map<string, RawAt>();
+/**
+ * Where every message of one account's month is in the raw files: the pack files once each, and
+ * per message ID its pack and, inside it, offset and length (-1 for a file of its own).
+ */
+interface Locations {
+  packs: string[];
+  at: Record<string, [number, number, number]>;
+}
 
-/** The message's place in the raw files, from its Basin row in that month; null when Basin has none. */
-async function fromBasin(env: Env, user: UserId, account: string, id: string, month: string): Promise<RawAt | null> {
-  if (!env.BASIN_TOKEN) return null;
-  const catalog = await restCatalogConnect({
+// Months already read, for this isolate: an open after the first reads no file to find its message.
+const months = new Map<string, Locations>();
+
+const basinCatalog = (env: Env) =>
+  restCatalogConnect({
     url: env.BASIN_CATALOG_URI,
     warehouse: env.BASIN_WAREHOUSE,
     requestInit: { headers: { authorization: `Bearer ${env.BASIN_TOKEN}` } },
   });
+
+/** Every message of the month from its Basin rows; null when Basin has no table yet. */
+async function fromBasin(env: Env, user: UserId, account: string, month: string): Promise<Locations | null> {
+  if (!env.BASIN_TOKEN) return null;
   let metadata;
   try {
-    ({ metadata } = await restCatalogLoadTable(catalog, { namespace: basinNamespace(user), table: MESSAGES_TABLE }));
+    ({ metadata } = await restCatalogLoadTable(await basinCatalog(env), { namespace: basinNamespace(user), table: MESSAGES_TABLE }));
   } catch (e) {
     if (/404|not ?found|NoSuch/i.test(String(e))) return null;
     throw e;
   }
   const resolver = r2Resolver(env.ARCHIVE, env.BASIN_BUCKET);
   const files = await monthFiles(metadata as TableMetadata, resolver, month);
-  // Each file's row groups whose id range can't hold the message are skipped on their statistics.
-  const hits = await Promise.all(
+  const loc: Locations = { packs: [], at: {} };
+  const pack = new Map<string, number>();
+  await Promise.all(
     files.map(async (f) => {
       const file = await resolver.reader(f.path, f.size);
-      const metadata = await parquetMetadataAsync(file);
+      const meta = await parquetMetadataAsync(file);
       // Files written before raw_offset and raw_len were added hold whole-file messages only.
-      const has = new Set(metadata.schema.map((c) => c.name));
+      const has = new Set(meta.schema.map((c) => c.name));
       const rows = (await parquetReadObjects({
         file,
-        metadata,
+        metadata: meta,
         columns: ['account', 'id', 'raw_key', 'raw_offset', 'raw_len'].filter((c) => has.has(c)),
-        filter: { id: { $eq: id } },
-      })) as { account: string; raw_key: string; raw_offset: bigint | number | null; raw_len: bigint | number | null }[];
-      return rows.find((r) => r.account === account && r.raw_key) ?? null;
+        filter: { account: { $eq: account } },
+      })) as { id: string; raw_key: string; raw_offset?: bigint | number | null; raw_len?: bigint | number | null }[];
+      for (const r of rows) {
+        if (!r.raw_key) continue;
+        let p = pack.get(r.raw_key);
+        if (p === undefined) pack.set(r.raw_key, (p = loc.packs.push(r.raw_key) - 1));
+        loc.at[r.id] = [p, r.raw_offset == null ? -1 : Number(r.raw_offset), r.raw_len == null ? -1 : Number(r.raw_len)];
+      }
     }),
   );
-  const row = hits.find((r) => r !== null);
-  if (!row) return null;
-  return { key: row.raw_key, offset: row.raw_offset == null ? null : Number(row.raw_offset), len: row.raw_len == null ? null : Number(row.raw_len) };
+  return loc;
+}
+
+/**
+ * The month's locations: this isolate's copy, else its raw file, else read from Basin once and
+ * saved as a raw file (one object write a month; no Durable Object read or write). `fresh` reads
+ * Basin again, for a message copied after the file was saved.
+ */
+async function monthLocations(env: Env, user: UserId, account: string, month: string, fresh = false): Promise<Locations | null> {
+  const name = `${user}/${account}/${month}`;
+  const key = r2Keys.locations(user, account, month);
+  let loc = fresh ? undefined : months.get(name);
+  if (!loc && !fresh) {
+    const obj = await env.ARCHIVE.get(key);
+    if (obj) loc = (await obj.json()) as Locations;
+  }
+  if (!loc) {
+    const built = await fromBasin(env, user, account, month);
+    if (!built) return null;
+    loc = built;
+    if (loc.packs.length) await env.ARCHIVE.put(key, JSON.stringify(loc), { httpMetadata: { contentType: 'application/json' } });
+  }
+  months.set(name, loc);
+  if (months.size > 24) months.delete(months.keys().next().value!);
+  return loc;
+}
+
+/** Warm a month before any of its messages is opened (the Messages page asks for the months it shows). */
+export async function warmMonth(env: Env, user: UserId, account: string, month: string): Promise<number> {
+  return Object.keys((await monthLocations(env, user, account, month))?.at ?? {}).length;
+}
+
+/** Where the message's bytes are: whole of `key`, or `len` bytes at `offset`. */
+async function locate(env: Env, user: UserId, account: string, id: string, month: string): Promise<{ key: string; offset: number; len: number }> {
+  let loc = await monthLocations(env, user, account, month);
+  if (loc && !loc.at[id]) loc = await monthLocations(env, user, account, month, true);
+  const at = loc?.at[id];
+  // Mail the live sync copied before Basin rows carried an offset sits in a file of its own.
+  if (!loc || !at) return { key: r2Keys.raw(user, account, id), offset: -1, len: -1 };
+  return { key: loc.packs[at[0]], offset: at[1], len: at[2] };
 }
 
 /** The message's own bytes, or null when no raw file holds it. */
 async function rawBytes(env: Env, user: UserId, account: string, id: string, month: string): Promise<Uint8Array | null> {
-  const cacheKey = `${user}/${account}/${id}`;
-  let at = located.get(cacheKey) ?? (await fromBasin(env, user, account, id, month));
-  // Mail the live sync copied before Basin rows carried an offset sits in a file of its own.
-  at ??= { key: r2Keys.raw(user, account, id), offset: null, len: null };
+  const at = await locate(env, user, account, id, month);
   // Basin's own rows point inside this person's prefix; anything else is refused.
   if (!at.key.startsWith(r2Keys.prefix(user))) return null;
-  const obj = await env.ARCHIVE.get(at.key, at.offset !== null && at.len !== null ? { range: { offset: at.offset, length: at.len } } : undefined);
+  const obj = await env.ARCHIVE.get(at.key, at.offset >= 0 && at.len >= 0 ? { range: { offset: at.offset, length: at.len } } : undefined);
   if (!obj) return null;
-  located.set(cacheKey, at);
-  if (located.size > 500) located.delete(located.keys().next().value!);
   if (obj.httpMetadata?.contentEncoding === 'gzip') return new Uint8Array(await new Response(obj.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
   return new Uint8Array(await obj.arrayBuffer());
 }
