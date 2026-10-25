@@ -272,6 +272,8 @@ export interface SpendOverview {
   stop: number;
   spent: number;
   use: SpendUse;
+  /** Of `spent`, what Paid bills past its included Workers requests and DO and D1 rows. */
+  overage?: number;
   /** When Cloudflare's own figures were last read; null before (then only MailCellar's count). */
   readAt: string | null;
 }
