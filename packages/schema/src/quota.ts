@@ -68,6 +68,20 @@ export const QUOTA_STOPS: Partial<Record<QuotaMetric, number>> = { do_rows_writt
 /** The share of a meter's limit where backfills pause. */
 export const quotaStop = (metric: QuotaMetric) => QUOTA_STOPS[metric] ?? QUOTA_STOP;
 
+/**
+ * The Workers plan the run budgets are sized for (CPU, outside requests, batch sizes). The
+ * account went to Workers Paid on 2026-10-25. Going back to Free: set 'free' and remove
+ * `limits` from wrangler.jsonc, or runs die at Free's 50 outside requests.
+ */
+export const WORKERS_PLAN: QuotaPlan = 'paid';
+export const PAID = WORKERS_PLAN === 'paid';
+
+/**
+ * Paid bills DO writes past 50M a month instead of stopping, so indexing keeps under this a day
+ * (at most 31M a month; the backfill needs about 600k), then waits for 00:05 UTC.
+ */
+export const PAID_DAILY_GUARD: Partial<Record<QuotaMetric, number>> = { do_rows_written: 1_000_000 };
+
 /** R2 operations by Cloudflare's class (deletes are free). */
 export const R2_CLASS_A = new Set([
   'PutObject', 'CopyObject', 'CreateMultipartUpload', 'UploadPart', 'UploadPartCopy', 'CompleteMultipartUpload',

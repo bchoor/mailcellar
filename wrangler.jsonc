@@ -42,6 +42,9 @@
   "workflows": [{ "name": "mailcellar-sync", "binding": "SYNC", "class_name": "SyncWorkflow" }],
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
   "observability": { "enabled": true },
+  // Workers Paid (2026-10-25): runs estimate their CPU at a third of 30 s, and estimates have run
+  // low before, so the cap is 2 minutes. Remove if the account goes back to Free (WORKERS_PLAN).
+  "limits": { "cpu_ms": 120000 },
   // hysnappy compiles WebAssembly at run time, which Workers forbid; see the shim.
   "alias": { "hysnappy": "./apps/worker/src/shims/hysnappy.ts" },
   // wrangler dev keeps localhost as the request's origin (not the route's host), so the

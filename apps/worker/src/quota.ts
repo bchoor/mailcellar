@@ -3,7 +3,7 @@
 // batch used after. It reads Cloudflare's analytics for the whole account (every project on
 // it) at most every 5 minutes, and adds what MailCellar has counted since.
 import { DurableObject } from 'cloudflare:workers';
-import { SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, quotaStop, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, type LevelMetric } from '@mailcellar/schema';
+import { PAID_DAILY_GUARD, SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, quotaStop, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, type LevelMetric } from '@mailcellar/schema';
 import type { Env } from './env';
 
 export type QuotaUse = Partial<Record<QuotaMetric, number>>;
@@ -418,6 +418,15 @@ export class QuotaDO extends DurableObject<Env> {
   }
 
   /** MailCellar's own count this period. It is kept by UTC day, so a plan change keeps it. */
+  /** MailCellar's own count of a meter today (UTC). */
+  private today(metric: QuotaMetric, now: Date): number {
+    return (
+      this.ctx.storage.sql
+        .exec<{ value: number }>(`SELECT value FROM usage WHERE period = ? AND metric = ?`, now.toISOString().slice(0, 10), metric)
+        .toArray()[0]?.value ?? 0
+    );
+  }
+
   private ours(metric: QuotaMetric, now: Date): number {
     return (
       this.ctx.storage.sql
@@ -471,6 +480,13 @@ export class QuotaDO extends DurableObject<Env> {
   async reserve(cost: QuotaUse): Promise<{ metric: QuotaMetric; label: string; resumesAt: string } | null> {
     const now = new Date();
     await this.refresh(now);
+    // On Paid nothing is hard: a daily guard per meter keeps a runaway well under the month's allowance.
+    if (this.plan === 'paid')
+      for (const m of metrics) {
+        const guard = PAID_DAILY_GUARD[m];
+        if (guard && cost[m] && this.today(m, now) + cost[m] > guard)
+          return { metric: m, label: `${this.limits[m].label} (daily guard)`, resumesAt: quotaReset('day', now).toISOString() };
+      }
     // The test switch's DO-write stop holds indexing until its own near reset.
     const test = this.testLimit(now);
     if (test?.doStop != null && cost.do_rows_written && now.getTime() < Date.parse(test.resetAt) && this.used('do_rows_written', now).used + cost.do_rows_written > test.doStop)
