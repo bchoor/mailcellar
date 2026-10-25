@@ -807,6 +807,16 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
+   * An index run for `month` has started: the page shows it indexing while the run reads the
+   * month back from Basin, before its first chunk lands. Held in memory only, so it writes no
+   * row; the first chunk saves it with the status.
+   */
+  async indexStarted(month: string): Promise<void> {
+    const book = this.status();
+    if (!book.indexing.includes(month)) book.indexing.push(month);
+  }
+
+  /**
    * Indexing `month` waits for the account's daily DO write limit (`label`) until `resumesAt`.
    * Copying goes on; the page shows indexing as waiting. The next index chunk clears it.
    */

@@ -434,6 +434,8 @@ export const INDEX_CHUNKS_A_RUN = 4;
  */
 export async function runIndex(env: Env, user: UserId, account: string, month: string, from = 0): Promise<{ indexed: number; next: number | null; resumesAt: string | null }> {
   const mailbox = accountMailbox(env, user, account);
+  // Indexing from now, not from the first chunk: reading the month back from Basin takes a while.
+  await mailbox.indexStarted(month);
   const target = await syncDeps.basin(env, user);
   if (!target) return { indexed: 0, next: from, resumesAt: new Date(Date.now() + 5 * 60_000).toISOString() };
   const rows = (await target.monthRows(account, month)).sort((a, b) => a.id.localeCompare(b.id));
