@@ -235,7 +235,8 @@ export class MailboxDO extends DurableObject<Env> {
         // Months copied before Basin came first went to Basin and the index together.
         ...(basin
           ? {
-              copied: Math.max(indexed, basin.copied),
+              // Once indexed, Basin's count against Gmail's list of the month; the index counts by message date.
+              copied: basin.indexed_at !== null ? basin.copied : Math.max(indexed, basin.copied),
               inBasin: basin.copied,
               landed: basin.landed_at !== null,
               indexState: basin.landed_at === null ? null : basin.indexed_at !== null ? 'done' : 'queued',
