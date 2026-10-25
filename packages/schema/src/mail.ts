@@ -131,7 +131,7 @@ export interface MessageFilter {
 }
 export const MESSAGE_PAGE_SIZES = [25, 50, 100] as const;
 /** What the server can order messages by: Date always; Sender and Size once their indexes are built. */
-export const MESSAGE_SORTS = ['date', 'from', 'size'] as const;
+export const MESSAGE_SORTS = ['date', 'from', 'size', 'attachments', 'category'] as const;
 export type MessageSort = (typeof MESSAGE_SORTS)[number];
 /** What the server groups messages by, each from a rollup: Sender, Domain, Category, Labels, Read. */
 export const MESSAGE_GROUPS = ['from', 'domain', 'category', 'label', 'is'] as const;

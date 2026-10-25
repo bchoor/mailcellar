@@ -414,7 +414,7 @@ export function OverviewPage() {
 }
 
 /** The Messages column each server order sorts. */
-const SORT_COLUMN: Record<MessageSort, string> = { date: 'date', from: 'from', size: 'size_kb' };
+const SORT_COLUMN: Record<MessageSort, string> = { date: 'date', from: 'from', size: 'size_kb', attachments: 'attachments', category: 'category' };
 
 /** The Messages page's chips as the server's filters; a chip it can't apply is left out. */
 function toFilters(tokens: FilterToken[], list: Period[], tz: string): MessageFilter[] {
