@@ -574,7 +574,7 @@ export function MessagesPage() {
         onSort: (s) => setAsc(s?.key === 'date' && !s.desc),
       }}
     />
-    {id && <MessageDrawer account={id} row={opened} chips={opened?.chips ?? []} onClose={() => setOpened(null)} />}
+    {id && <MessageDrawer account={id} row={opened} chips={opened?.chips ?? []} rows={data?.rows ?? []} onClose={() => setOpened(null)} />}
     </>
   );
 }
