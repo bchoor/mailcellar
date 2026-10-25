@@ -406,21 +406,23 @@ export function MessagesPage() {
   // Page n starts after cursors[n]; each page read adds the next one's.
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [page, setPage] = useState(0);
+  // The server sorts by date only (its index is on time): newest first unless the header says oldest.
+  const [asc, setAsc] = useState(false);
   const list = useMemo(() => periods(Date.now(), timeZone), [timeZone]);
   const filters = useMemo(() => toFilters(tokens, list, timeZone), [tokens, list, timeZone]);
   const key = JSON.stringify(filters);
   // A new filter or page size starts again from the newest.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: resets when the filter or size changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resets when the filter, size or sort changes.
   useEffect(() => {
     setCursors([null]);
     setPage(0);
-  }, [key, size, id]);
+  }, [key, size, id, asc]);
   const cursor = cursors[page] ?? null;
   const messages = useQuery({
-    queryKey: ['messages', id, key, size, cursor],
+    queryKey: ['messages', id, key, size, cursor, asc],
     queryFn: async (): Promise<MessagePage | null> => {
       if (!id) return null;
-      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}) });
+      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}), ...(asc ? { asc: '1' } : {}) });
       const res = await fetch(`/api/accounts/${id}/messages?${qs}`);
       if (!res.ok) throw new Error(`Couldn't load messages (${res.status})`);
       return res.json();
@@ -484,6 +486,8 @@ export function MessagesPage() {
         onPage: (p) => setPage(Math.max(0, Math.min(p, cursors.length - 1))),
         onSize: setSize,
         sizes: MESSAGE_PAGE_SIZES,
+        sorts: ['date'],
+        onSort: (s) => setAsc(s?.key === 'date' && !s.desc),
       }}
     />
   );
