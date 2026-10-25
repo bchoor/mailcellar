@@ -354,6 +354,9 @@ function RollupWidget<T>(p: { title: string; domain: ViewDomain<T>; rows: T[]; l
   );
 }
 
+/** Whole months from one YYYY-MM to another. */
+const monthsBetween = (a: string, b: string) => (+b.slice(0, 4) - +a.slice(0, 4)) * 12 + (+b.slice(5, 7) - +a.slice(5, 7));
+
 export function OverviewPage() {
   const months = useArchive('months');
   const labels = useArchive('labels');
@@ -375,6 +378,12 @@ export function OverviewPage() {
   const size = rows.reduce((a, r) => a + r.bytes, 0);
   const years = new Set(rows.map((r) => r.month.slice(0, 4)));
   const first = rows.reduce((a, r) => (r.month < a ? r.month : a), rows[0]?.month ?? '');
+  const last = rows.reduce((a, r) => (r.month > a ? r.month : a), first);
+  // Two years or less of mail reads better a month a bar than as one or two year bars.
+  const short = first !== '' && monthsBetween(first, last) < 24;
+  const shown = short
+    ? { ...config, cards: config.cards?.map((c) => (c.id === 'per_year' ? { ...c, title: 'Messages per month', bucket: 'month' as const } : c)) }
+    : config;
   const userLabels = (labels.data ?? []).filter((l) => l.type === 'user');
   const crumbs = useMailboxCrumbs('Overview');
   // An empty archive has no totals or charts worth drawing: say so once.
@@ -383,7 +392,7 @@ export function OverviewPage() {
     <LumenLayout
       crumbs={crumbs}
       domain={MONTHS}
-      config={config}
+      config={shown}
       rows={rows}
       load={load}
       onConfigChange={setConfig}
