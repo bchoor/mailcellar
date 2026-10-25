@@ -35,3 +35,7 @@
 
 /* A mailbox section is headed by its address: keep it as typed, not in capitals. */
 .mailbox-nav [data-sidebar="group-label"] { text-transform: none; letter-spacing: normal; }
+
+/* Radix focuses a tab from its own mousedown handler, which Chrome counts as :focus-visible, so a
+ * clicked tab drew the keyboard ring over its underline. The ring shows only after a key press. */
+html[data-pointer] [data-slot="tabs-trigger"]:focus-visible { box-shadow: none; }
