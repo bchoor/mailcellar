@@ -153,6 +153,12 @@ export const MIGRATIONS: readonly string[] = [
   // link. `archive` holds the file and how far its upload and import are (JSON); no refresh token.
   `ALTER TABLE accounts ADD COLUMN kind TEXT NOT NULL DEFAULT 'gmail';
    ALTER TABLE accounts ADD COLUMN archive TEXT;`,
+  // 15: the mailbox is the record (Bikram, 2026-10-25): each message keeps the raw file (R2
+  // object) that holds it, and its offset and length there (null for a file of one). Copying
+  // writes them; mail copied before is filled from Basin once (locate runs).
+  `ALTER TABLE messages ADD COLUMN raw_key TEXT;
+   ALTER TABLE messages ADD COLUMN raw_offset INTEGER;
+   ALTER TABLE messages ADD COLUMN raw_len INTEGER;`,
 ];
 
 /** Gmail labels whose mail MailCellar doesn't keep: the index never takes it in. */
@@ -801,6 +807,96 @@ export class MailboxDO extends DurableObject<Env> {
     return ids.filter((id) => !known.has(id));
   }
 
+  /** Where a message's raw bytes are: its raw file, and offset and length there (-1 for a file of one). One keyed read. */
+  async location(id: string): Promise<{ key: string; offset: number; len: number } | null> {
+    const cursor = this.ctx.storage.sql.exec<{ raw_key: string | null; raw_offset: number | null; raw_len: number | null }>(
+      `SELECT raw_key, raw_offset, raw_len FROM messages WHERE id = ?`, id,
+    );
+    const r = cursor.toArray()[0];
+    this.count({ do_rows_read: cursor.rowsRead });
+    return r?.raw_key ? { key: r.raw_key, offset: r.raw_offset ?? -1, len: r.raw_len ?? -1 } : null;
+  }
+
+  /**
+   * How many of a month's messages the mailbox has: of `ids` (Gmail's list of the month) when
+   * given, with the ones it lacks; else the month's own count, by message date.
+   */
+  async monthHas(month: string, ids: string[] | null): Promise<{ have: number; missing: string[] }> {
+    const sql = this.ctx.storage.sql;
+    if (!ids) {
+      const cursor = sql.exec<{ n: number }>(`SELECT n FROM months WHERE month = ?`, month);
+      const n = cursor.toArray()[0]?.n ?? 0;
+      this.count({ do_rows_read: cursor.rowsRead });
+      return { have: n, missing: [] };
+    }
+    const known = new Set(await this.knownIds(ids));
+    return { have: known.size, missing: ids.filter((id) => !known.has(id)) };
+  }
+
+  private async knownIds(ids: string[]): Promise<string[]> {
+    const known: string[] = [];
+    for (let i = 0; i < ids.length; i += 5000) {
+      const cursor = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM messages WHERE id IN (SELECT value FROM json_each(?))`, JSON.stringify(ids.slice(i, i + 5000)));
+      for (const r of cursor) known.push(r.id);
+      this.count({ do_rows_read: cursor.rowsRead });
+    }
+    return known;
+  }
+
+  /**
+   * Fill in where copied messages are, from Basin's rows (the locate runs, 2026-10-25). Messages
+   * that already have a location are left as they are. Returns the IDs the mailbox has no row for.
+   */
+  async setLocations(rows: { id: string; key: string; offset: number | null; len: number | null }[]): Promise<{ set: number; absent: string[] }> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      let set = 0;
+      let written = 0;
+      let read = 0;
+      const absent: string[] = [];
+      for (const r of rows) {
+        const cur = sql.exec(`UPDATE messages SET raw_key = ?, raw_offset = ?, raw_len = ? WHERE id = ? AND raw_key IS NULL`, r.key, r.offset, r.len, r.id);
+        written += cur.rowsWritten;
+        read += cur.rowsRead;
+        if (cur.rowsWritten) set++;
+        else {
+          const has = sql.exec(`SELECT 1 FROM messages WHERE id = ?`, r.id);
+          if (!has.toArray().length) absent.push(r.id);
+          read += has.rowsRead;
+        }
+      }
+      this.count({ do_rows_written: written, do_rows_read: read });
+      return { set, absent };
+    });
+  }
+
+  /** Messages with no raw location yet, by month, and a few of their IDs: the locate check. Reads every message once. */
+  async unlocated(): Promise<{ total: number; unlocated: number; months: Record<string, number>; sample: string[] }> {
+    const cursor = this.ctx.storage.sql.exec<{ id: string; ts: number; raw_key: string | null }>(`SELECT id, ts, raw_key FROM messages`);
+    let total = 0;
+    const months: Record<string, number> = {};
+    const sample: string[] = [];
+    for (const r of cursor) {
+      total++;
+      if (r.raw_key) continue;
+      const m = monthOf(r.ts);
+      months[m] = (months[m] ?? 0) + 1;
+      if (sample.length < 20) sample.push(r.id);
+    }
+    this.count({ do_rows_read: cursor.rowsRead });
+    return { total, unlocated: Object.values(months).reduce((t, n) => t + n, 0), months, sample };
+  }
+
+  /** One message's location per month, for the locate check to read back from the raw files. */
+  async locatedSample(): Promise<{ month: string; id: string; key: string; offset: number; len: number }[]> {
+    const cursor = this.ctx.storage.sql.exec<{ month: string; id: string; raw_key: string; raw_offset: number | null; raw_len: number | null }>(
+      `SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS month, id, raw_key, raw_offset, raw_len FROM messages WHERE raw_key IS NOT NULL GROUP BY month`,
+    );
+    const out = cursor.toArray().map((r) => ({ month: r.month, id: r.id, key: r.raw_key, offset: r.raw_offset ?? -1, len: r.raw_len ?? -1 }));
+    this.count({ do_rows_read: cursor.rowsRead });
+    return out;
+  }
+
   /**
    * A month's backfill has landed in Basin: the month is done, its index can be built, and what
    * the lane copied is added to the month and the account's sync. A few rows, once a month.
@@ -1420,9 +1516,10 @@ export class MailboxDO extends DurableObject<Env> {
         if (have.has(m.id) || notKept(m.labels)) continue;
         const labelText = m.labels.join(' ');
         const insert = sql.exec(
-          `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
+          `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels, raw_key, raw_offset, raw_len)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
           m.id, m.threadId, m.ts, m.fromAddr, m.fromName, m.subject, m.snippet, m.size, m.attachments, labelText,
+          m.raw ?? null, m.rawOffset ?? null, m.rawLen ?? null,
         );
         rowsWritten += insert.rowsWritten;
         if (insert.rowsWritten === 0) continue;

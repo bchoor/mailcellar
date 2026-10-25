@@ -1,16 +1,15 @@
 // The backfill copy engine (backfill speed plan v4, 2026-10-24). A lane copies one month: it
 // lists the month's IDs once, fetches each message once as raw, and writes each Gmail batch as
-// one pack file in R2, with each message's offset and length in its Basin row. The lane's
-// progress is an R2 file too, so copying reads and writes no Durable Object rows: the account's
-// DO only paces Gmail from memory (a token bucket, as msgvault does). Lanes stage Basin rows;
-// one committer per account appends them to Basin about once a minute, and lands each month
-// once all of it is there. The month's search index is built from Basin after that.
-import { mailboxName, monthQuery, paidNow, r2Keys, type SyncPart, type UserId } from '@mailcellar/schema';
+// one pack file (raw file), then indexes the batch in the account's DO with each message's
+// offset and length: the mailbox is the record (Bikram, 2026-10-25). The lane's progress is a
+// raw file; the DO paces Gmail from memory (a token bucket, as msgvault does). Once a lane is
+// done, the account's committer lands the month and checks it against Gmail's list.
+import { mailboxName, monthQuery, paidNow, r2Keys, type IndexedMessage, type SyncPart, type UserId } from '@mailcellar/schema';
 import type { BasinRow } from './basin';
 import type { Env } from './env';
 import { b64urlBytes, batchGet, getRaw, GmailError, listPage, type Gone, type RawMessage } from './gmail';
 import { accountQuota } from './quota';
-import { accountMailbox, basinRow, launchLanes, syncDeps } from './sync';
+import { accountMailbox, copiedRow, indexedFromBasin, INDEX_ROWS, launchLanes, nextReset, syncDeps } from './sync';
 
 /** Raw mail bigger than this is fetched alone; between MEDIUM and this, MEDIUM_BATCH at a time. */
 export const HUGE = 2 * 1024 * 1024;
@@ -34,8 +33,6 @@ export const LANE_CALLS = () => (paidNow() ? 200 : 40);
  * is that times 2.5 and the budget under half the cap. Tune both from production CPU times.
  */
 export const LANE_CPU_MS = () => (paidNow() ? 10_000 : 900);
-/** Basin rows a run holds before staging them (a row carries up to 32 KB of body text; memory is 128 MB). */
-export const STAGE_ROW_BYTES = 16 * 1024 * 1024;
 export const copyCpuMs = (bytes: number) => 0.8 + (bytes / 1024) * 0.01;
 /**
  * Gmail pacing per account, as msgvault does it: Gmail allows 250 units a second per user; the
@@ -64,7 +61,7 @@ export interface LaneProgress {
   medium: string[];
   small: string[];
   all: string[];
-  /** An earlier copy of the month put mail in Basin: that mail is skipped when listing ends. */
+  /** An earlier copy of the month put mail in the mailbox (unused: listing always skips what the mailbox has). */
   prior: boolean;
   copied: number;
   bytes: number;
@@ -170,7 +167,7 @@ export interface LaneOptions {
 
 /**
  * One run of a month's lane: list what's left, copy until the run's CPU or request budget is
- * spent, stage the Basin rows, save progress. Reads and writes no DO rows.
+ * spent, index each batch in the mailbox, save progress.
  */
 export async function runLane(env: Env, user: UserId, account: string, month: string, runId: string, opts: LaneOptions = {}): Promise<LaneResult> {
   const started = Date.now();
@@ -210,9 +207,6 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
   const token = first.token!;
   const callBudget = opts.calls ?? LANE_CALLS();
   const cpuBudget = opts.cpuMs ?? LANE_CPU_MS();
-  const rows: BasinRow[] = [];
-  let rowBytes = 0;
-  const syncedAt = new Date().toISOString();
   let classA = 0;
   let resumesAt: string | null = null;
 
@@ -262,16 +256,19 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
         stats.waitMs += pace.waitMs;
         await scheduler.wait(pace.waitMs);
       }
+      // The batch is indexed as it's copied: wait for the account's daily DO writes if they're spent.
+      const full = await quota.reserve({ do_rows_written: count * INDEX_ROWS, do_rows_read: count * 2 });
+      if (full) {
+        putBack(p, wave.tier, wave.batches);
+        resumesAt = full.resumesAt;
+        p.error = `Waiting for the daily limit (${full.label}). Copying resumes after it resets.`;
+        break;
+      }
       // A huge message is fetched alone, and noted first, so a run it kills doesn't repeat it.
       if (wave.tier === 'huge') {
         if (stats.bytes >= HUGE_RUN_BYTES) {
           putBack(p, wave.tier, wave.batches);
           break;
-        }
-        // Stage what the run copied so far, so the note saved is the run's whole state: nothing is lost with it.
-        if (rows.length) {
-          await env.ARCHIVE.put(r2Keys.staged(user, account, month, `${runId}-${p.packs}`), JSON.stringify(rows.splice(0)));
-          classA++;
         }
         const id = wave.batches[0][0];
         const note = { ...p, copied: p.copied + stats.copied, bytes: p.bytes + stats.bytes, huge: [id, ...p.huge], trying: id, updatedAt: new Date().toISOString() };
@@ -302,24 +299,28 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
         putBack(p, wave.tier, [r.value.retry]);
         for (const g of r.value.gone) if (!p.gone?.some((x) => x.id === g.id)) (p.gone ??= []).push(g);
         if (!r.value.messages.length) continue;
-        const packed = pack(account, r.value.messages, r2Keys.pack(user, account, month, `${runId}-${p.packs}`), syncedAt);
+        const packed = pack(r.value.messages, r2Keys.pack(user, account, month, `${runId}-${p.packs}`));
         await env.ARCHIVE.put(packed.key, packed.bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
         p.packs++;
         classA++;
-        rows.push(...packed.rows);
-        rowBytes += packed.rows.reduce((t, x) => t + x.body_text.length + 1024, 0);
-        // A long run stages its rows as it goes, so they never fill the run's memory.
-        if (rowBytes >= STAGE_ROW_BYTES) {
-          await env.ARCHIVE.put(r2Keys.staged(user, account, month, `${runId}-${p.packs}`), JSON.stringify(rows.splice(0)));
-          classA++;
-          rowBytes = 0;
+        try {
+          const ing = await mailbox.ingest(packed.rows, false);
+          await quota.add({ do_rows_written: ing.rowsWritten, do_rows_read: packed.rows.length * 2 });
+        } catch (e) {
+          if (!/exceeded|limit/i.test(String(e))) throw e;
+          // Past the daily limit: the batch is fetched again after the reset (its pack is left over).
+          putBack(p, wave.tier, [packed.rows.map((x) => x.id)]);
+          resumesAt = nextReset().toISOString();
+          p.error = 'Waiting for the daily DO write limit. Copying resumes after it resets.';
+          break;
         }
         p.copiedIds.push(...packed.rows.map((x) => x.id));
         stats.copied += packed.rows.length;
         stats.bytes += packed.bytes.length;
-        stats.cpuEstMs += packed.rows.reduce((t, x) => t + copyCpuMs(x.raw_len ?? 0), 0);
+        stats.cpuEstMs += packed.rows.reduce((t, x) => t + copyCpuMs(x.rawLen ?? 0), 0);
       }
       if (throttled) stats.throttled++;
+      if (resumesAt) break;
     }
   } catch (e) {
     if (e instanceof GmailError && (e.status === 401 || e.status === 403)) return failLane(env, user, account, p, e.message);
@@ -329,10 +330,6 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
     p.error = `Gmail didn't answer (${e instanceof GmailError ? `HTTP ${e.status}` : 'network'}). Trying again shortly.`;
   }
 
-  if (rows.length) {
-    await env.ARCHIVE.put(r2Keys.staged(user, account, month, runId), JSON.stringify(rows));
-    classA++;
-  }
   const done = !p.list && !p.huge.length && !p.medium.length && !p.small.length;
   const next = done ? '' : nextId(account, month);
   const saved: LaneProgress = {
@@ -343,9 +340,9 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
   if (!(await saveLane(env, user, account, saved, etag))) return { ...none('replaced'), copied: stats.copied };
   // Tell the page what this run copied (the last wave's mail isn't in the turns before it).
   await turn(0, false);
-  // Raw mail at its size, staged rows and Basin's files at about a KB a message.
-  await quota.charge({ classA: classA + 1, classB: 3, bytes: stats.bytes + stats.copied * 1024 });
-  if (rows.length || done) await ensureCommitter(env, user, account);
+  // Raw mail at its size.
+  await quota.charge({ classA: classA + 1, classB: 3, bytes: stats.bytes });
+  if (done) await ensureCommitter(env, user, account);
   stats.wallMs = Date.now() - started;
   console.log(JSON.stringify({ lane: stats }));
   return { copied: stats.copied, more: !done, nextId: done ? null : next, resumesAt, stats };
@@ -372,32 +369,27 @@ function putBack(p: LaneProgress, tier: Tier, batches: string[][]): void {
   p[tier].unshift(...batches.flat());
 }
 
-/** One pack: the batch's raw messages end to end, and each one's Basin row with where it is. */
-export function pack(account: string, messages: RawMessage[], key: string, syncedAt: string): { key: string; bytes: Uint8Array; rows: BasinRow[] } {
+/** One pack: the batch's raw messages end to end, and each one's mailbox row with where it is. */
+export function pack(messages: RawMessage[], key: string): { key: string; bytes: Uint8Array; rows: IndexedMessage[] } {
   const raws = messages.map((m) => b64urlBytes(m.raw));
   // One message: its bytes are the pack, with no copy.
-  if (raws.length === 1) return { key, bytes: raws[0], rows: [basinRow(account, messages[0], raws[0], key, syncedAt, { offset: 0, len: raws[0].length })] };
+  if (raws.length === 1) return { key, bytes: raws[0], rows: [copiedRow(messages[0], raws[0], key, { offset: 0, len: raws[0].length })] };
   const bytes = new Uint8Array(raws.reduce((t, r) => t + r.length, 0));
-  const rows: BasinRow[] = [];
+  const rows: IndexedMessage[] = [];
   let offset = 0;
   for (const [i, m] of messages.entries()) {
     bytes.set(raws[i], offset);
-    rows.push(basinRow(account, m, raws[i], key, syncedAt, { offset, len: raws[i].length }));
+    rows.push(copiedRow(m, raws[i], key, { offset, len: raws[i].length }));
     offset += raws[i].length;
   }
   return { key, bytes, rows };
 }
 
-/** Listing is done: sort the month into tiers, and skip mail an earlier copy put in Basin. */
+/** Listing is done: sort the month into tiers, and skip mail the mailbox has already. */
 async function endListing(env: Env, user: UserId, account: string, p: LaneProgress): Promise<void> {
-  const skip = new Set<string>();
-  const copied = await env.ARCHIVE.get(r2Keys.copied(user, account, p.month));
-  if (copied) for (const id of (await copied.json()) as string[]) skip.add(id);
-  // Both: the file has only what lanes landed, not what a stopped lane or the old engine put in Basin.
-  if (p.prior) {
-    const target = await syncDeps.basin(env, user);
-    if (target) for (const r of await target.monthRows(account, p.month, new Set(p.all))) skip.add(r.id);
-  }
+  const all = [...new Set(p.all)];
+  const unknown = new Set(await accountMailbox(env, user, account).unknownIds(all));
+  const skip = new Set(all.filter((id) => !unknown.has(id)));
   const huge = new Set(p.huge);
   const big = new Set([...p.huge, ...p.medium]);
   p.huge = p.huge.filter((id) => !skip.has(id));
@@ -413,14 +405,16 @@ async function failLane(env: Env, user: UserId, account: string, p: LaneProgress
   await mailbox.finishPart({ job: p.job, month: p.month }, 'failed', error);
   await endLaneFile(env, user, account, p.month);
   await mailbox.endLane(p.month);
+  await ensureCommitter(env, user, account);
   await launchLanes(env, user, account);
   return { copied: 0, more: false, nextId: null, resumesAt: null, stopped: 'failed' };
 }
 
-/** The month was taken out of the queue: the lane ends; what it copied and staged stays (and is settled). */
+/** The month was taken out of the queue: the lane ends; what it copied stays (and is settled). */
 async function endUnqueued(env: Env, user: UserId, account: string, p: LaneProgress): Promise<LaneResult> {
   await endLaneFile(env, user, account, p.month);
   await accountMailbox(env, user, account).endLane(p.month);
+  await ensureCommitter(env, user, account);
   await launchLanes(env, user, account);
   return { copied: 0, more: false, nextId: null, resumesAt: null, stopped: 'unqueued' };
 }
@@ -431,7 +425,7 @@ export interface Committer {
   at: string;
   /** Checks in a row that found nothing to do. */
   idle: number;
-  /** Basin's table exists with every column (checked once a committer chain). */
+  /** Unused since lanes index as they copy (2026-10-25). */
   ready: boolean;
   error: string | null;
 }
@@ -470,8 +464,8 @@ export interface CommitResult {
 }
 
 /**
- * One check of the account's committer: append what the lanes staged to Basin (one append, up
- * to COMMIT_BYTES), then land each month whose lane is done and has nothing staged left.
+ * One check of the account's committer: index rows lanes staged before 2026-10-25 (lanes now
+ * index as they copy), then land each month whose lane is done and has nothing staged left.
  */
 export async function runCommit(env: Env, user: UserId, account: string, runId: string, maxBytes = COMMIT_BYTES()): Promise<CommitResult> {
   const key = r2Keys.committer(user, account);
@@ -493,29 +487,26 @@ export async function runCommit(env: Env, user: UserId, account: string, runId: 
   c.error = null;
   if (take.length)
     try {
-      const target = await syncDeps.basin(env, user);
-      if (!target) throw new Error('Basin has no write token');
-      if (!c.ready) {
-        await target.ensure();
-        c.ready = true;
-      }
       const rows: BasinRow[] = [];
       for (const k of take) {
         const staged = await env.ARCHIVE.get(k);
         classB++;
         if (staged) rows.push(...((await staged.json()) as BasinRow[]));
       }
-      if (rows.length) await target.append(rows);
-      // A Basin commit writes data and metadata files through the catalog: about 10 R2 writes.
-      classA += 10;
+      if (rows.length) {
+        const full = await quota.reserve({ do_rows_written: rows.length * INDEX_ROWS, do_rows_read: rows.length * 2 });
+        if (full) throw new Error(`waiting for the daily limit (${full.label})`);
+        const ing = await accountMailbox(env, user, account).ingest(rows.map(indexedFromBasin), false);
+        await quota.add({ do_rows_written: ing.rowsWritten, do_rows_read: rows.length * 2 });
+      }
       await env.ARCHIVE.delete(take);
       committed = rows.length;
     } catch (e) {
-      // The rows stay staged; the next check commits them.
-      c.error = `Basin didn't take the staged rows (${String(e).slice(0, 160)}).`;
+      // The rows stay staged; the next check indexes them.
+      c.error = `The mailbox didn't take the staged rows (${String(e).slice(0, 160)}).`;
     }
 
-  // Land months whose lane is done and whose rows are all in Basin.
+  // Land months whose lane is done and has nothing staged left.
   const landed: string[] = [];
   const lanes = await env.ARCHIVE.list({ prefix: r2Keys.lanes(user, account) });
   classA += 2;
@@ -551,7 +542,7 @@ export async function runCommit(env: Env, user: UserId, account: string, runId: 
 }
 
 /**
- * An ended lane's rows are all in Basin: remember its IDs and index what the month has. The month
+ * An ended lane's rows are all in the mailbox: remember its IDs and check what the month has. The month
  * isn't landed (it wasn't listed to the end); what the lane copied was counted when it stopped.
  */
 async function settleMonth(env: Env, user: UserId, account: string, p: LaneProgress): Promise<void> {
@@ -561,7 +552,7 @@ async function settleMonth(env: Env, user: UserId, account: string, p: LaneProgr
   console.log(JSON.stringify({ settled: { month: p.month, copied: p.copiedIds.length } }));
 }
 
-/** A month is all in Basin: remember its IDs, mark it done, build its index, and start the next month. */
+/** A month is all copied: remember its IDs, mark it done, check it against Gmail, and start the next month. */
 async function landMonth(env: Env, user: UserId, account: string, p: LaneProgress): Promise<void> {
   const added = await rememberCopied(env, user, account, p.month, p.copiedIds);
   const mailbox = accountMailbox(env, user, account);

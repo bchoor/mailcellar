@@ -1,8 +1,8 @@
-// One message opened from the Messages page. Its Basin row says which raw file holds it and
-// at which bytes (kept per month in a raw file of its own, so later opens skip Basin); only
-// those bytes are read, then parsed here. No Gmail call and no Durable
-// Object read or write: the raw files and Basin are under the person's own prefix.
-import { basinNamespace, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
+// One message opened from the Messages page. Its mailbox row says which raw file holds it and at
+// which bytes (one keyed DO read); only those bytes are read, then parsed here. No Gmail call.
+// Until its location has moved from Basin into the mailbox (locate.ts, 2026-10-25), a message
+// is found through Basin as before.
+import { basinNamespace, mailboxName, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
 import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
 import { restCatalogLoadTable } from 'icebird';
 import PostalMime, { type Address, type Attachment, type Email } from 'postal-mime';
@@ -92,6 +92,8 @@ export async function warmMonth(env: Env, user: UserId, account: string, month: 
 
 /** Where the message's bytes are: whole of `key`, or `len` bytes at `offset`. */
 async function locate(env: Env, user: UserId, account: string, id: string, month: string): Promise<{ key: string; offset: number; len: number }> {
+  const own = await env.MAILBOX.getByName(mailboxName(user, account)).location(id);
+  if (own) return own;
   let loc = await monthLocations(env, user, account, month);
   if (loc && !loc.at[id]) loc = await monthLocations(env, user, account, month, true);
   const at = loc?.at[id];

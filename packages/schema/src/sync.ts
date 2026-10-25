@@ -118,12 +118,15 @@ export interface SyncParams {
    * answer names the indexed messages no month lists, and listed ones the index lacks. Reads only.
    */
   audit?: string;
-  /** Build the search index for this month from Basin, once the month has landed there. */
+  /** Check a landed month against Gmail's list of it and mark it done (copying indexed it already). */
   index?: string;
-  /** Where an index build resumes: rows of the month already done. */
+  /** Unused since copying indexes as it goes (2026-10-25); kept so runs queued before then still parse. */
   from?: number;
-  /** With `index`: take the month out of the index first, and build it again. */
-  reindex?: boolean;
+  /**
+   * Instead of syncing, move where each copied message is from Basin into the mailbox (2026-10-25):
+   * these months, a few a run. With `check`, report messages that still have no location instead.
+   */
+  locate?: string[];
   /** Instead of syncing, queue every past month with mail not yet copied, and resume backfill. */
   missing?: boolean;
   /** Import an archive's uploaded mbox: one run of the chain (import.ts). */

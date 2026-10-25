@@ -19,6 +19,10 @@ export interface IndexedMessage {
   attachments: number;
   /** Gmail label IDs, such as INBOX or Label_12. */
   labels: string[];
+  /** The raw file (R2 object) holding the message, and where in it: offset and length, absent for a file of one. */
+  raw?: string;
+  rawOffset?: number;
+  rawLen?: number;
 }
 
 /** A Gmail label as labels.list returns it. */
