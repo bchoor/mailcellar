@@ -21,7 +21,7 @@ import {
   type MonthRow,
   type SenderRow,
 } from '@mailcellar/schema';
-import { useInfiniteQuery, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import {
   AtSignIcon,
@@ -467,6 +467,11 @@ function toFilters(tokens: FilterToken[], list: Period[], tz: string): MessageFi
   return out;
 }
 
+/** Groups per page; the server's page size. */
+const GROUPS_PAGE = 50;
+/** What the pager counts, by the field grouped by. */
+const GROUP_NOUNS: Record<string, string> = { from: 'senders', domain: 'domains', label: 'labels', category: 'categories' };
+
 /** The group fields the server groups by (Period is grouped here, from the periods list). */
 const SERVER_GROUPS: readonly string[] = MESSAGE_GROUPS;
 
@@ -498,18 +503,34 @@ function useServerGroups(
   const [by, setBy] = useState<string | null>(null);
   const key = JSON.stringify(filters);
   const server = !!by && SERVER_GROUPS.includes(by);
-  const lists = useInfiniteQuery({
-    queryKey: ['message-groups', id, by, key],
+  // Groups come 50 a page; page n starts after cursors[n], and the first page brings the total.
+  const [gpage, setGpage] = useState(0);
+  const [gcursors, setGcursors] = useState<(string | null)[]>([null]);
+  const [gtotal, setGtotal] = useState<number | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new grouping or filter starts at page one.
+  useEffect(() => {
+    setGpage(0);
+    setGcursors([null]);
+    setGtotal(null);
+  }, [by, key, id]);
+  const after = gcursors[gpage] ?? null;
+  const lists = useQuery({
+    queryKey: ['message-groups', id, by, key, after],
     enabled: !!id && server,
-    initialPageParam: null as string | null,
-    queryFn: async ({ pageParam }): Promise<MessageGroups> => {
-      const qs = new URLSearchParams({ by: by!, ...(filters.length ? { f: key } : {}), ...(pageParam ? { after: pageParam } : {}) });
+    queryFn: async (): Promise<MessageGroups> => {
+      const qs = new URLSearchParams({ by: by!, ...(filters.length ? { f: key } : {}), ...(after ? { after } : {}) });
       const res = await fetch(`/api/accounts/${id}/messages/groups?${qs}`);
       if (!res.ok) throw new Error(`Couldn't load groups (${res.status})`);
       return res.json();
     },
-    getNextPageParam: (last) => last.next,
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === by && prevQuery?.queryKey[3] === key ? prev : undefined),
   });
+  const glist = lists.data;
+  useEffect(() => {
+    if (!glist || lists.isPlaceholderData) return;
+    if (glist.total !== null) setGtotal(glist.total);
+    setGcursors((c) => (c[gpage + 1] === glist.next ? c : [...c.slice(0, gpage + 1), glist.next]));
+  }, [glist, lists.isPlaceholderData, gpage]);
   // Period's groups are the periods list; their counts come from the server, unfiltered only.
   const spans = useMemo(() => (by === 'period' ? periodGroups(list) : []), [by, list]);
   const counts = useQuery({
@@ -525,7 +546,7 @@ function useServerGroups(
   const found: { key: string; n: number | null; filter: MessageFilter }[] | null = !by
     ? null
     : server
-      ? (lists.data?.pages.flatMap((p) => p.groups) ?? null)
+      ? (lists.data?.groups ?? null)
       : by === 'period'
         ? filters.length
           ? spans.map((g) => ({ ...g, n: null }))
@@ -535,8 +556,8 @@ function useServerGroups(
         : null;
   // Which groups are open, and how many pages each has asked for; the first opens by itself.
   const [open, setOpen] = useState<Map<string, number> | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new grouping, filter or order starts closed.
-  useEffect(() => setOpen(null), [by, key, id, sort.by, sort.asc]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new grouping, filter, order or page starts closed.
+  useEffect(() => setOpen(null), [by, key, id, sort.by, sort.asc, gpage]);
   const opened = open ?? new Map(found?.length ? [[found[0].key, 1]] : []);
   const shown = (found ?? []).filter((g) => opened.has(g.key));
   const pages = useQueries({
@@ -582,7 +603,16 @@ function useServerGroups(
         more: r?.next && !r.loading ? () => setOpen(new Map(opened).set(g.key, opened.get(g.key)! + 1)) : undefined,
       };
     }) ?? null,
-    more: server && lists.hasNextPage ? () => void lists.fetchNextPage() : undefined,
+    pages: server
+      ? {
+          page: gpage,
+          size: GROUPS_PAGE,
+          total: gtotal,
+          more: !!glist?.next,
+          onPage: (p) => setGpage(Math.max(0, Math.min(p, gcursors.length - 1))),
+          noun: GROUP_NOUNS[by!] ?? 'groups',
+        }
+      : undefined,
     onToggle: (k) => {
       const next = new Map(opened);
       next.has(k) ? next.delete(k) : next.set(k, 1);
