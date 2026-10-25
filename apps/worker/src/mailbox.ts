@@ -1687,11 +1687,14 @@ export class MailboxDO extends DurableObject<Env> {
     if (retry) await this.ctx.storage.setAlarm(Date.now() + 30_000);
     const user = this.userId();
     if (!user) return;
-    // Unknown after a restart: not due (the restart's watchdog alarm isn't the schedule's); the next slot runs.
-    const due = this.syncDue != null && Date.now() >= this.syncDue - 1000;
+    // Due when a slot has passed since the last run. Read from the saved run, not the alarm kept
+    // in memory: a deploy restarts this DO, and a slot due across a restart was skipped.
+    const sync = this.schedule('gmail-sync')!;
+    const slot = sync.last ? nextRun(sync, new Date(sync.last.at)) : this.syncDue != null ? new Date(this.syncDue) : null;
+    const due = !!slot && Date.now() >= slot.getTime() - 1000;
     this.watching = await this.recover(user);
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
-    if (due && ids.length && this.schedule('gmail-sync')!.on) {
+    if (due && ids.length && sync.on) {
       let run: ScheduleRun;
       if (this.isPaused()) run = { at: new Date().toISOString(), ok: true, detail: 'Backfill paused' };
       else if (!this.env.BASIN_TOKEN) run = { at: new Date().toISOString(), ok: false, detail: 'Waiting for Basin write access' };
