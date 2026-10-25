@@ -4,17 +4,17 @@
 // Spike S7 found that a Workflow run is one Worker invocation, so Workers Free's caps of
 // 50 outside requests and 1,000 Cloudflare calls cover the whole run. A run therefore does
 // one batch and then starts the next run, until the account is copied.
-// Raw mail goes to R2 (gzipped up to 256 KB, spike S3), the index to the account's DO, and
-// every message's row to Basin, the system of record. Basin rows are staged in R2 first, so
-// a failed commit is retried by the next run instead of losing the batch.
+// Raw mail goes to raw files (gzipped up to 256 KB, spike S3) and each message's row, with
+// where its raw bytes are, straight to the account's DO: the mailbox is the record (2026-10-25).
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES, paidNow } from '@mailcellar/schema';
-import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
+import { basinCheck, catalogTarget, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
 import { runCommit, runLane } from './copy';
 import { runImport } from './import';
-import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, headers, indexRow, labels, listPage, packBySize, parseAddresses, profile, type RawMessage } from './gmail';
+import { locateCheck, runLocateChain } from './locate';
+import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, GmailError, indexRow, labels, listPage, packBySize, profile, type RawMessage } from './gmail';
 
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
 export const RUN_SIZE = 500;
@@ -51,13 +51,7 @@ export async function runDied(env: Env, runId: string): Promise<boolean> {
   return status === 'errored' || status === 'terminated' || status === 'complete';
 }
 
-/** Staged Basin batches one run commits when Basin is behind; that run copies nothing new. */
-export const BASIN_COMMIT_KEYS = 2;
-/**
- * What a full run may use, asked of the account's meters before it starts. Copying writes R2 and
- * Basin, not the DO (a few bookkeeping rows), so the DO's daily limits never pause it: only the
- * index build waits for them (INDEX_COST, runIndex).
- */
+/** What a full run may use, asked of the account's meters before it starts (with its DO rows). */
 export const RUN_COST: QuotaUse = { workers_requests: 10, r2_class_a: RUN_SIZE + 30, r2_class_b: 50 };
 /** DO rows indexing a message takes (measured ~3.0 rows a message after the slim index, #49, and +2 for the Sender and Size sort indexes), with room to spare. */
 export const INDEX_ROWS = 6;
@@ -90,37 +84,9 @@ export async function accessToken(env: Env, refreshToken: string): Promise<strin
   throw new GmailError(body.error === 'invalid_grant' ? 401 : res.status, `Google no longer accepts this account (${body.error ?? `HTTP ${res.status}`}). Reconnect it in Settings ▸ Accounts.`);
 }
 
-/** Gzipped JSON, for staged Basin rows. */
-async function gzipJson(value: unknown): Promise<Uint8Array> {
-  return gzip(new TextEncoder().encode(JSON.stringify(value)));
-}
+/** Gzipped JSON: rows the live sync staged for Basin before 2026-10-25. */
 async function gunzipJson<T>(body: ReadableStream): Promise<T> {
   return (await new Response(body.pipeThrough(new DecompressionStream('gzip'))).json()) as T;
-}
-
-/** Basin's row for a message: the index row plus recipients and body text. */
-export function basinRow(account: string, m: RawMessage, raw: Uint8Array, rawKey: string, syncedAt: string, at?: { offset: number; len: number }): BasinRow {
-  const h = headers(raw);
-  const row = indexRow(m, raw, h);
-  return {
-    account,
-    id: row.id,
-    thread_id: row.threadId,
-    ts: new Date(row.ts).toISOString(),
-    from_addr: row.fromAddr,
-    from_name: row.fromName,
-    to_addrs: parseAddresses(h.get('to') ?? ''),
-    cc_addrs: parseAddresses(h.get('cc') ?? ''),
-    subject: row.subject,
-    snippet: row.snippet,
-    body_text: bodyText(raw),
-    labels: row.labels,
-    size: m.sizeEstimate,
-    attachments: row.attachments,
-    raw_key: rawKey,
-    synced_at: syncedAt,
-    ...(at ? { raw_offset: at.offset, raw_len: at.len } : {}),
-  };
 }
 
 async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
@@ -199,19 +165,21 @@ export const syncDeps: {
   launch: (env, params, id) => accountMailbox(env, asUserId(params.user), params.account).launchLater(id, params),
 };
 
-/** Basin rows staged this many batches behind: the run commits instead of copying more. */
-export const BASIN_BEHIND = 4;
-/** How long a run may hold the account's Basin commit turn. */
-export const COMMIT_TURN_MS = 2 * 60_000;
 /** What a run may add to the backfill's spend, checked against the cap before it starts: RUN_SIZE messages of up to 100 KB. */
 export const RUN_SPEND = { classA: RUN_COST.r2_class_a!, classB: RUN_COST.r2_class_b!, bytes: RUN_SIZE * 100 * 1024 };
 
-/** An index row for a Basin row (the search index is built from Basin). */
-export function indexedFromBasin(r: Pick<BasinRow, 'id' | 'thread_id' | 'ts' | 'from_addr' | 'from_name' | 'subject' | 'snippet' | 'size' | 'attachments' | 'labels'>): IndexedMessage {
+/** The mailbox's row for a Basin row: rows staged before 2026-10-25, and the locate runs. */
+export function indexedFromBasin(r: Pick<BasinRow, 'id' | 'thread_id' | 'ts' | 'from_addr' | 'from_name' | 'subject' | 'snippet' | 'size' | 'attachments' | 'labels'> & Partial<Pick<BasinRow, 'raw_key' | 'raw_offset' | 'raw_len'>>): IndexedMessage {
   return {
     id: r.id, threadId: r.thread_id, ts: Date.parse(r.ts), fromAddr: r.from_addr, fromName: r.from_name,
     subject: r.subject, snippet: r.snippet, size: Number(r.size), attachments: Number(r.attachments), labels: r.labels,
+    ...(r.raw_key ? { raw: r.raw_key } : {}), ...(r.raw_offset != null ? { rawOffset: Number(r.raw_offset) } : {}), ...(r.raw_len != null ? { rawLen: Number(r.raw_len) } : {}),
   };
+}
+
+/** The mailbox's row for a copied message, with where its raw bytes are (offset and length in a pack). */
+export function copiedRow(m: RawMessage, raw: Uint8Array, rawKey: string, at?: { offset: number; len: number }): IndexedMessage {
+  return { ...indexRow(m, raw), raw: rawKey, ...(at ? { rawOffset: at.offset, rawLen: at.len } : {}) };
 }
 
 /**
@@ -264,7 +232,8 @@ export async function runBatch(
 
   // The account's daily limits are shared by every user: pause before one, resume after it resets.
   const quota = accountQuota(env);
-  const full = await quota.reserve(RUN_COST);
+  // The run indexes what it copies, so it waits for the DO's daily writes too.
+  const full = await quota.reserve({ ...RUN_COST, do_rows_written: RUN_SIZE * INDEX_ROWS });
   if (full) {
     state.pausedFor = full.label;
     return later(new Date(full.resumesAt), 'waiting', null);
@@ -279,8 +248,7 @@ export async function runBatch(
   let r2b = 0;
   let rowsRead = 0;
 
-  const basin: BasinRow[] = [];
-  const syncedAt = new Date().toISOString();
+  const rows: IndexedMessage[] = [];
   let rest: string[];
   let calls = 1; // the token refresh
   try {
@@ -309,8 +277,7 @@ export async function runBatch(
         calls += fresh.calls;
       }
     }
-    // Basin is behind: this run only commits what's staged, so its CPU stays in budget.
-    const take = state.basinQueue.length >= BASIN_BEHIND ? [] : state.pending.slice(0, RUN_SIZE);
+    const take = state.pending.slice(0, RUN_SIZE);
     rest = state.pending.slice(take.length);
     // Sizes first (format=minimal), so raw batches can be packed to fit in memory.
     const sized = [];
@@ -331,7 +298,7 @@ export async function runBatch(
     rest = [...sized.slice(fit).map((m) => m.id), ...rest];
     const batches = packBySize(sized.slice(0, fit), limits.batchBytes);
     for (const [b, ids] of batches.entries()) {
-      if (calls >= limits.calls - COMMIT_CALLS) {
+      if (calls >= limits.calls) {
         rest = [...batches.slice(b).flat(), ...rest];
         break;
       }
@@ -347,13 +314,13 @@ export async function runBatch(
         await env.ARCHIVE.put(rawKey, small ? await gzip(raw) : raw, {
           httpMetadata: { contentType: 'message/rfc822', contentEncoding: small ? 'gzip' : undefined },
         });
-        basin.push(basinRow(account, m, raw, rawKey, syncedAt));
+        rows.push(copiedRow(m, raw, rawKey));
         added.copied++;
         added.bytes += m.sizeEstimate;
       }
     }
     // Gmail's count of a month goes stale as new mail lands in it: count the months it landed in again.
-    const landed = new Set(basin.map((r) => new Date(r.ts).toISOString().slice(0, 7)).filter((m) => m >= addMonths(monthNow(), -1)));
+    const landed = new Set(rows.map((r) => new Date(r.ts).toISOString().slice(0, 7)).filter((m) => m >= addMonths(monthNow(), -1)));
     for (const month of landed) {
       if (calls + LIST_CALLS() > limits.calls) break;
       let n = 0;
@@ -368,133 +335,73 @@ export async function runBatch(
       if (!pageToken) await mailbox.putMonthCount(month, n);
     }
   } catch (e) {
-    // Mail fetched before the error isn't staged for Basin, so it isn't counted; the next run copies it again.
+    // Mail fetched before the error isn't indexed, so it isn't counted; the next run copies it again.
     Object.assign(added, { copied: 0, bytes: 0 });
     if (e instanceof GmailError && (e.status === 401 || e.status === 403)) return stop(e.message);
     if (!retryable(e)) throw e;
     return later(new Date(Date.now() + 5 * 60_000), state.phase, `Gmail didn't answer (${e instanceof GmailError ? `HTTP ${e.status}` : 'network'}). Trying again shortly.`);
   }
 
-  // Stage this batch's rows for Basin, then commit what's staged when it's this run's turn.
-  if (basin.length) {
-    const key = r2Keys.basinQueue(user, account, `live-${runId}-${Date.now().toString(36)}`);
-    r2a++;
-    await env.ARCHIVE.put(key, await gzipJson(basin));
-    state.basinQueue = [...state.basinQueue, key];
-  }
-  let basinError: string | null = null;
-  let waitTurn = false;
+  // Index what this run copied, with where each message is. Rows staged for Basin before
+  // 2026-10-25 go in first, then their staged files are deleted.
+  let indexError: string | null = null;
   let rowsWritten = 0;
-  if (state.basinQueue.length) {
-    if (!(await mailbox.commitTurn(runId, COMMIT_TURN_MS))) waitTurn = true;
-    else
-      try {
-        const target = await (limits.basin ?? syncDeps.basin)(env, user);
-        if (!target) throw new Error('Basin has no write token');
-        if (!state.basinReady) {
-          await target.ensure();
-          state.basinReady = true;
-        }
-        const queued: BasinRow[] = [];
-        const commit = state.basinQueue.slice(0, BASIN_COMMIT_KEYS);
-        for (const key of commit) {
-          r2b++;
-          const obj = await env.ARCHIVE.get(key);
-          if (obj) queued.push(...(await gunzipJson<BasinRow[]>(obj.body)));
-        }
-        if (queued.length) await target.append(queued);
-        // A Basin commit writes data and metadata files through the catalog: about 10 R2 writes.
-        r2a += 10 + commit.length;
-        await env.ARCHIVE.delete(commit);
-        state.basinQueue = state.basinQueue.slice(commit.length);
-        // New mail is indexed as soon as Basin has it, when the DO's daily limits have room.
-        if (queued.length && !(await quota.reserve({ do_rows_written: queued.length * INDEX_ROWS, do_rows_read: queued.length * 2 }))) {
-          try {
-            rowsWritten = (await mailbox.ingest(queued.map(indexedFromBasin))).rowsWritten;
-          } catch (e) {
-            // Basin has it; the month's index is built from Basin later.
-            if (!isDailyLimit(e)) throw e;
-          }
-        }
-      } catch (e) {
-        // The rows stay staged; the next run commits them.
-        basinError = `Basin didn't take this batch (${String(e).slice(0, 120)}). Retrying with the next batch.`;
-      } finally {
-        await mailbox.endCommitTurn(runId);
-      }
+  try {
+    const queued: IndexedMessage[] = [];
+    const drained = state.basinQueue.slice(0, 4);
+    for (const key of drained) {
+      r2b++;
+      const obj = await env.ARCHIVE.get(key);
+      if (obj) queued.push(...(await gunzipJson<BasinRow[]>(obj.body)).map(indexedFromBasin));
+    }
+    const batch = [...queued, ...rows];
+    if (batch.length) rowsWritten = (await mailbox.ingest(batch)).rowsWritten;
+    if (drained.length) {
+      await env.ARCHIVE.delete(drained);
+      state.basinQueue = state.basinQueue.slice(drained.length);
+    }
+  } catch (e) {
+    if (!isDailyLimit(e)) throw e;
+    // Past the daily limit: what this run copied is copied again by a run after the reset.
+    rest = [...rows.map((r) => r.id), ...rest];
+    Object.assign(added, { copied: 0, bytes: 0 });
+    indexError = 'Paused before the daily DO write limit. Copying resumes after it resets.';
   }
   // Sync-state saves and month bookkeeping: a few rows each run.
   await quota.add({ do_rows_written: rowsWritten + 6, do_rows_read: rowsRead + rowsWritten * 2 + 20, r2_class_a: r2a, r2_class_b: r2b });
-  // Raw mail counts at Gmail's size (gzip only makes it smaller), staged rows and Basin's files at a KB a message.
-  await quota.charge({ classA: r2a, classB: r2b, bytes: added.bytes + added.copied * 1024 });
+  // Raw mail counts at Gmail's size (gzip only makes it smaller).
+  await quota.charge({ classA: r2a, classB: r2b, bytes: added.bytes });
 
-  const next: SyncState = { ...state, pending: rest, copied: state.copied + added.copied, bytes: state.bytes + added.bytes, resumesAt: null, error: basinError };
-  // A Basin failure waits 5 minutes, so a run that can't commit doesn't start the next at once;
-  // a run that waited for its turn to commit tries again shortly.
-  if (basinError) next.resumesAt = new Date(Date.now() + 5 * 60_000).toISOString();
-  else if (waitTurn && !added.copied) next.resumesAt = new Date(Date.now() + 15_000).toISOString();
+  const next: SyncState = { ...state, pending: rest, copied: state.copied + added.copied, bytes: state.bytes + added.bytes, resumesAt: null, error: indexError };
+  if (indexError) next.resumesAt = nextReset().toISOString();
 
   if (!(await save(next))) return replaced;
   const more = rest.length > 0 || next.basinQueue.length > 0;
   return { copied: added.copied, phase: next.phase, more, resumesAt: next.resumesAt };
 }
 
-/** Index rows written a call when building a month's index (fewer calls, fewer search segments). Measured ~3 DO rows a message (Jul 2026). */
+/** Index rows a chunk takes, for the daily-limit check the Backfill page makes while months wait (mailbox.ts). */
 export const INDEX_CHUNK = 500;
-/** Chunks one index run writes before handing over to a fresh run (each run reads the month from Basin again). */
-export const INDEX_CHUNKS_A_RUN = () => (paidNow() ? 20 : 4);
 
 /**
- * Build a landed month's search index from Basin: read the month back, and index what the
- * index doesn't have yet, a chunk at a time within the account's daily limits. Rerunning it
- * is safe: messages already indexed are skipped. Returns where the next run starts, if any.
+ * Finish a landed month: copying indexed its messages as it went, so this checks the mailbox
+ * against Gmail's list of the month, forgets what's missing (copying the month again fetches
+ * it), and marks the month done. Once no month is left, senders, domains and labels are
+ * counted again. Returns as the old index build did, so callers keep working.
  */
-export async function runIndex(env: Env, user: UserId, account: string, month: string, from = 0): Promise<{ indexed: number; next: number | null; resumesAt: string | null }> {
+export async function runIndex(env: Env, user: UserId, account: string, month: string, _from = 0): Promise<{ indexed: number; next: number | null; resumesAt: string | null }> {
   const mailbox = accountMailbox(env, user, account);
-  // Indexing from now, not from the first chunk: reading the month back from Basin takes a while.
   await mailbox.indexStarted(month);
   // The Sender and Size sort indexes first, so each message is indexed once with all of them.
   await mailbox.buildSorts();
-  const target = await syncDeps.basin(env, user);
-  if (!target) return { indexed: 0, next: from, resumesAt: new Date(Date.now() + 5 * 60_000).toISOString() };
-  // Gmail's month decides what the month holds: listed on the first run, kept in R2 for the rest.
-  const listed = from === 0 ? await listMonth(env, user, account, month) : await readListed(env, user, account, month);
-  const rows = (await target.monthRows(account, month, listed ?? undefined)).sort((a, b) => a.id.localeCompare(b.id));
+  // Gmail's month decides what the month holds; an archive's month counts its own rows.
+  const listed = await listMonth(env, user, account, month);
+  const { have, missing } = await mailbox.monthHas(month, listed ? [...listed] : null);
+  console.log(JSON.stringify({ indexedMonth: { month, have, listed: listed?.size ?? null, missing: missing.length } }));
+  if (missing.length) await forgetMissing(env, user, account, month, missing);
+  await mailbox.markIndexed(month, have);
   const quota = accountQuota(env);
-  let at = from;
-  let indexed = 0;
-  for (let i = 0; i < INDEX_CHUNKS_A_RUN() && at < rows.length; i++) {
-    const chunk = rows.slice(at, at + INDEX_CHUNK);
-    const full = await quota.reserve({ do_rows_written: chunk.length * INDEX_ROWS, do_rows_read: chunk.length * 2 });
-    if (full) {
-      // The page shows indexing waiting until then; the next chunk clears it.
-      await mailbox.indexWaiting(month, full.resumesAt, full.label);
-      return { indexed, next: at, resumesAt: full.resumesAt };
-    }
-    let r;
-    try {
-      r = await mailbox.ingest(chunk.map(indexedFromBasin), false);
-    } catch (e) {
-      if (!isDailyLimit(e)) throw e;
-      const resumesAt = nextReset().toISOString();
-      // Past the daily limit this write fails too; the page then shows the month indexing.
-      await mailbox.indexWaiting(month, resumesAt, 'DO rows written').catch(() => {});
-      return { indexed, next: at, resumesAt };
-    }
-    await quota.add({ do_rows_written: r.rowsWritten, do_rows_read: chunk.length * 2 });
-    indexed += r.added;
-    at += chunk.length;
-  }
-  if (at < rows.length) return { indexed, next: at, resumesAt: null };
-  const ids = new Set(rows.map((r) => r.id));
-  // Counted against Gmail's list: mail Gmail no longer has stays indexed but isn't owed.
-  const inBasin = listed ? [...listed].filter((id) => ids.has(id)).length : ids.size;
-  console.log(JSON.stringify({ indexedMonth: { month, inBasin, rows: rows.length, listed: listed?.size ?? null } }));
-  if (listed && inBasin < listed.size) await forgetMissing(env, user, account, month, [...listed].filter((id) => !ids.has(id)));
-  await mailbox.markIndexed(month, inBasin);
   // Senders, domains and labels once backfill is done, not once a month.
-  // (Senders, domains and labels left with no mail after unindexMonth keep their rows until mail returns.)
-  // Once, when the last month is indexed: rebuilt after every month it rewrote each changed sender again.
   if (!(await mailbox.hasQueued()) && !(await mailbox.indexPending())) {
     const n = await mailbox.indexedCount();
     const full = await quota.reserve({ do_rows_read: n, do_rows_written: Math.ceil(n / 4) });
@@ -504,7 +411,7 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
       console.log(JSON.stringify({ rollups: r }));
     }
   }
-  return { indexed, next: null, resumesAt: null };
+  return { indexed: have, next: null, resumesAt: null };
 }
 
 /** Gmail list calls an index run may spend listing its month (500 IDs a call). */
@@ -681,7 +588,7 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
 
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
   async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<unknown> {
-    if (event.payload.check) return step.do('basin check', { retries: { limit: 0, delay: '1 second' } }, () => basinCheck(this.env));
+    if (event.payload.check && !event.payload.locate) return step.do('basin check', { retries: { limit: 0, delay: '1 second' } }, () => basinCheck(this.env));
     const { names } = event.payload;
     if (names) return step.do('names', () => accountQuota(this.env).setNames(names));
     const user = asUserId(event.payload.user);
@@ -722,16 +629,12 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     }
     if (event.payload.index) {
       const index = event.payload.index;
-      const from = event.payload.from ?? 0;
-      if (event.payload.reindex && !from)
-        console.log(JSON.stringify({ unindex: await step.do('unindex', () => accountMailbox(this.env, user, account).unindexMonth(index)) }));
-      const r = await step.do('index', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runIndex(this.env, user, account, index, from));
-      if (r.next === null) return r.indexed;
-      if (r.resumesAt) await step.sleepUntil('wait for the daily limit', new Date(r.resumesAt));
-      await step.do('next run', async () => {
-        await syncDeps.launch(this.env, { user, account, index, from: r.next! }, `${account}-index-${index}-${Date.now().toString(36)}`);
-      });
-      return r.indexed;
+      return (await step.do('index', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runIndex(this.env, user, account, index))).indexed;
+    }
+    if (event.payload.locate) {
+      if (event.payload.check) return step.do('locate check', { retries: { limit: 0, delay: '1 second' }, timeout: '10 minutes' }, () => locateCheck(this.env, user, account));
+      const months = event.payload.locate;
+      return step.do('locate', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runLocateChain(this.env, user, account, months, runId));
     }
     if (event.payload.census) {
       const counted = await step.do('count', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runCensus(this.env, user, account, runId));

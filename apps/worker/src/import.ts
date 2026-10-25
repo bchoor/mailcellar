@@ -2,16 +2,16 @@
 // mail, the way a backfill copies Gmail. A chain of runs, each with a fresh budget:
 //   1. scan: read the file in slices, find where each message starts ("From " lines) and its month;
 //   2. copy: read messages in file order, write them end to end as pack files (raw files), and
-//      append their rows to Basin;
-//   3. index: build each month's search index from Basin (runIndex, as for Gmail).
-// The chain's progress is a raw file (import.json), so the copy path reads no Durable Object rows;
-// each run reports its counts to the archive's DO in one call, for the Backfill page.
-import { MAX_LANES, r2Keys, paidNow, type MailLabel, type UserId } from '@mailcellar/schema';
-import type { BasinRow } from './basin';
+//      index them in the archive's DO with where each one is (the mailbox is the record);
+//   3. index: mark each month done (runIndex, as for Gmail).
+// The chain's progress is a raw file (import.json); each run reports its counts to the archive's
+// DO in one call, for the Backfill page.
+import { MAX_LANES, r2Keys, paidNow, type IndexedMessage, type MailLabel, type UserId } from '@mailcellar/schema';
 import { copyCpuMs } from './copy';
 import type { Env } from './env';
 import { bodyText, headers } from './gmail';
-import { accountMailbox, basinRow, runDied, runIndex, syncDeps } from './sync';
+import { accountQuota } from './quota';
+import { accountMailbox, copiedRow, INDEX_ROWS, runDied, runIndex, syncDeps } from './sync';
 
 /** An archive mailbox's file and how far its upload and import are, as the user's DO keeps it. */
 export interface ArchiveRecord {
@@ -40,7 +40,7 @@ const MESSAGE_MAX = 40 * 1024 * 1024;
 /** CPU a run may spend, in estimated ms (as a lane's), and its wall time. */
 const RUN_CPU_MS = () => (paidNow() ? 10_000 : 900);
 const RUN_WALL_MS = () => (paidNow() ? 90_000 : 25_000);
-/** Rows a run appends to Basin at most: the append's own CPU grows with them. */
+/** Messages a run copies at most (each indexed in the DO). */
 const RUN_ROWS = () => (paidNow() ? 4000 : 400);
 /** A run that hasn't saved for this long has died, and the watchdog starts the chain again. */
 const IMPORT_STALE_MS = 15 * 60_000;
@@ -70,7 +70,7 @@ export interface ImportState {
   copied: number;
   /** Messages too big to import, by month. */
   tooBig: Record<string, number>;
-  /** Staged row files not yet in Basin, oldest first. */
+  /** Unused since the import indexes as it copies (2026-10-25). */
   unstaged: string[];
   basinReady: boolean;
   /** Index: months left to build, newest first, and where the first one resumes. */
@@ -340,24 +340,15 @@ async function threadId(h: Map<string, string>, id: string): Promise<string> {
 }
 
 async function copyRun(env: Env, user: UserId, account: string, s: ImportState, budget: Budget): Promise<void> {
-  const target = await syncDeps.basin(env, user);
-  if (!target) {
-    s.resumesAt = new Date(Date.now() + 5 * 60_000).toISOString();
-    s.error = 'Waiting for Basin write access.';
+  const quota = accountQuota(env);
+  // Each message is indexed as it's copied: wait for the account's daily DO writes if they're spent.
+  const full = await quota.reserve({ do_rows_written: RUN_ROWS() * INDEX_ROWS, do_rows_read: RUN_ROWS() * 2 });
+  if (full) {
+    s.resumesAt = full.resumesAt;
+    s.error = `Waiting for the daily limit (${full.label}).`;
     return;
   }
-  if (!s.basinReady) {
-    await target.ensure();
-    s.basinReady = true;
-  }
   s.error = null;
-  // Rows a run before this one staged but couldn't append: they go first.
-  while (s.unstaged.length) {
-    const obj = await env.ARCHIVE.get(s.unstaged[0]);
-    if (obj) await target.append((await obj.json()) as BasinRow[]);
-    await env.ARCHIVE.delete(s.unstaged[0]);
-    s.unstaged.shift();
-  }
   const scans = new Map<number, ScanFile>();
   const scan = async (n: number): Promise<ScanFile> => {
     let f = scans.get(n);
@@ -375,8 +366,7 @@ async function copyRun(env: Env, user: UserId, account: string, s: ImportState, 
     return n + 1 < s.scans ? (await scan(n + 1)).starts[0] : s.bytes;
   };
   const key = r2Keys.upload(user, account);
-  const syncedAt = new Date().toISOString();
-  const rows: BasinRow[] = [];
+  const rows: IndexedMessage[] = [];
   const copied: Record<string, number> = {};
   const touched = new Set<string>();
   let bytes = 0;
@@ -424,7 +414,7 @@ async function copyRun(env: Env, user: UserId, account: string, s: ImportState, 
       const ts = messageTime(h.get('date'), line);
       const labels = await labelIds(h.get('x-gmail-labels'), s.labels);
       const snippet = bodyText(raw, 4096).replace(/\s+/g, ' ').trim().slice(0, 200);
-      const row = basinRow(account, { id, threadId: await threadId(h, id), labelIds: labels, snippet, sizeEstimate: raw.length, internalDate: String(ts), raw: '' }, raw, packKey, syncedAt, { offset, len: raw.length });
+      const row = copiedRow({ id, threadId: await threadId(h, id), labelIds: labels, snippet, sizeEstimate: raw.length, internalDate: String(ts), raw: '' }, raw, packKey, { offset, len: raw.length });
       rows.push(row);
       parts.push(raw);
       offset += raw.length;
@@ -445,27 +435,17 @@ async function copyRun(env: Env, user: UserId, account: string, s: ImportState, 
     }
     s.at = last + 1;
   }
-  if (rows.length) {
-    // Staged first, so rows Basin doesn't take this time are appended by the next run.
-    const staged = r2Keys.importStaged(user, account, `${s.packs}-${Date.now().toString(36)}`);
-    await env.ARCHIVE.put(staged, JSON.stringify(rows));
-    s.unstaged.push(staged);
-    s.copied += rows.length;
-    try {
-      await target.append(rows);
-      await env.ARCHIVE.delete(staged);
-      s.unstaged.pop();
-    } catch (e) {
-      s.error = `Basin didn't take the rows yet (${String(e).slice(0, 120)}). Trying again shortly.`;
-      s.resumesAt = new Date(Date.now() + 2 * 60_000).toISOString();
-    }
-  }
   const mailbox = accountMailbox(env, user, account);
+  if (rows.length) {
+    const ing = await mailbox.ingest(rows, false);
+    await quota.add({ do_rows_written: ing.rowsWritten, do_rows_read: rows.length * 2 });
+    s.copied += rows.length;
+  }
   // Newest months in this run first, as the map's Copying months.
   const months = [...touched].sort().reverse().slice(0, MAX_LANES);
   if (rows.length || s.scanAt >= s.scans) await mailbox.importProgress({ job: s.job!, copied, bytes, months, error: s.error });
-  if (s.scanAt < s.scans || s.unstaged.length) return;
-  // Every message is in Basin: the months land, and their indexes are built next, newest first.
+  if (s.scanAt < s.scans) return;
+  // Every message is copied: the months land, and are marked done next, newest first.
   const all = Object.keys(s.months).sort().reverse();
   await mailbox.importLand(s.job!, all);
   const labels: MailLabel[] = Object.entries(s.labels).map(([id, name]) => ({ id, name, type: 'user' }));
