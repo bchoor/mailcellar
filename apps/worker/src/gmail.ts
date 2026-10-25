@@ -82,7 +82,8 @@ export async function addedSince(token: string, startHistoryId: string) {
 
 /**
  * Get up to BATCH_SIZE messages in one request. Returns what came back and the IDs that
- * failed with a retryable status; a message deleted in the meantime (404) is dropped.
+ * failed with a retryable status. `gone` lists the messages Gmail won't give: deleted in the
+ * meantime (404), or refused (400, "Precondition check failed" on some old mail).
  * `throttled` counts messages Gmail turned away for speed (retried, not a reason to slow down),
  * and `reason` is the first one's message, to tell concurrency from quota.
  */
@@ -90,7 +91,7 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
   token: string,
   ids: string[],
   format: F,
-): Promise<{ messages: (F extends 'raw' ? RawMessage : MinimalMessage)[]; retry: string[]; throttled: number; reason?: string }> {
+): Promise<{ messages: (F extends 'raw' ? RawMessage : MinimalMessage)[]; retry: string[]; gone: Gone[]; throttled: number; reason?: string }> {
   const boundary = `mc${crypto.randomUUID().replaceAll('-', '')}`;
   const body =
     ids
@@ -110,6 +111,7 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
   const messages = [];
   const got = new Set<string>();
   const retry: string[] = [];
+  const gone: Gone[] = [];
   let throttled = 0;
   let reason: string | undefined;
   for (const p of parts) {
@@ -122,13 +124,19 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
       throttled++;
       reason ??= errorMessage(p.body);
     } else if (p.status >= 500) retry.push(id);
-    // 400: Gmail won't give this one message (seen on 2015-16 mail). Skip it, logged, so the
-    // month's lane finishes; the month's count then shows it missing.
-    else if (p.status === 400) console.error('gmail skipped', id, errorMessage(p.body));
-    else if (p.status !== 404) throw new GmailError(p.status, `Gmail message fetch failed (HTTP ${p.status}: ${errorMessage(p.body)})`);
+    else if (p.status === 400 || p.status === 404) {
+      gone.push({ id, why: `HTTP ${p.status}: ${errorMessage(p.body)}` });
+      console.error('gmail skipped', id, p.status, errorMessage(p.body));
+    } else throw new GmailError(p.status, `Gmail message fetch failed (HTTP ${p.status}: ${errorMessage(p.body)})`);
   }
   for (const id of ids) if (!got.has(id)) retry.push(id);
-  return { messages, retry, throttled, reason };
+  return { messages, retry, gone, throttled, reason };
+}
+
+/** A message Gmail lists but won't give, and why. */
+export interface Gone {
+  id: string;
+  why: string;
 }
 
 /** Gmail's error message from a JSON error body, else the body's start. */
@@ -145,17 +153,15 @@ export const rateLimited = (body: string) => /rate ?limit/i.test(body);
 
 /**
  * Get one message as raw, without the batch endpoint: for huge mail, so the answer is parsed
- * once, with no multipart text copy beside it. Null: the message is gone (404).
+ * once, with no multipart text copy beside it. A Gone: Gmail won't give it (404 or 400, as in batchGet).
  */
-export async function getRaw(token: string, id: string): Promise<RawMessage | null> {
+export async function getRaw(token: string, id: string): Promise<RawMessage | Gone> {
   const res = await fetch(`${API}/messages/${id}?format=raw`, { headers: { authorization: `Bearer ${token}` } });
-  if (res.status === 404) return null;
   if (!res.ok) {
     const text = await res.text();
-    // 400: skipped and logged, as in batchGet.
-    if (res.status === 400) {
-      console.error('gmail skipped', id, errorMessage(text));
-      return null;
+    if (res.status === 400 || res.status === 404) {
+      console.error('gmail skipped', id, res.status, errorMessage(text));
+      return { id, why: `HTTP ${res.status}: ${errorMessage(text)}` };
     }
     throw new GmailError(res.status === 403 && rateLimited(text) ? 429 : res.status, `Gmail message fetch failed (HTTP ${res.status}: ${errorMessage(text)})`);
   }

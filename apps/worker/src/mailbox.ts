@@ -222,7 +222,7 @@ export class MailboxDO extends DurableObject<Env> {
     return this.putMeta('status', this.status());
   }
 
-  /** Read these months' entries again from the tables: a keyed row from each of four, a month. */
+  /** Read these months' entries again from the tables: a keyed row from each of five, a month. */
   private refreshMonths(months: Iterable<string>): void {
     const book = this.status();
     const sql = this.ctx.storage.sql;
@@ -241,9 +241,11 @@ export class MailboxDO extends DurableObject<Env> {
       }
       const indexed = index?.n ?? 0;
       const state = job?.state ?? null;
+      const unavailable = this.meta<string[]>(`unavailable:${month}`)?.length ?? 0;
       book.months[month] = {
         month,
         gmail: gmail?.n ?? null,
+        ...(unavailable ? { unavailable } : {}),
         indexed,
         state,
         error: job?.error ?? null,
@@ -791,9 +793,17 @@ export class MailboxDO extends DurableObject<Env> {
    * A month's backfill has landed in Basin: the month is done, its index can be built, and what
    * the lane copied is added to the month and the account's sync. A few rows, once a month.
    */
-  async landMonth(part: SyncPart, added: { copied: number; bytes: number } = { copied: 0, bytes: 0 }): Promise<void> {
+  async landMonth(part: SyncPart, added: { copied: number; bytes: number } = { copied: 0, bytes: 0 }, gone: string[] = []): Promise<void> {
     this.ctx.storage.transactionSync(() => {
-      let written = this.ctx.storage.sql.exec(
+      let written = 0;
+      // Messages Gmail lists but won't give: kept by month, so the month counts them as unavailable.
+      if (gone.length) {
+        const key = `unavailable:${part.month}`;
+        const had = this.meta<string[]>(key) ?? [];
+        const all = [...new Set([...had, ...gone])];
+        if (all.length > had.length) written += this.putMeta(key, all);
+      }
+      written += this.ctx.storage.sql.exec(
         `INSERT INTO basin_months (month, copied, landed_at) VALUES (?, ?, ?)
          ON CONFLICT (month) DO UPDATE SET copied = copied + excluded.copied, landed_at = excluded.landed_at, indexed_at = NULL`,
         part.month, added.copied, new Date().toISOString(),
@@ -1982,7 +1992,7 @@ export class MailboxDO extends DurableObject<Env> {
     if (!user || !this.hasAccount(account)) return { months: [], error: 'not_found' };
     const now = monthNow();
     const months = (await accountMailbox(this.env, user, account).coverageMonths())
-      .filter((m) => m.month < now && m.gmail !== null && m.gmail > m.copied)
+      .filter((m) => m.month < now && m.gmail !== null && m.gmail - (m.unavailable ?? 0) > m.copied)
       .map((m) => m.month);
     if (!months.length) return { months };
     // A person's pause is theirs to lift: the months wait in the queue until they resume.

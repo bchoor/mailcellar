@@ -8,7 +8,7 @@
 import { mailboxName, monthQuery, paidNow, r2Keys, type SyncPart, type UserId } from '@mailcellar/schema';
 import type { BasinRow } from './basin';
 import type { Env } from './env';
-import { b64urlBytes, batchGet, getRaw, GmailError, listPage, type RawMessage } from './gmail';
+import { b64urlBytes, batchGet, getRaw, GmailError, listPage, type Gone, type RawMessage } from './gmail';
 import { accountQuota } from './quota';
 import { accountMailbox, basinRow, launchLanes, syncDeps } from './sync';
 
@@ -80,6 +80,8 @@ export interface LaneProgress {
   trying: string | null;
   /** Messages too big to copy in a Worker; the month lands without them, and they're listed. */
   tooBig: string[];
+  /** Messages Gmail lists but won't give (404, or 400 on some old mail); the month counts them as unavailable. */
+  gone?: Gone[];
   /** The lane stopped because backfill was paused: resuming starts it again at once. */
   stopped: 'paused' | null;
   error: string | null;
@@ -281,7 +283,7 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
       const t = Date.now();
       const results = await Promise.allSettled(
         wave.tier === 'huge'
-          ? [getRaw(token, wave.batches[0][0]).then((m) => ({ messages: m ? [m] : [], retry: [], throttled: 0, reason: undefined }))]
+          ? [getRaw(token, wave.batches[0][0]).then((m) => ('why' in m ? { messages: [], retry: [], gone: [m], throttled: 0, reason: undefined } : { messages: [m], retry: [], gone: [], throttled: 0, reason: undefined }))]
           : wave.batches.map((ids) => batchGet(token, ids, 'raw')),
       );
       stats.gmailMs += Date.now() - t;
@@ -298,6 +300,7 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
         stats.reason ??= r.value.reason;
         p.trying = null;
         putBack(p, wave.tier, [r.value.retry]);
+        for (const g of r.value.gone) if (!p.gone?.some((x) => x.id === g.id)) (p.gone ??= []).push(g);
         if (!r.value.messages.length) continue;
         const packed = pack(account, r.value.messages, r2Keys.pack(user, account, month, `${runId}-${p.packs}`), syncedAt);
         await env.ARCHIVE.put(packed.key, packed.bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
@@ -563,7 +566,7 @@ async function landMonth(env: Env, user: UserId, account: string, p: LaneProgres
   const added = await rememberCopied(env, user, account, p.month, p.copiedIds);
   const mailbox = accountMailbox(env, user, account);
   // Messages new to the month, each once: a run's count can repeat one it copied again after a retry.
-  await mailbox.landMonth({ job: p.job, month: p.month }, { copied: added, bytes: p.bytes });
+  await mailbox.landMonth({ job: p.job, month: p.month }, { copied: added, bytes: p.bytes }, p.gone?.map((g) => g.id));
   await syncDeps.launch(env, { user, account, index: p.month }, `${account}-index-${p.month}-${Date.now().toString(36)}`);
   await env.ARCHIVE.delete(r2Keys.lane(user, account, p.month));
   await mailbox.endLane(p.month);

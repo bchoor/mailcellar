@@ -172,8 +172,10 @@ function badge(s: SyncSummary): { label: string; variant: 'default' | 'secondary
 /** A wait in words, from minutes. */
 const duration = (min: number) =>
   min < 60 ? `about ${Math.max(1, Math.round(min))} min` : min < 48 * 60 ? `about ${Math.round(min / 60)} h` : `about ${Math.round(min / 1440)} days`;
+/** Messages Gmail has in a month that can be copied: its count less those Gmail won't give. */
+const copyable = (m: MonthCoverage) => (m.gmail === null ? null : m.gmail - (m.unavailable ?? 0));
 /** Messages in a month Gmail has and MailCellar hasn't copied yet. */
-const left = (m: MonthCoverage) => Math.max(0, (m.gmail ?? 0) - m.copied);
+const left = (m: MonthCoverage) => Math.max(0, (copyable(m) ?? 0) - m.copied);
 
 /** The copy rate over the last 10 minutes, or why there is none. */
 function rateTile(s: SyncSummary, state: StageState): { value: string; caption: string } {
@@ -196,8 +198,9 @@ export function mailboxCounts(months: MonthCoverage[]): { gmail: number; copied:
   let searchable = 0;
   for (const m of months) {
     searchable += m.indexed;
-    if (m.gmail === null) continue;
-    gmail += m.gmail;
+    const n = copyable(m);
+    if (n === null) continue;
+    gmail += n;
     copied += m.copied;
   }
   // Capped on the total, not by month: Gmail files a few messages near a month's end under the
@@ -405,12 +408,13 @@ const facts = (id: string, email: string, copying: string[]) => (c: AccountCover
     .map((m) => ({
       row: id,
       period: m.month,
-      have: m.gmail === null ? m.copied : Math.min(m.copied, m.gmail),
-      expected: m.gmail ?? 0,
+      have: copyable(m) === null ? m.copied : Math.min(m.copied, copyable(m)!),
+      expected: copyable(m) ?? 0,
       state: monthState(m, copying),
       note:
         [
-          m.gmail !== null && m.copied < m.gmail && m.copied > 0 && !busyMonth(m) ? `${fmt(m.gmail - m.copied)} missing` : null,
+          copyable(m) !== null && m.copied < copyable(m)! && m.copied > 0 && !busyMonth(m) ? `${fmt(copyable(m)! - m.copied)} missing` : null,
+          m.unavailable ? `${fmt(m.unavailable)} Gmail won't give` : null,
           indexing(m) ? `${fmt(m.indexed)} of ${fmt(m.inBasin)} searchable` : null,
           m.error ? `Failed: ${shortError(m.error)}` : null,
         ]
@@ -431,11 +435,11 @@ function presetMonths(c: AccountCoverage, preset: Preset): string[] {
   const by = new Map(c.months.map((m) => [m.month, m]));
   const worth = (month: string) => {
     const m = by.get(month);
-    return !m || ((m.gmail === null || m.gmail > m.copied) && !busyMonth(m));
+    return !m || ((m.gmail === null || copyable(m)! > m.copied) && !busyMonth(m));
   };
   switch (preset) {
     case 'missing':
-      return c.months.filter((m) => m.gmail !== null && m.gmail > m.copied && !busyMonth(m)).map((m) => m.month);
+      return c.months.filter((m) => m.gmail !== null && copyable(m)! > m.copied && !busyMonth(m)).map((m) => m.month);
     case '3m':
       return monthRange(addMonths(c.current, -2), c.current).filter(worth);
     case '12m':
@@ -510,7 +514,7 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
         select={basin ? 'backfill' : undefined}
         selectable={(_row, key) => {
           const m = month(key);
-          return !!m && m.gmail !== null && m.gmail > m.copied && !busyMonth(m);
+          return !!m && m.gmail !== null && copyable(m)! > m.copied && !busyMonth(m);
         }}
         onQueue={(pick: CoveragePick) => queue(pick.flatMap((p) => p.months))}
         queueLabel="Start backfill"
@@ -609,7 +613,7 @@ function BackfillRow({ m, stage, left, action }: { m: MonthCoverage; stage: Stag
         </span>
       </TableCell>
       <TableCell className="w-[32%]">
-        <Meter done={m.copied} total={m.gmail ?? 0} color={stage === 'failed' ? 'failed' : m.gmail !== null && m.copied >= m.gmail ? 'done' : 'copy'} />
+        <Meter done={m.copied} total={copyable(m) ?? 0} color={stage === 'failed' ? 'failed' : m.gmail !== null && m.copied >= copyable(m)! ? 'done' : 'copy'} />
       </TableCell>
       <TableCell className="hidden w-[24%] md:table-cell">
         <Meter done={m.indexed} total={m.landed ? m.inBasin : 0} color="index" />
