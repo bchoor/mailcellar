@@ -113,7 +113,14 @@ export function AccountsSettings() {
                   await client.invalidateQueries({ queryKey: ['me'] });
                 }}
               />
-              <div>
+              <div className="flex gap-2">
+                {!a.test.ok && (
+                  <Button asChild size="sm">
+                    <a href={`/api/accounts/connect?email=${encodeURIComponent(a.email)}`}>
+                      <RefreshCwIcon /> Reconnect
+                    </a>
+                  </Button>
+                )}
                 <LumenConfirm
                   title={`Remove ${a.email}?`}
                   description="MailCellar stops copying mail from this account and gives up its access to it. Mail already copied stays in MailCellar."
