@@ -81,6 +81,12 @@ export interface LaneProgress {
   /** The lane stopped because backfill was paused: resuming starts it again at once. */
   stopped: 'paused' | null;
   error: string | null;
+  /**
+   * The lane was taken off its month (stopped, unqueued or failed). The file stays so the
+   * committer settles what it staged: its IDs go to the month's landed-IDs file and the month is
+   * indexed, without landing it.
+   */
+  ended?: boolean;
 }
 
 export const freshLane = (part: SyncPart, runId: string, prior: boolean): LaneProgress => {
@@ -103,6 +109,23 @@ export async function saveLane(env: Env, user: UserId, account: string, p: LaneP
     onlyIf: etag ? { etagMatches: etag } : { etagDoesNotMatch: '*' },
   });
   return put?.etag ?? null;
+}
+
+/** Mark a lane's file ended (see LaneProgress.ended); a run saving it at the same time wins, and ends it on its next turn. */
+export async function endLaneFile(env: Env, user: UserId, account: string, month: string): Promise<void> {
+  const got = await readLane(env, user, account, month);
+  if (got && !got.p.ended) await saveLane(env, user, account, { ...got.p, runId: '', ended: true, updatedAt: new Date().toISOString() }, got.etag);
+}
+
+/** Add copied IDs to the month's landed-IDs file, so a later copy of the month skips them. Returns how many were new. */
+export async function rememberCopied(env: Env, user: UserId, account: string, month: string, copiedIds: string[]): Promise<number> {
+  const key = r2Keys.copied(user, account, month);
+  const before = await env.ARCHIVE.get(key);
+  const ids = new Set(before ? ((await before.json()) as string[]) : []);
+  const had = ids.size;
+  for (const id of copiedIds) ids.add(id);
+  if (ids.size > had) await env.ARCHIVE.put(key, JSON.stringify([...ids]));
+  return ids.size - had;
 }
 
 const nextId = (account: string, month: string) => `${account}-${month}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
@@ -375,15 +398,15 @@ async function endListing(env: Env, user: UserId, account: string, p: LaneProgre
 async function failLane(env: Env, user: UserId, account: string, p: LaneProgress, error: string): Promise<LaneResult> {
   const mailbox = accountMailbox(env, user, account);
   await mailbox.finishPart({ job: p.job, month: p.month }, 'failed', error);
-  await env.ARCHIVE.delete(r2Keys.lane(user, account, p.month));
+  await endLaneFile(env, user, account, p.month);
   await mailbox.endLane(p.month);
   await launchLanes(env, user, account);
   return { copied: 0, more: false, nextId: null, resumesAt: null, stopped: 'failed' };
 }
 
-/** The month was taken out of the queue: the lane ends; what it copied and staged stays (and lands). */
+/** The month was taken out of the queue: the lane ends; what it copied and staged stays (and is settled). */
 async function endUnqueued(env: Env, user: UserId, account: string, p: LaneProgress): Promise<LaneResult> {
-  await env.ARCHIVE.delete(r2Keys.lane(user, account, p.month));
+  await endLaneFile(env, user, account, p.month);
   await accountMailbox(env, user, account).endLane(p.month);
   await launchLanes(env, user, account);
   return { copied: 0, more: false, nextId: null, resumesAt: null, stopped: 'unqueued' };
@@ -488,11 +511,14 @@ export async function runCommit(env: Env, user: UserId, account: string, runId: 
     classB++;
     if (!lane) continue;
     const p = (await lane.json()) as LaneProgress;
-    if (p.runId || p.list) continue;
+    if (p.runId || (p.list && !p.ended)) continue;
     const left = await env.ARCHIVE.list({ prefix: r2Keys.stagedPrefix(user, account, p.month), limit: 1 });
     if (left.objects.length) continue;
-    await landMonth(env, user, account, p);
-    landed.push(p.month);
+    if (p.ended) await settleMonth(env, user, account, p);
+    else {
+      await landMonth(env, user, account, p);
+      landed.push(p.month);
+    }
   }
   await quota.charge({ classA: classA + 2, classB });
 
@@ -511,17 +537,23 @@ export async function runCommit(env: Env, user: UserId, account: string, runId: 
   return { committed, landed, more: true, nextId: next, waitMs: behind && !c.error ? 0 : c.error ? 5 * COMMIT_EVERY_MS : COMMIT_EVERY_MS };
 }
 
+/**
+ * An ended lane's rows are all in Basin: remember its IDs and index what the month has. The month
+ * isn't landed (it wasn't listed to the end); what the lane copied was counted when it stopped.
+ */
+async function settleMonth(env: Env, user: UserId, account: string, p: LaneProgress): Promise<void> {
+  await rememberCopied(env, user, account, p.month, p.copiedIds);
+  if (p.copiedIds.length) await syncDeps.launch(env, { user, account, index: p.month }, `${account}-index-${p.month}-${Date.now().toString(36)}`);
+  await env.ARCHIVE.delete(r2Keys.lane(user, account, p.month));
+  console.log(JSON.stringify({ settled: { month: p.month, copied: p.copiedIds.length } }));
+}
+
 /** A month is all in Basin: remember its IDs, mark it done, build its index, and start the next month. */
 async function landMonth(env: Env, user: UserId, account: string, p: LaneProgress): Promise<void> {
-  const key = r2Keys.copied(user, account, p.month);
-  const before = await env.ARCHIVE.get(key);
-  const ids = new Set(before ? ((await before.json()) as string[]) : []);
-  const had = ids.size;
-  for (const id of p.copiedIds) ids.add(id);
-  await env.ARCHIVE.put(key, JSON.stringify([...ids]));
+  const added = await rememberCopied(env, user, account, p.month, p.copiedIds);
   const mailbox = accountMailbox(env, user, account);
   // Messages new to the month, each once: a run's count can repeat one it copied again after a retry.
-  await mailbox.landMonth({ job: p.job, month: p.month }, { copied: ids.size - had, bytes: p.bytes });
+  await mailbox.landMonth({ job: p.job, month: p.month }, { copied: added, bytes: p.bytes });
   await syncDeps.launch(env, { user, account, index: p.month }, `${account}-index-${p.month}-${Date.now().toString(36)}`);
   await env.ARCHIVE.delete(r2Keys.lane(user, account, p.month));
   await mailbox.endLane(p.month);

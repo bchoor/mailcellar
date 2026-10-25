@@ -80,7 +80,8 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
       return Response.json({ error: 'bad_json' }, { status: 400 });
     }
     if (typeof body.paused !== 'boolean') return Response.json({ error: 'bad_paused' }, { status: 400 });
-    await mailbox.setBackfillPaused(body.paused);
+    // Resuming is refused while spend is past the cap's stop line.
+    if (!(await mailbox.setBackfillPaused(body.paused))) return Response.json({ error: 'over_budget' }, { status: 409, headers: noStore });
     return Response.json(await mailbox.syncAll(), { headers: noStore });
   }
   // The one read the Backfill page and status bar poll: every mailbox, from its status row.

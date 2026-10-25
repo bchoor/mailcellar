@@ -48,7 +48,7 @@ import {
 } from '@mailcellar/schema';
 import type { Env } from './env';
 import { accountMailbox, accessToken, BasinNotReady, INDEX_CHUNK, INDEX_ROWS, launchLanes, RUN_COST, runDied, syncDeps } from './sync';
-import { BUCKET, FLIGHT, freshLane, readLane, saveLane } from './copy';
+import { BUCKET, endLaneFile, FLIGHT, freshLane, readLane, rememberCopied, saveLane } from './copy';
 import { GmailError } from './gmail';
 import { accountQuota } from './quota';
 
@@ -540,6 +540,8 @@ export class MailboxDO extends DurableObject<Env> {
     for (const f of fresh) {
       const runId = id(f.part.month);
       const got = await readLane(this.env, user, account, f.part.month);
+      // A lane that ended on this month and wasn't settled yet: keep its IDs before starting afresh.
+      if (got?.p.ended) await rememberCopied(this.env, user, account, f.part.month, got.p.copiedIds);
       if (await saveLane(this.env, user, account, freshLane(f.part, runId, f.prior), got?.etag ?? null)) out.push({ month: f.part.month, runId });
     }
     // A lane that checked in lately is running. One that hasn't (or stopped for a pause) starts again where it stood.
@@ -565,16 +567,15 @@ export class MailboxDO extends DurableObject<Env> {
   /** Whose account this object is, as lanes and the user's object tell it (to find lane files). */
   private laneUser: UserId | null = null;
   private laneAccount: string | null = null;
-  /** Workflow runs to start from the alarm: one started there begins a fresh request chain. */
-  private launches: { id: string; params: SyncParams }[] = [];
-
   /**
    * Start a run from this object's alarm instead of from the run before it. Workers counts a
    * run started by a run as nested in it, and refuses R2 and DO calls about ten deep, so a chain
-   * of runs that start each other dies after about ten. Costs one alarm (a row write) a run.
+   * of runs that start each other dies after about ten. The hand-over is stored (`launch:<id>`)
+   * so a deploy or restart before the alarm fires doesn't lose it. Costs the alarm plus two rows
+   * (the key written, then deleted) a run.
    */
   async launchLater(id: string, params: SyncParams): Promise<void> {
-    this.launches.push({ id, params });
+    await this.ctx.storage.put(`launch:${id}`, params);
     await this.ctx.storage.setAlarm(Date.now());
   }
 
@@ -859,6 +860,11 @@ export class MailboxDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec(`SELECT 1 FROM job_months WHERE state IN ('queued', 'running') LIMIT 1`).toArray().length > 0;
   }
 
+  /** Whether any month has mail in Basin its search index hasn't been built for yet. */
+  async indexPending(): Promise<boolean> {
+    return this.ctx.storage.sql.exec(`SELECT 1 FROM basin_months WHERE copied > 0 AND indexed_at IS NULL LIMIT 1`).toArray().length > 0;
+  }
+
   /** A backfill month's state now (a canceled one is dropped by the sync). */
   async partState(part: SyncPart): Promise<PartState | null> {
     return (
@@ -1022,7 +1028,8 @@ export class MailboxDO extends DurableObject<Env> {
         this.count({ do_rows_written: rowsWritten + this.changed([month]) });
       }
       await this.endLane(month);
-      if (user) await this.env.ARCHIVE.delete(r2Keys.lane(user, this.laneAccount!, month));
+      // The file stays, ended: the committer settles what the lane staged (copy.ts, settleMonth).
+      if (user) await endLaneFile(this.env, user, this.laneAccount!, month);
     }
   }
 
@@ -1358,14 +1365,22 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** Gmail sync's scheduled run: start a sync for each account that isn't syncing already. */
   async alarm(): Promise<void> {
-    for (const l of this.launches.splice(0)) {
+    let retry = false;
+    for (const [key, params] of await this.ctx.storage.list<SyncParams>({ prefix: 'launch:' })) {
+      const id = key.slice('launch:'.length);
       try {
-        await this.env.SYNC.create({ id: l.id, params: l.params });
+        await this.env.SYNC.create({ id, params });
       } catch (e) {
-        // Already started (a retried hand-over): nothing to do.
-        if (!/already exists/i.test(String(e))) console.error('launch', l.id, e);
+        // Already started (a retried hand-over): nothing to do. Anything else is tried at the next alarm.
+        if (!/already exists/i.test(String(e))) {
+          console.error('launch', id, e);
+          retry = true;
+          continue;
+        }
       }
+      await this.ctx.storage.delete(key);
     }
+    if (retry) await this.ctx.storage.setAlarm(Date.now() + 30_000);
     const user = this.userId();
     if (!user) return;
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
@@ -1595,6 +1610,11 @@ export class MailboxDO extends DurableObject<Env> {
       .filter((m) => m.month < now && m.gmail !== null && m.gmail > m.copied)
       .map((m) => m.month);
     if (!months.length) return { months };
+    // A person's pause is theirs to lift: the months wait in the queue until they resume.
+    if (this.pausedBy() === 'person') {
+      const job = await accountMailbox(this.env, user, account).queueMonths(months, 'All missing months');
+      return { months, job, error: 'paused' };
+    }
     if (!(await this.setBackfillPaused(false))) return { months, error: 'over_budget' };
     const r = await this.backfill(account, months, 'All missing months');
     return 'error' in r ? { months, error: r.error } : { months, job: r.job };
@@ -1624,6 +1644,8 @@ export class MailboxDO extends DurableObject<Env> {
     }
     if (active.length) return { started: false, active };
     const job = await accountMailbox(this.env, user, account).queueMonths([month], `Speed test: ${month}`);
+    // A person's pause is theirs to lift: the test month waits in the queue until they resume.
+    if (this.pausedBy() === 'person') return { started: false, active, job, parked };
     return { started: await this.setBackfillPaused(false), active, job, parked };
   }
 

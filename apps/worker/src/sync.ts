@@ -468,7 +468,8 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   await mailbox.markIndexed(month, inBasin);
   // Senders, domains and labels once backfill is done, not once a month.
   // (Senders, domains and labels left with no mail after unindexMonth keep their rows until mail returns.)
-  if (!(await mailbox.hasQueued())) {
+  // Once, when the last month is indexed: rebuilt after every month it rewrote each changed sender again.
+  if (!(await mailbox.hasQueued()) && !(await mailbox.indexPending())) {
     const n = await mailbox.indexedCount();
     const full = await quota.reserve({ do_rows_read: n, do_rows_written: Math.ceil(n / 4) });
     if (!full) {
