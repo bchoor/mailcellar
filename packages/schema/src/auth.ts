@@ -33,13 +33,11 @@ export interface ConnectedAccount {
 export interface ArchiveImport {
   file: string;
   bytes: number;
-  uploaded: number;
-  /** Messages found in the file (null until the import's first pass has read it all), and imported so far. */
+  /** Messages found in the file (null until the import has read it all), and imported so far. */
   messages: number | null;
   imported: number;
-  status: 'uploading' | 'upload_paused' | 'importing' | 'done' | 'failed';
-  /** Upload speed while uploading, bytes a second. */
-  bytesPerSec: number | null;
+  /** The upload's progress is the browser's own (uploading); the import's shows on Backfill. */
+  status: 'uploading' | 'importing' | 'done' | 'failed';
   error: string | null;
 }
 

@@ -126,6 +126,8 @@ export interface SyncParams {
   reindex?: boolean;
   /** Instead of syncing, queue every past month with mail not yet copied, and resume backfill. */
   missing?: boolean;
+  /** Import an archive's uploaded mbox: one run of the chain (import.ts). */
+  import?: boolean;
 }
 
 /** Where an account's sync stands: a run is going, it's waiting to resume, it stopped on an error, or it can start. */

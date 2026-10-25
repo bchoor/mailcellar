@@ -13,6 +13,7 @@ import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarge
 import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
 import { runCommit, runLane } from './copy';
+import { runImport } from './import';
 import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, headers, indexRow, labels, listPage, packBySize, parseAddresses, profile, type RawMessage } from './gmail';
 
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
@@ -697,6 +698,14 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       if (!r.more || !r.nextId) return r;
       if (r.waitMs) await step.sleep('wait for more staged rows', r.waitMs);
       await step.do('next run', () => syncDeps.launch(this.env, { user, account, commit: true }, r.nextId!));
+      return r;
+    }
+    if (event.payload.import) {
+      // An archive's import: each run saves its progress to a raw file and names the next run.
+      const r = await step.do('import', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runImport(this.env, user, account, runId));
+      if (!r.nextId) return r;
+      if (r.resumesAt) await step.sleepUntil('wait before trying again', new Date(r.resumesAt));
+      await step.do('next run', () => syncDeps.launch(this.env, { user, account, import: true }, r.nextId!));
       return r;
     }
     if (month) {
