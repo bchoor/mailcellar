@@ -1,5 +1,5 @@
 // The Cloudflare account's limits (/api/quota): every project on the account counts, and
-// backfills pause before a hard daily limit. Shown on the Backfill and Usage pages.
+// backfills pause before a hard daily limit. Shown on the Usage page.
 import { IconButton, NoteLine } from '@columenlabs/lumen-ui';
 import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-group';
 import { quotaStop, type LevelMeter, type QuotaMeter, type QuotaOverview, type QuotaPart } from '@mailcellar/schema';
@@ -38,7 +38,7 @@ export function useQuota() {
 /** All: the account's use, by project. MailCellar: only MailCellar's own share. */
 type Show = 'all' | 'mine';
 
-// Both pages' cards share the choice, and the header's toggle drives the body.
+// The header's toggle drives the body.
 let shown: Show = 'all';
 const listeners = new Set<() => void>();
 const useShow = () =>
