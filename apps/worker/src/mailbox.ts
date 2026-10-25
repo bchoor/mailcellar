@@ -454,7 +454,11 @@ export class MailboxDO extends DurableObject<Env> {
 
   private meta<T>(key: string): T | null {
     const row = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key).toArray()[0];
-    return row ? (JSON.parse(row.value) as T) : null;
+    if (!row) return null;
+    const value = JSON.parse(row.value) as T;
+    // Syncs saved before the rename call waiting for a daily limit 'paused'.
+    if (key === 'sync' && (value as { phase?: string }).phase === 'paused') (value as { phase: string }).phase = 'waiting';
+    return value;
   }
 
   private putMeta(key: string, value: unknown): number {
@@ -1518,7 +1522,7 @@ export class MailboxDO extends DurableObject<Env> {
    * replaces it now; the sleeping one finds another run ID when it wakes, and stops.
    */
   private async pauseLifted(state: SyncState): Promise<boolean> {
-    if (state.phase !== 'paused' || syncStatus(state) !== 'waiting') return false;
+    if (state.phase !== 'waiting' || syncStatus(state) !== 'waiting') return false;
     return !(await accountQuota(this.env).reserve(RUN_COST));
   }
 

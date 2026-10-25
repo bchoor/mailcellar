@@ -24,7 +24,9 @@
     "BASIN_WAREHOUSE": "87a4f50952b4b2ce00cab6c2680e63ae_mailcellar",
     "BASIN_BUCKET": "mailcellar",
     // The account whose analytics and plan the quota meter reads: secrets CF_ANALYTICS_TOKEN and CF_BILLING_TOKEN.
-    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae"
+    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae",
+    // Who may use the end-to-end test switch (PUT /api/admin/test-limit).
+    "ADMIN_EMAILS": "bchoor@gmail.com"
   },
   "durable_objects": {
     "bindings": [

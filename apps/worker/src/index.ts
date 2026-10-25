@@ -196,6 +196,22 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     return Response.json(await accountQuota(env).overview(), { headers: noStore });
   if (url.pathname === '/api/quota/refresh' && request.method === 'POST')
     return Response.json(await accountQuota(env).readNow(), { headers: noStore });
+  if (url.pathname === '/api/admin/test-limit' && (request.method === 'PUT' || request.method === 'DELETE')) {
+    // The end-to-end test switch, for 30 minutes: {"doWrites": 500, "resetMin": 3, "spendStop": 0.2}. Admins only.
+    const admins = (env.ADMIN_EMAILS ?? '').toLowerCase().split(',').map((e) => e.trim()).filter(Boolean);
+    if (!admins.includes(email.toLowerCase())) return Response.json({ error: 'forbidden' }, { status: 403, headers: noStore });
+    if (request.method === 'DELETE') return Response.json({ test: await accountQuota(env).setTestLimit(null) }, { headers: noStore });
+    let body: { doWrites?: unknown; resetMin?: unknown; spendStop?: unknown };
+    try {
+      body = JSON.parse((await request.text()).slice(0, 1024));
+    } catch {
+      return Response.json({ error: 'bad_json' }, { status: 400 });
+    }
+    const num = (v: unknown, max: number) => (v === undefined ? undefined : typeof v === 'number' && v >= 0 && v <= max ? v : NaN);
+    const o = { doWrites: num(body.doWrites, 50_000), resetMin: num(body.resetMin, 30), spendStop: num(body.spendStop, 1) };
+    if (Object.values(o).some((v) => Number.isNaN(v))) return Response.json({ error: 'bad_limit' }, { status: 400 });
+    return Response.json({ test: await accountQuota(env).setTestLimit(o) }, { headers: noStore });
+  }
   if (url.pathname === '/api/schedules' && request.method === 'GET')
     return Response.json(await mailbox.schedules(), { headers: noStore });
   const schedule = url.pathname.match(/^\/api\/schedules\/([a-z-]{1,40})$/);

@@ -6,8 +6,8 @@ export type SyncPhase =
   | 'backfill'
   /** Backfill finished; new mail is copied on each sync. */
   | 'live'
-  /** Stopped for the day at the free tier's write limit; resumes after 00:00 UTC. */
-  | 'paused'
+  /** Waiting for a daily limit to reset (resumesAt); copying is not paused, it is waiting. */
+  | 'waiting'
   /** Stopped on an error that needs the person (for example, access was removed). */
   | 'error';
 
