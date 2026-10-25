@@ -4,7 +4,7 @@ import {
   type FiltersResponse,
   type GmailError,
   type GmailFilter,
-  type LabelColors,
+  type GmailLabels,
   parseFrom,
   SUBSCRIPTION_SCAN,
   type Subscription,
@@ -56,16 +56,21 @@ export async function filters(token: string): Promise<FiltersResponse> {
   };
 }
 
-/** The colours the person gave their labels in Gmail, by label id; labels without one are left out. */
-export async function labelColors(token: string): Promise<LabelColors> {
-  const l = await get<{ labels?: { id: string; color?: { backgroundColor?: string; textColor?: string } }[] }>(
+/** The account's labels as Gmail has them now: names (including ones made since the last sync) and colours. */
+export async function gmailLabels(token: string): Promise<GmailLabels> {
+  const l = await get<{ labels?: { id: string; name: string; type?: string; color?: { backgroundColor?: string; textColor?: string } }[] }>(
     token,
-    '/labels?fields=labels(id,color)',
+    '/labels?fields=labels(id,name,type,color)',
   );
   return Object.fromEntries(
-    (l.labels ?? [])
-      .filter((x) => x.color?.backgroundColor && x.color.textColor)
-      .map((x) => [x.id, { bg: x.color!.backgroundColor!, fg: x.color!.textColor! }]),
+    (l.labels ?? []).map((x) => [
+      x.id,
+      {
+        name: x.name,
+        type: x.type === 'system' ? 'system' : 'user',
+        ...(x.color?.backgroundColor && x.color.textColor ? { bg: x.color.backgroundColor, fg: x.color.textColor } : {}),
+      },
+    ]),
   );
 }
 

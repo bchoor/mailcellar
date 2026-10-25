@@ -10,6 +10,7 @@ import {
   type ArchiveRows,
   type ArchiveView,
   type IndexedMessage,
+  type GmailLabels,
   type MailLabel,
   checkScheduleChange,
   DEFAULT_SCHEDULES,
@@ -874,6 +875,17 @@ export class MailboxDO extends DurableObject<Env> {
     });
   }
 
+  /** Give indexed labels Gmail's current names; writes only the rows whose name changed. */
+  async nameLabels(labels: GmailLabels): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    let written = 0;
+    this.ctx.storage.transactionSync(() => {
+      for (const [id, l] of Object.entries(labels))
+        written += sql.exec(`UPDATE labels SET name = ?, type = ? WHERE id = ? AND (name IS NOT ? OR type IS NOT ?)`, l.name, l.type, id, l.name, l.type).rowsWritten;
+    });
+    if (written) this.count({ do_rows_written: written });
+  }
+
   /** Backfill months waiting or being copied. */
   async activeList(): Promise<string[]> {
     return [...this.activeMonths().keys()].sort();
@@ -1182,7 +1194,7 @@ export class MailboxDO extends DurableObject<Env> {
              n = n + excluded.n, bytes = bytes + excluded.bytes`,
           month, t.n, t.bytes,
         );
-      // A label Gmail has not named yet keeps its ID as its name until putLabels runs.
+      // A label Gmail has not named yet keeps its ID as its name until putLabels or nameLabels runs.
       for (const [id, t] of labels)
         run(
           `INSERT INTO labels VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET

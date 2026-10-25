@@ -318,7 +318,8 @@ export async function runBatch(
       if (calls) await scheduler.wait(1000);
       calls++;
       const { messages, retry } = await batchGet(token, take.slice(i, i + BATCH_SIZE), 'minimal');
-      sized.push(...messages);
+      // Spam and Trash are left out, as the backfill's Gmail list leaves them out.
+      sized.push(...messages.filter((m) => !m.labelIds?.some((l) => l === 'SPAM' || l === 'TRASH')));
       rest.push(...retry);
     }
     // Keep the run's CPU in budget: what doesn't fit goes to the next run.
