@@ -1,7 +1,7 @@
 // Archive mailboxes: mail imported from an mbox file, with no Gmail link and no sync. The file is
 // uploaded from the browser in parts straight to raw files (resumable), then a background import
 // splits it into messages and writes them like a backfill. Progress shows on the Backfill page.
-import { ErrorLine, IntegrationRow, LumenConfirm } from '@columenlabs/lumen-ui';
+import { ErrorLine, IntegrationRow, LumenConfirm, useShell } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Input } from '@columenlabs/lumen-ui/ui/input';
@@ -170,6 +170,7 @@ function FilePick({ file, onFile, prompt }: { file: File | null; onFile: (f: Fil
 /** One archive mailbox in Settings ▸ Accounts: its file, and the upload while it runs. */
 export function ArchiveRow({ a, open, onOpenChange }: { a: ConnectedAccount; open: boolean; onOpenChange: (o: boolean) => void }) {
   const client = useQueryClient();
+  const { closeSettings } = useShell();
   const x = a.archive!;
   const u = useUpload(a.id);
   const [problem, setProblem] = useState<Error | null>(null);
@@ -221,7 +222,7 @@ export function ArchiveRow({ a, open, onOpenChange }: { a: ConnectedAccount; ope
         {!uploading && (
           <p className="text-sm text-muted-foreground">
             {x.status === 'failed' ? 'The import stopped.' : x.messages === null ? `Reading the file. ${fmt(x.imported)} messages imported so far.` : `${fmt(x.imported)} of ${fmt(x.messages)} messages imported.`}{' '}
-            <Link to="/backfill" search={{ mailbox: a.email }} className="underline">
+            <Link to="/backfill" search={{ mailbox: a.email }} className="underline" onClick={closeSettings}>
               Open Backfill
             </Link>
           </p>
