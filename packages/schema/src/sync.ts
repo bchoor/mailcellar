@@ -300,6 +300,8 @@ export interface AccountStatus extends AccountCoverage {
   jobs: BackfillJob[];
   /** Messages in this mailbox's search index. */
   totals: { indexed: number };
+  /** Size copied (as Gmail counts it), a point a minute over the last hour, while copying; empty after a restart until copying moves. */
+  sizes: { at: string; bytes: number }[];
 }
 
 /**

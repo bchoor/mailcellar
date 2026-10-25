@@ -209,6 +209,8 @@ export interface QuotaOverview {
   meters: QuotaMeter[];
   /** Storage and Workflows running, as last read; empty until read. */
   levels: LevelMeter[];
+  /** DO rows written on the account each hour (UTC) over the last 24 hours, as last read; empty until read. */
+  doHours?: { at: string; written: number }[];
   /** CPU per request by Worker, most requests first, as last read; empty until read. */
   /** When Refresh may read Cloudflare again (at most one read a minute). */
   refreshAt: string;

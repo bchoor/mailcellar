@@ -31,13 +31,14 @@ const periodKey = (limits: Limits, metric: QuotaMetric, now: Date, billing: Bill
 const GRAPHQL = 'https://api.cloudflare.com/client/v4/graphql';
 // Each family is read from the start of its period on the plan: today on Free, the month on Paid.
 // Storage is read for the last two days, and each store's latest day counts.
-const QUERY = `query($a: String!, $workers: Time!, $to: Time!, $dos: Date!, $d1: Date!, $r2: Date!, $stored: Date!) {
+const QUERY = `query($a: String!, $workers: Time!, $to: Time!, $dos: Date!, $d1: Date!, $r2: Date!, $stored: Date!, $hours: Time!) {
   viewer { accounts(filter: {accountTag: $a}) {
     workers: workersInvocationsAdaptive(limit: 10000, filter: {datetime_geq: $workers, datetime_lt: $to}) { dimensions { scriptName } sum { requests } }
     doStored: durableObjectsSqlStorageGroups(limit: 10000, filter: {date_geq: $stored}) { dimensions { namespaceId date } max { storedBytes } }
     d1Stored: d1StorageAdaptiveGroups(limit: 10000, filter: {date_geq: $stored}) { dimensions { databaseId date } max { databaseSizeBytes } }
     r2Stored: r2StorageAdaptiveGroups(limit: 10000, filter: {date_geq: $stored}) { dimensions { bucketName date } max { payloadSize metadataSize } }
     dos: durableObjectsPeriodicGroups(limit: 10000, filter: {date_geq: $dos}) { dimensions { namespaceId } sum { rowsRead rowsWritten } }
+    doHours: durableObjectsPeriodicGroups(limit: 100, filter: {datetimeHour_geq: $hours}) { dimensions { datetimeHour } sum { rowsWritten } }
     d1: d1AnalyticsAdaptiveGroups(limit: 10000, filter: {date_geq: $d1}) { dimensions { databaseId } sum { rowsRead rowsWritten } }
     r2: r2OperationsAdaptiveGroups(limit: 10000, filter: {date_geq: $r2}) { dimensions { actionType bucketName } sum { requests } }
   } }
@@ -46,6 +47,7 @@ const QUERY = `query($a: String!, $workers: Time!, $to: Time!, $dos: Date!, $d1:
 interface CfAccount {
   workers: { dimensions?: { scriptName?: string }; sum: { requests: number } }[];
   dos: { dimensions?: { namespaceId?: string }; sum: { rowsRead: number; rowsWritten: number } }[];
+  doHours?: { dimensions: { datetimeHour: string }; sum: { rowsWritten: number } }[];
   d1: { dimensions?: { databaseId?: string }; sum: { rowsRead: number; rowsWritten: number } }[];
   r2: { dimensions: { actionType: string; bucketName: string }; sum: { requests: number } }[];
   doStored?: { dimensions: { namespaceId?: string; date: string }; max: { storedBytes: number } }[];
@@ -58,6 +60,8 @@ export type CloudflareFigures = Record<QuotaMetric, number> & {
   parts?: Partial<Record<QuotaMetric, QuotaPart[]>>;
   /** Each level by who holds it; a level left out couldn't be read. */
   levels?: Partial<Record<LevelMetric, QuotaPart[]>>;
+  /** DO rows written on the account each hour over the last 24 hours, oldest first (an hour with none is 0). */
+  doHours?: { at: string; written: number }[];
 };
 
 /** Totals by name, most first, the rest past QUOTA_PARTS summed as Other. MailCellar's own always shows. */
@@ -119,6 +123,9 @@ export async function readWorkflows(env: Env): Promise<QuotaPart[]> {
   return topParts(by);
 }
 
+/** The start of the first of the last 24 hours (UTC), the current hour included. */
+const firstHour = (now: Date) => new Date(Math.floor(now.getTime() / 3_600_000) * 3_600_000 - 23 * 3_600_000);
+
 /** The account's use this period of each meter on the plan, from Cloudflare's GraphQL analytics. */
 export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date(), billing: BillingPeriod | null = null, known: Record<string, string> = {}): Promise<CloudflareFigures> {
   if (!env.CF_ANALYTICS_TOKEN) throw new Error('No Cloudflare analytics token is set.');
@@ -133,6 +140,7 @@ export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()
         a: env.CF_ACCOUNT_ID, workers: `${from('workers_requests')}T00:00:00Z`, to: now.toISOString(),
         dos: from('do_rows_written'), d1: from('d1_rows_written'), r2: from('r2_class_a'),
         stored: new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10),
+        hours: firstHour(now).toISOString(),
       },
     }),
   });
@@ -173,7 +181,17 @@ export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()
   } catch {
     // Left out: the page says Workflows running couldn't be read.
   }
+  const hourly = new Map<number, number>();
+  for (const r of a.doHours ?? []) {
+    const t = Date.parse(r.dimensions.datetimeHour);
+    hourly.set(t, (hourly.get(t) ?? 0) + r.sum.rowsWritten);
+  }
+  const doHours = Array.from({ length: 24 }, (_, i) => {
+    const t = firstHour(now).getTime() + i * 3_600_000;
+    return { at: new Date(t).toISOString(), written: hourly.get(t) ?? 0 };
+  });
   return {
+    doHours,
     parts: {
       workers_requests: by(a.workers, script, (r) => r.sum.requests),
       do_rows_written: by(a.dos, ns, (r) => r.sum.rowsWritten),
@@ -292,6 +310,8 @@ export class QuotaDO extends DurableObject<Env> {
   private spendSavedAt = 0;
   /** Cloudflare's figures, as last read. */
   private spendCf: { use: SpendUse; at: number; tried: number } | null = null;
+  /** DO rows written each hour, as last read; in memory only (read again after a restart). */
+  private doHours: { at: string; written: number }[] = [];
 
   private ownSpend(): SpendUse {
     if (!this.spendOurs) {
@@ -474,6 +494,7 @@ export class QuotaDO extends DurableObject<Env> {
         this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO cloudflare VALUES (?, ?, ?, ?)`, m, this.start(m, now), cf[m], this.ours(m, now));
       this.setMeta('parts', JSON.stringify(cf.parts ?? {}));
       this.setMeta('levels', JSON.stringify(cf.levels ?? {}));
+      this.doHours = cf.doHours ?? [];
       this.setMeta('read_at', now.toISOString());
       this.setMeta('read_error', null);
     } catch (e) {
@@ -590,6 +611,7 @@ export class QuotaDO extends DurableObject<Env> {
       billing: this.billing(now),
       meters,
       levels,
+      doHours: this.doHours,
       refreshAt: new Date((tried ? Date.parse(tried) : now.getTime()) + QUOTA_REFRESH_MS).toISOString(),
       paused: over ? { metric: over.metric, label: over.label, resumesAt: over.resetsAt } : null,
       spend: await this.spend(),

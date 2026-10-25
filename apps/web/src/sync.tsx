@@ -20,6 +20,7 @@ import { CalendarRangeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIco
 import { type ReactNode, useEffect, useState } from 'react';
 import { EmptyState } from './archive';
 import { useQuota } from './quota';
+import { Spark, WithSpark } from './spark';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 const size = (bytes: number) =>
@@ -261,7 +262,7 @@ function SyncNowHelp() {
   );
 }
 
-function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; sync: SyncSummary; basin: boolean; copy: StageState; index: StageState; meters: QuotaMeter[] }) {
+function AccountSync({ id, sync: s, basin, copy, index, meters, sizes = [], doHours = [] }: { id: string; sync: SyncSummary; basin: boolean; copy: StageState; index: StageState; meters: QuotaMeter[]; sizes?: AccountStatus['sizes']; doHours?: { at: string; written: number }[] }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
@@ -329,7 +330,12 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
                 value={fmt(toCopy)}
                 caption={!queued.length ? 'nothing queued' : `in ${months(queued.length)}${s.ratePerMin ? ` · ${duration(toCopy / s.ratePerMin).replace('about ', '~')}` : ''}`}
               />
-              <Tile className="lg:flex-1" label="Size" value={size(s.bytes)} caption="as Gmail counts it" />
+              <Tile
+                className="lg:flex-1"
+                label="Size"
+                value={<WithSpark value={size(s.bytes)} spark={<Spark label="Size over the last hour" points={sizes.map((p) => [Date.parse(p.at), p.bytes])} />} />}
+                caption="as Gmail counts it"
+              />
             </TileRow>
           </div>
         )}
@@ -342,7 +348,12 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
               <Tile
                 className="lg:flex-1"
                 label="DO writes today"
-                value={writes ? compact(writes.used) : '—'}
+                value={
+                  <WithSpark
+                    value={writes ? compact(writes.used) : '—'}
+                    spark={doHours.some((h) => h.written) && <Spark label="DO writes each hour, last 24 hours" points={doHours.map((h) => [Date.parse(h.at), h.written])} />}
+                  />
+                }
                 caption={reads ? `${compact(reads.used)} reads` : 'not read yet'}
               />
             </TileRow>
@@ -952,7 +963,7 @@ export function BackfillPage() {
                 tools: <RefreshTool keys={[BACKFILL_KEY]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} />;
+                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} />;
                 },
               },
               {
