@@ -12,4 +12,4 @@ MailCellar uses SemVer `v0.MINOR.PATCH` tags, cut by `scripts/release.sh` from `
 
 Setup: none. With no tag, the first run tags the first commit `v0.0.0`, and merges count from there.
 
-Deploys are separate: Cloudflare Workers Builds is connected to this repo and deploys every push to `main` to https://mailcellar.icaruslab.dev (build `bun install --frozen-lockfile && bun run build`, deploy `bunx wrangler deploy`). Cloudflare manages its own build token, so no Cloudflare token lives in GitHub. Edit it under the Worker's Settings > Builds.
+Deploys are separate: Cloudflare Workers Builds is connected to this repo and deploys every push to `main` to the Worker's custom domain (build `bun install --frozen-lockfile && bun run build`, deploy `bunx wrangler deploy`). Cloudflare manages its own build token, so no Cloudflare token lives in GitHub. Edit it under the Worker's Settings > Builds.

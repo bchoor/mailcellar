@@ -4,9 +4,9 @@
 // Object read or write: the raw files and Basin are under the person's own prefix.
 import { basinNamespace, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
 import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
-import { restCatalogConnect, restCatalogLoadTable } from 'icebird';
+import { restCatalogLoadTable } from 'icebird';
 import PostalMime, { type Address, type Attachment, type Email } from 'postal-mime';
-import { MESSAGES_TABLE, monthFiles, r2Resolver, type TableMetadata } from './basin';
+import { basinCatalog, MESSAGES_TABLE, monthFiles, r2Resolver, type TableMetadata } from './basin';
 import type { Env } from './env';
 
 /** Inline images past this many bytes, all told, stay as cid: links rather than data URLs. */
@@ -23,13 +23,6 @@ interface Locations {
 
 // Months already read, for this isolate: an open after the first reads no file to find its message.
 const months = new Map<string, Locations>();
-
-const basinCatalog = (env: Env) =>
-  restCatalogConnect({
-    url: env.BASIN_CATALOG_URI,
-    warehouse: env.BASIN_WAREHOUSE,
-    requestInit: { headers: { authorization: `Bearer ${env.BASIN_TOKEN}` } },
-  });
 
 /** Every message of the month from its Basin rows; null when Basin has no table yet. */
 async function fromBasin(env: Env, user: UserId, account: string, month: string): Promise<Locations | null> {
