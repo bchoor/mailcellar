@@ -122,7 +122,10 @@ export async function batchGet<F extends 'minimal' | 'raw'>(
       throttled++;
       reason ??= errorMessage(p.body);
     } else if (p.status >= 500) retry.push(id);
-    else if (p.status !== 404) throw new GmailError(p.status, `Gmail message fetch failed (HTTP ${p.status})`);
+    // 400: Gmail won't give this one message (seen on 2015-16 mail). Skip it, logged, so the
+    // month's lane finishes; the month's count then shows it missing.
+    else if (p.status === 400) console.error('gmail skipped', id, errorMessage(p.body));
+    else if (p.status !== 404) throw new GmailError(p.status, `Gmail message fetch failed (HTTP ${p.status}: ${errorMessage(p.body)})`);
   }
   for (const id of ids) if (!got.has(id)) retry.push(id);
   return { messages, retry, throttled, reason };
@@ -149,7 +152,12 @@ export async function getRaw(token: string, id: string): Promise<RawMessage | nu
   if (res.status === 404) return null;
   if (!res.ok) {
     const text = await res.text();
-    throw new GmailError(res.status === 403 && rateLimited(text) ? 429 : res.status, `Gmail message fetch failed (HTTP ${res.status})`);
+    // 400: skipped and logged, as in batchGet.
+    if (res.status === 400) {
+      console.error('gmail skipped', id, errorMessage(text));
+      return null;
+    }
+    throw new GmailError(res.status === 403 && rateLimited(text) ? 429 : res.status, `Gmail message fetch failed (HTTP ${res.status}: ${errorMessage(text)})`);
   }
   return (await res.json()) as RawMessage;
 }
