@@ -91,7 +91,9 @@ function NoMail() {
   const { account } = useMailbox();
   return (
     <EmptyState icon={MailIcon} title="No mail yet">
-      {account
+      {account?.kind === 'archive'
+        ? `Nothing is imported into ${account.email} yet.`
+        : account
         ? `Mail from ${account.email} shows here once the backfill copies it.`
         : 'Add a Gmail account in Settings ▸ Accounts. Mail shows here once the backfill copies it.'}
     </EmptyState>
@@ -753,9 +755,10 @@ export function MessagesPage() {
 }
 
 function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
-  title, source, domain, initial, rowTitle, intro,
+  title, source, domain, initial, rowTitle, intro, icon,
 }: {
   title: string;
+  icon: LucideIcon;
   intro: ReactNode;
   source: V;
   domain: ViewDomain<ArchiveRows[V]>;
@@ -766,7 +769,8 @@ function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
   const load = useLumenLoad(query);
   const [config, setConfig] = useState(() => view(title, initial));
   const crumbs = useMailboxCrumbs('Panes', title);
-  if (isEmpty(query)) return <EmptyPage title="Panes" />;
+  // An empty tab says so inside the pane; the tabs stay so another can be picked.
+  const empty = isEmpty(query) && <EmptyState icon={icon} title={`No ${title === 'Time' ? 'months' : title.toLowerCase()} in this mailbox`} />;
   return (
     <LumenLayout
       crumbs={crumbs}
@@ -777,34 +781,35 @@ function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
       load={load}
       onConfigChange={setConfig}
       rowTitle={rowTitle}
+      state={empty || undefined}
     />
   );
 }
 
 const SendersPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Senders" source="senders" domain={SENDERS} rowTitle={(r) => r.addr} intro={intro}
+    title="Senders" icon={UsersIcon} source="senders" domain={SENDERS} rowTitle={(r) => r.addr} intro={intro}
     initial={{ columns: ['from', 'name', 'n', 'size_mb', 'first', 'last'], sort: { key: 'n', desc: true } }}
   />
 );
 
 const DomainsPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Domains" source="domains" domain={DOMAINS} rowTitle={(r) => r.domain} intro={intro}
+    title="Domains" icon={GlobeIcon} source="domains" domain={DOMAINS} rowTitle={(r) => r.domain} intro={intro}
     initial={{ columns: ['domain', 'n', 'size_mb'], sort: { key: 'n', desc: true } }}
   />
 );
 
 const LabelsPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Labels" source="labels" domain={LABELS} rowTitle={labelName} intro={intro}
+    title="Labels" icon={TagIcon} source="labels" domain={LABELS} rowTitle={labelName} intro={intro}
     initial={{ columns: ['label', 'type', 'n', 'size_mb'], sort: { key: 'n', desc: true } }}
   />
 );
 
 const TimePane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Time" source="months" domain={MONTHS} rowTitle={(r) => monthName(r.month)} intro={intro}
+    title="Time" icon={CalendarClockIcon} source="months" domain={MONTHS} rowTitle={(r) => monthName(r.month)} intro={intro}
     initial={{
       shape: 'group',
       group: { fields: ['year'], default: 'year' },
