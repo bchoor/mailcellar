@@ -540,6 +540,33 @@ async function forgetMissing(env: Env, user: UserId, account: string, month: str
   await env.ARCHIVE.put(key, JSON.stringify(ids));
 }
 
+/**
+ * The search index against Gmail's month lists for a year: indexed messages no month of the year
+ * lists (with their dates and labels), and listed messages the index lacks. Months with a saved
+ * list use it; the rest are listed from Gmail now. Reads only.
+ */
+async function auditIndex(env: Env, user: UserId, account: string, year: string) {
+  const months = Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`).filter((m) => m <= monthNow());
+  const listed = new Map<string, string>();
+  const live: string[] = [];
+  for (const m of months) {
+    const ids = (await readListed(env, user, account, m)) ?? (live.push(m), await listMonth(env, user, account, m));
+    if (!ids) return { error: `couldn't list ${m}` };
+    for (const id of ids) listed.set(id, m);
+  }
+  const indexed = await accountMailbox(env, user, account).indexedIn(year);
+  const have = new Set(indexed.map((r) => r.id));
+  const month = (ts: number) => new Date(ts).toISOString().slice(0, 7);
+  return {
+    live,
+    listed: listed.size,
+    indexed: indexed.length,
+    notListed: indexed.filter((r) => !listed.has(r.id)).map((r) => ({ id: r.id, date: new Date(r.ts).toISOString(), labels: r.labels })),
+    notIndexed: [...listed].filter(([id]) => !have.has(id)).map(([id, m]) => ({ id, month: m })),
+    otherMonth: indexed.filter((r) => listed.has(r.id) && listed.get(r.id) !== month(r.ts)).map((r) => ({ id: r.id, date: new Date(r.ts).toISOString(), listedIn: listed.get(r.id) })),
+  };
+}
+
 /** Outside requests a census run may make (one is the token refresh). */
 export const CENSUS_CALLS = 40;
 /** Months in a row with no mail, before the first month of Gmail, after which the census asks if anything is older. */
@@ -649,6 +676,10 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       if (r.resumesAt) await step.sleepUntil('wait before trying again', new Date(r.resumesAt));
       await step.do('next run', () => syncDeps.launch(this.env, { user, account, month }, r.nextId!));
       return r;
+    }
+    if (event.payload.audit) {
+      const year = event.payload.audit;
+      return step.do('audit', { retries: { limit: 0, delay: '1 second' }, timeout: '10 minutes' }, () => auditIndex(this.env, user, account, year));
     }
     if (event.payload.index) {
       const index = event.payload.index;

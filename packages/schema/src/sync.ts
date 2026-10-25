@@ -113,6 +113,11 @@ export interface SyncParams {
   park?: boolean;
   /** Pause the user's backfill (as the person's pause). */
   pause?: boolean;
+  /**
+   * Instead of syncing, compare the search index with Gmail's month lists for this year: the
+   * answer names the indexed messages no month lists, and listed ones the index lacks. Reads only.
+   */
+  audit?: string;
   /** Build the search index for this month from Basin, once the month has landed there. */
   index?: string;
   /** Where an index build resumes: rows of the month already done. */

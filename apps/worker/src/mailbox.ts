@@ -686,6 +686,16 @@ export class MailboxDO extends DurableObject<Env> {
     else this.samples = withRecent({ ...main, copied, recent: this.samples }, at);
   }
 
+  /** Every indexed message of a year, as ID, date and labels (reads only): for an audit against Gmail. */
+  async indexedIn(year: string): Promise<{ id: string; ts: number; labels: string }[]> {
+    const after = Date.parse(`${year}-01-01T00:00:00Z`);
+    const before = Date.parse(`${Number(year) + 1}-01-01T00:00:00Z`);
+    const cursor = this.ctx.storage.sql.exec<{ id: string; ts: number; labels: string }>(`SELECT id, ts, labels FROM messages WHERE ts >= ? AND ts < ?`, after, before);
+    const rows = cursor.toArray();
+    this.count({ do_rows_read: cursor.rowsRead });
+    return rows;
+  }
+
   /** Of these message IDs, the ones not in the index yet (reads only). */
   async unknownIds(ids: string[]): Promise<string[]> {
     if (!ids.length) return [];
