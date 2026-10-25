@@ -8,7 +8,7 @@
 // every message's row to Basin, the system of record. Basin rows are staged in R2 first, so
 // a failed commit is retried by the next run instead of losing the batch.
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
-import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES } from '@mailcellar/schema';
+import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES, PAID } from '@mailcellar/schema';
 import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
@@ -17,8 +17,8 @@ import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, he
 
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
 export const RUN_SIZE = 500;
-/** Outside requests a run may make; Workers Free stops a run at 50 (spike S7). */
-export const RUN_CALLS = 45;
+/** Outside requests a run may make: Workers Free stops a run at 50 (spike S7), Paid at 10,000. */
+export const RUN_CALLS = PAID ? 400 : 45;
 /** Raw mail fetched in one Gmail batch, as Gmail sizes it: keeps the answer well inside 128 MB. */
 export const BATCH_BYTES = 8 * 1024 * 1024;
 /** Messages up to this size are gzipped; larger ones are mostly already-compressed attachments. */
@@ -28,7 +28,7 @@ export const GZIP_MAX = 256 * 1024;
  * 2026-10-24 (the spike's 1.9 s had passed), so a run stays at a quarter of that and the
  * next run copies the rest. Workers can't read their own CPU time, so it is estimated.
  */
-export const RUN_CPU_MS = 500;
+export const RUN_CPU_MS = PAID ? 10_000 : 500;
 /**
  * Estimated CPU to copy one message: twice what a local benchmark measured on 2026-10-24
  * (20 KB 3 ms, 100 KB 5 ms, 6.8 MB 9 ms), since the first estimate ran about 5x low in
@@ -440,8 +440,8 @@ export async function runBatch(
 
 /** Index rows written a call when building a month's index (fewer calls, fewer search segments). Measured ~3 DO rows a message (Jul 2026). */
 export const INDEX_CHUNK = 500;
-/** Chunks one index run writes before handing over to a fresh run. */
-export const INDEX_CHUNKS_A_RUN = 4;
+/** Chunks one index run writes before handing over to a fresh run (each run reads the month from Basin again). */
+export const INDEX_CHUNKS_A_RUN = PAID ? 20 : 4;
 
 /**
  * Build a landed month's search index from Basin: read the month back, and index what the
@@ -505,7 +505,7 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
 }
 
 /** Gmail list calls an index run may spend listing its month (500 IDs a call). */
-const LIST_CALLS = 30;
+const LIST_CALLS = PAID ? 100 : 30;
 
 /**
  * The IDs Gmail lists for a month, saved to R2 for the index runs after this one. Null when
@@ -596,7 +596,7 @@ async function auditIndex(env: Env, user: UserId, account: string, year: string)
 }
 
 /** Outside requests a census run may make (one is the token refresh). */
-export const CENSUS_CALLS = 40;
+export const CENSUS_CALLS = PAID ? 400 : 40;
 /** Months in a row with no mail, before the first month of Gmail, after which the census asks if anything is older. */
 const EMPTY_STREAK = 12;
 

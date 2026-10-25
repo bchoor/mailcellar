@@ -5,7 +5,7 @@
 // DO only paces Gmail from memory (a token bucket, as msgvault does). Lanes stage Basin rows;
 // one committer per account appends them to Basin about once a minute, and lands each month
 // once all of it is there. The month's search index is built from Basin after that.
-import { mailboxName, monthQuery, r2Keys, type SyncPart, type UserId } from '@mailcellar/schema';
+import { mailboxName, monthQuery, PAID, r2Keys, type SyncPart, type UserId } from '@mailcellar/schema';
 import type { BasinRow } from './basin';
 import type { Env } from './env';
 import { b64urlBytes, batchGet, getRaw, GmailError, listPage, type RawMessage } from './gmail';
@@ -26,14 +26,16 @@ export const MEDIUM_BATCH = 8;
 export const WAVE = 1;
 /** Batches in flight at once across an account's lanes (25 gets each; msgvault keeps 10 going). */
 export const FLIGHT = 2;
-/** Outside requests a lane run makes at most (Workers Free stops a run at 50). */
-export const LANE_CALLS = 40;
+/** Outside requests a lane run makes at most (Workers Free stops a run at 50, Paid at 10,000). */
+export const LANE_CALLS = PAID ? 200 : 40;
 /**
  * CPU a lane run may spend, in estimated ms. Free stops a run at about 2 s; without gzip a
  * message measured 0.3 to 0.6 ms locally (1.7 ms with a 500 KB attachment), so the estimate
  * is that times 2.5 and the budget under half the cap. Tune both from production CPU times.
  */
-export const LANE_CPU_MS = 900;
+export const LANE_CPU_MS = PAID ? 10_000 : 900;
+/** Basin rows a run holds before staging them (a row carries up to 32 KB of body text; memory is 128 MB). */
+export const STAGE_ROW_BYTES = 16 * 1024 * 1024;
 export const copyCpuMs = (bytes: number) => 0.8 + (bytes / 1024) * 0.01;
 /**
  * Gmail pacing per account, as msgvault does it: Gmail allows 250 units a second per user; the
@@ -207,6 +209,7 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
   const callBudget = opts.calls ?? LANE_CALLS;
   const cpuBudget = opts.cpuMs ?? LANE_CPU_MS;
   const rows: BasinRow[] = [];
+  let rowBytes = 0;
   const syncedAt = new Date().toISOString();
   let classA = 0;
   let resumesAt: string | null = null;
@@ -301,6 +304,13 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
         p.packs++;
         classA++;
         rows.push(...packed.rows);
+        rowBytes += packed.rows.reduce((t, x) => t + x.body_text.length + 1024, 0);
+        // A long run stages its rows as it goes, so they never fill the run's memory.
+        if (rowBytes >= STAGE_ROW_BYTES) {
+          await env.ARCHIVE.put(r2Keys.staged(user, account, month, `${runId}-${p.packs}`), JSON.stringify(rows.splice(0)));
+          classA++;
+          rowBytes = 0;
+        }
         p.copiedIds.push(...packed.rows.map((x) => x.id));
         stats.copied += packed.rows.length;
         stats.bytes += packed.bytes.length;
@@ -429,8 +439,8 @@ export const COMMITTER_STALE_MS = 3 * 60_000;
 export const COMMIT_EVERY_MS = 60_000;
 /** Checks with nothing to do before the committer stops (a lane starts it again). */
 export const COMMITTER_IDLE = 3;
-/** Staged bytes one commit takes: about 2,000 messages' rows, well inside a run's CPU. */
-export const COMMIT_BYTES = 8 * 1024 * 1024;
+/** Staged bytes one commit takes: 8 MB is about 2,000 messages; Paid takes 32 MB so it keeps up with ~2,500 a minute. */
+export const COMMIT_BYTES = (PAID ? 32 : 8) * 1024 * 1024;
 
 /** Start the account's committer unless one is checking in. Only one starts, however many lanes ask. */
 export async function ensureCommitter(env: Env, user: UserId, account: string): Promise<string | null> {
