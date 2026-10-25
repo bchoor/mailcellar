@@ -1599,6 +1599,7 @@ export class MailboxDO extends DurableObject<Env> {
     const count = (n: number) => (filtered ? null : n);
     let groups: MessageGroup[] = [];
     let next: string | null = null;
+    let total: number | null = null;
     if (by === 'from' || by === 'domain') {
       const [table, key] = by === 'from' ? ['senders', 'addr'] : ['domains', 'domain'];
       // The cursor is the last group's (n, key): shaped like a Size cursor, (number, string).
@@ -1613,6 +1614,8 @@ export class MailboxDO extends DurableObject<Env> {
         next = JSON.stringify([got[GROUPS_PAGE - 1].n, got[GROUPS_PAGE - 1].k]);
       }
       groups = got.map((g) => ({ key: g.k, n: count(g.n), filter: { key: by, values: [g.k], ...(by === 'from' ? { op: 'eq' as const } : {}) } }));
+      // The pager's total, counted once on the first page (one read per sender or domain).
+      if (!after) total = got.length < GROUPS_PAGE ? got.length : (exec<{ c: number }>(`SELECT count(*) AS c FROM ${table} WHERE n > 0`)[0]?.c ?? null);
     } else if (by === 'label') {
       groups = exec<{ id: string; name: string; n: number }>(`SELECT id, name, n FROM labels WHERE type = 'user' AND n > 0 ORDER BY n DESC`).map((l) => ({
         key: l.name,
@@ -1636,7 +1639,7 @@ export class MailboxDO extends DurableObject<Env> {
       if (!filtered) groups = groups.filter((g) => g.n !== 0).sort((a, b) => (b.n ?? 0) - (a.n ?? 0));
     }
     this.count({ do_rows_read: read });
-    return { groups, next };
+    return { groups, next, total: by === 'from' || by === 'domain' ? total : groups.length };
   }
 
   /** Sorts this mailbox can serve now; null until read from the schema. */

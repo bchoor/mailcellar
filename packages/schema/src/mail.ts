@@ -147,6 +147,8 @@ export interface MessageGroup {
 export interface MessageGroups {
   groups: MessageGroup[];
   next: string | null;
+  /** Every group there is, on the first page only (null on later pages). */
+  total: number | null;
 }
 /** One page of messages, newest first (or oldest first), and where the next starts. */
 export interface MessagePage {
