@@ -169,19 +169,30 @@ export async function openMessage(env: Env, user: UserId, account: string, id: s
   };
 }
 
-/** GET /api/accounts/:id/messages/:mid/attachments/:n?month=: one attachment, always as a download. */
-export async function attachment(env: Env, user: UserId, account: string, id: string, month: string, index: number): Promise<Response | null> {
+/** Types the app may show in place; anything else is only ever a download. SVG stays out: as a page it can run scripts. */
+const VIEWABLE = /^(image\/(png|jpeg|gif|webp|avif|bmp)|application\/pdf|text\/(plain|csv)|application\/json)$/i;
+
+/**
+ * GET /api/accounts/:id/messages/:mid/attachments/:n?month=: one attachment, as a download; with
+ * `view=1` a viewable type comes as itself (for the preview), still unable to run on this site.
+ */
+export async function attachment(env: Env, user: UserId, account: string, id: string, month: string, index: number, view = false): Promise<Response | null> {
   const raw = await rawBytes(env, user, account, id, month);
   if (!raw) return null;
   const a = (await parse(raw)).attachments[index];
   if (!a) return null;
   const name = (a.filename || `attachment-${index + 1}`).replace(/[\r\n"\\]/g, '_');
-  // Served as bytes to save, never as a page: an HTML attachment can't run on this site.
+  const type = a.mimeType.split(';')[0].trim().toLowerCase();
+  const shown = view && VIEWABLE.test(type);
+  // Text is read as text by the app; JSON or CSV opened directly shows as plain text, never as a page.
+  const as = shown ? (type.startsWith('text/') || type === 'application/json' ? 'text/plain; charset=utf-8' : type) : 'application/octet-stream';
   return new Response(bytesOf(a), {
     headers: {
-      'content-type': 'application/octet-stream',
-      'content-disposition': `attachment; filename="${name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'content-type': as,
+      'content-disposition': `${shown ? 'inline' : 'attachment'}; filename="${name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
       'x-content-type-options': 'nosniff',
+      // Opened on its own, nothing in it can run, load or be framed elsewhere.
+      'content-security-policy': "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'",
       'cache-control': 'private, max-age=86400',
     },
   });

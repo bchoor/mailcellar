@@ -6,11 +6,13 @@ import { DrawerSection, LumenDrawer, usePrefs } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Skeleton } from '@columenlabs/lumen-ui/ui/skeleton';
-import { type MailAddress, type MessageDetail, type MessageRow, monthOf } from '@mailcellar/schema';
+import { type MailAddress, type MessageAttachment, type MessageDetail, type MessageRow, monthOf } from '@mailcellar/schema';
 import { useQuery } from '@tanstack/react-query';
-import { DownloadIcon, ImageIcon, MailIcon, PaperclipIcon, UserIcon } from 'lucide-react';
+import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-group';
+import { DownloadIcon, ImageIcon, LayoutGridIcon, ListIcon, MailIcon, PaperclipIcon, UserIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { bytes, type Chip } from './archive';
+import { AttachmentGrid, AttachmentPreview, kindIcon, kindOf } from './attachment-preview';
 
 const who = (a: MailAddress) => (a.name && a.name !== a.address ? `${a.name} <${a.address}>` : a.address);
 const list = (as: MailAddress[]) => as.map(who).join(', ');
@@ -88,6 +90,10 @@ export function MessageDrawer({ account, row, chips, rows, onClose }: { account:
   const [images, setImages] = useState(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: each message opens with images blocked.
   useEffect(() => setImages(false), [row?.id]);
+  const [at, setAt] = useState<number | null>(null);
+  const [grid, setGrid] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each message opens with no preview.
+  useEffect(() => setAt(null), [row?.id]);
   const month = row ? monthOf(row.ts) : '';
   const detail = useQuery({
     queryKey: ['message', account, row?.id],
@@ -105,6 +111,9 @@ export function MessageDrawer({ account, row, chips, rows, onClose }: { account:
     new Intl.DateTimeFormat('en-US', { timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ts));
   const from = d?.from ? who(d.from) : row ? (row.fromName ? `${row.fromName} <${row.fromAddr}>` : row.fromAddr) : '';
   const remote = !!d?.html && REMOTE.test(d.html);
+  const file = (a: MessageAttachment) => `/api/accounts/${account}/messages/${row?.id}/attachments/${a.index}?month=${month}`;
+  const download = file;
+  const view = (a: MessageAttachment) => `${file(a)}&view=1`;
   return (
     <LumenDrawer
       open={!!row}
@@ -174,22 +183,42 @@ export function MessageDrawer({ account, row, chips, rows, onClose }: { account:
             )}
           </DrawerSection>
           {d && d.attachments.length > 0 && (
-            <DrawerSection icon={PaperclipIcon} title="Attachments" count={d.attachments.length} defaultOpen>
-              <ul className="divide-y text-sm">
-                {d.attachments.map((a) => (
-                  <li key={a.index} className="flex items-center gap-2 py-1.5">
-                    <span className="min-w-0 flex-1 truncate" title={a.filename}>
-                      {a.filename}
-                    </span>
-                    <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{bytes(a.size)}</span>
-                    <Button asChild size="icon" variant="ghost" className="size-7" aria-label={`Download ${a.filename}`}>
-                      <a href={`/api/accounts/${account}/messages/${row.id}/attachments/${a.index}?month=${month}`} download={a.filename}>
-                        <DownloadIcon />
-                      </a>
-                    </Button>
-                  </li>
-                ))}
-              </ul>
+            <DrawerSection
+              icon={PaperclipIcon}
+              title="Attachments"
+              count={d.attachments.length}
+              defaultOpen
+              actions={
+                <ToggleGroup type="single" variant="outline" size="sm" spacing={0} value={grid ? 'grid' : 'list'} onValueChange={(v) => v && setGrid(v === 'grid')} aria-label="Show as">
+                  <ToggleGroupItem value="list" aria-label="List"><ListIcon /></ToggleGroupItem>
+                  <ToggleGroupItem value="grid" aria-label="Grid"><LayoutGridIcon /></ToggleGroupItem>
+                </ToggleGroup>
+              }
+            >
+              {grid ? (
+                <AttachmentGrid items={d.attachments} onOpen={setAt} view={view} />
+              ) : (
+                <ul className="divide-y text-sm">
+                  {d.attachments.map((a, i) => {
+                    const Icon = kindIcon(kindOf(a));
+                    return (
+                      <li key={a.index} className="flex items-center gap-2">
+                        <button type="button" onClick={() => setAt(i)} className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left hover:text-primary" title={`Open ${a.filename}`}>
+                          <Icon className="size-4 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0 flex-1 truncate">{a.filename}</span>
+                          <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{bytes(a.size)}</span>
+                        </button>
+                        <Button asChild size="icon" variant="ghost" className="size-7" aria-label={`Download ${a.filename}`}>
+                          <a href={download(a)} download={a.filename}>
+                            <DownloadIcon />
+                          </a>
+                        </Button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              <AttachmentPreview items={d.attachments} at={at} onAt={setAt} view={view} download={download} />
             </DrawerSection>
           )}
         </>
