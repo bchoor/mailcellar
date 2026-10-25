@@ -10,6 +10,8 @@ import {
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Progress } from '@columenlabs/lumen-ui/ui/progress';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@columenlabs/lumen-ui/ui/table';
+import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-group';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
 import { addMonths, monthRange, type AccountCoverage, type BackfillStatus, type MonthCoverage, type SyncOverview, type SyncSummary, type AccountStatus, type QuotaMeter, quotaStop } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -467,49 +469,85 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
   );
 }
 
-/** Months in the Next section before the rest fold into one line. */
+/** Next months shown under All before the rest fold into one line. */
 const NEXT_SHOWN = 3;
 
-/** One month's row: its bar and messages copied, why it failed, and its one action. */
-function BackfillRow({ m, note, action, count }: { m: MonthCoverage; note?: string; action?: { label: string; primary?: boolean; busy?: boolean; disabled?: boolean; run: () => void }; count?: { done: number; total: number; noun: string } }) {
-  // Copied of Gmail's count, unless the row counts something else (searchable of copied).
-  const { done, total, noun } = count ?? { done: m.copied, total: m.gmail ?? 0, noun: 'messages' };
-  const pct = total ? Math.min(100, (done / total) * 100) : 0;
+/** A Backfills row's stage, its chip's colour and the filter it falls under. */
+type Stage = 'failed' | 'copying' | 'stopping' | 'next' | 'indexing' | 'index_waiting' | 'index_queued';
+const STAGES: Record<Stage, { label: string; filter: StageFilter; dot: string }> = {
+  failed: { label: 'Failed', filter: 'failed', dot: 'bg-destructive' },
+  copying: { label: 'Copying', filter: 'copying', dot: 'bg-[var(--cov-run)]' },
+  stopping: { label: 'Stopping', filter: 'copying', dot: 'bg-muted-foreground' },
+  next: { label: 'Next', filter: 'next', dot: 'bg-muted-foreground/50' },
+  indexing: { label: 'Indexing', filter: 'indexing', dot: 'bg-[var(--cov-index)]' },
+  index_waiting: { label: 'Index waiting', filter: 'indexing', dot: 'bg-[var(--cov-index)]' },
+  index_queued: { label: 'Index queued', filter: 'indexing', dot: 'bg-[var(--cov-index-soft)]' },
+};
+type StageFilter = 'all' | 'failed' | 'copying' | 'next' | 'indexing';
+const FILTERS: { key: StageFilter; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'failed', label: 'Needs attention' },
+  { key: 'copying', label: 'Copying' },
+  { key: 'next', label: 'Next' },
+  { key: 'indexing', label: 'Indexing' },
+];
+
+/** The bars' colours, as whole class names so Tailwind finds them. */
+const BAR = {
+  copy: '[&>[data-slot=progress-indicator]]:bg-[var(--cov-run)]',
+  done: '[&>[data-slot=progress-indicator]]:bg-[var(--cov-full)]',
+  failed: '[&>[data-slot=progress-indicator]]:bg-destructive',
+  index: '[&>[data-slot=progress-indicator]]:bg-[var(--cov-index)]',
+} as const;
+
+/** A bar and its count, `588 / 1,176`; a dash when there is nothing to count yet. */
+function Meter({ done, total, color }: { done: number; total: number; color: keyof typeof BAR }) {
+  if (!total) return <span className="text-muted-foreground">—</span>;
   return (
-    <li className="grid grid-cols-[5.5rem_minmax(0,1fr)_5.5rem] items-center gap-3 py-2 text-sm">
-      <span className="tabular-nums">{monthName(m.month)}</span>
-      <span className="flex min-w-0 flex-col gap-1">
-        <Progress value={pct} className="h-1.5" />
-        <span className="tabular-nums text-xs text-muted-foreground">
-          {fmt(done)} of {fmt(total)} {noun}
-          {note && <> · <span className={m.error ? 'text-loss' : undefined}>{note}</span></>}
-        </span>
+    <span className="flex min-w-0 items-center gap-2">
+      <Progress value={Math.min(100, (done / total) * 100)} className={`hidden h-1.5 max-w-48 flex-1 sm:block ${BAR[color]}`} />
+      <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
+        {fmt(Math.min(done, total))} / {fmt(total)}
       </span>
-      {action ? (
-        <Button variant={action.primary ? 'default' : 'outline'} size="sm" className="w-full" disabled={action.busy || action.disabled} onClick={action.run}>
-          {action.busy ? <Loader2Icon className="animate-spin" /> : action.label}
-        </Button>
-      ) : (
-        <span />
-      )}
-    </li>
+    </span>
   );
 }
 
-function BackfillSection({ title, count, children }: { title: string; count: number; children: ReactNode }) {
+type RowAction = { label: string; primary?: boolean; busy?: boolean; disabled?: boolean; run: () => void };
+
+/** One month: its stage, copied of Gmail's count, searchable of copied, time left or why it failed, and its one action. */
+function BackfillRow({ m, stage, left, action }: { m: MonthCoverage; stage: Stage; left?: string; action?: RowAction }) {
+  const { label, dot } = STAGES[stage];
   return (
-    <section className="flex flex-col">
-      <h3 className="flex gap-2 text-xs font-medium text-muted-foreground">
-        {title} <span className="tabular-nums">{fmt(count)}</span>
-      </h3>
-      <ul className="flex flex-col divide-y">{children}</ul>
-    </section>
+    <TableRow className="h-9">
+      <TableCell className="tabular-nums font-medium">{monthName(m.month)}</TableCell>
+      <TableCell>
+        <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs">
+          <span aria-hidden className={`size-2 shrink-0 rounded-full ${dot}`} />
+          {label}
+        </span>
+      </TableCell>
+      <TableCell className="w-[32%]">
+        <Meter done={m.copied} total={m.gmail ?? 0} color={stage === 'failed' ? 'failed' : m.gmail !== null && m.copied >= m.gmail ? 'done' : 'copy'} />
+      </TableCell>
+      <TableCell className="hidden w-[24%] md:table-cell">
+        <Meter done={m.indexed} total={m.landed ? m.inBasin : 0} color="index" />
+      </TableCell>
+      <TableCell className={`hidden text-right tabular-nums text-xs sm:table-cell ${stage === 'failed' ? 'text-loss' : 'text-muted-foreground'}`}>{left}</TableCell>
+      <TableCell className="w-16 pr-0 text-right sm:w-20">
+        {action && (
+          <Button variant={action.primary ? 'default' : 'outline'} size="xs" className="w-14 sm:w-16" disabled={action.busy || action.disabled} onClick={action.run}>
+            {action.busy ? <Loader2Icon className="animate-spin" /> : action.label}
+          </Button>
+        )}
+      </TableCell>
+    </TableRow>
   );
 }
 
 /**
- * An account's backfill by month: what failed and why (Retry), what is copying now (Stop), and
- * what is next (Remove). Progress is in messages. Mail already copied stays when a month is taken out.
+ * An account's backfill by month, one table filtered by stage: what failed and why (Retry), what
+ * is copying now (Stop), what is indexing, and what is next (Remove). Progress is in messages. Mail already copied stays when a month is taken out.
  */
 function Backfills({ id, rate, copying }: { id: string; rate: number | null; copying: string[] }) {
   const client = useQueryClient();
@@ -521,6 +559,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   const [said, setSaid] = useState<string | null>(null);
   /** Months stopped here that a lane may still hold; they show Stopping until it lets go. */
   const [stopped, setStopped] = useState<string[]>([]);
+  const [filter, setFilter] = useState<StageFilter>('all');
   const act = async (key: string, fn: () => Promise<string | null>) => {
     setInFlight(key);
     setSaid(null);
@@ -583,39 +622,52 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   const busy = [...now, ...next];
   const toCopy = busy.reduce((n, m) => n + left(m), 0);
   // Months copied to Basin whose search index is queued, building, or waiting for the DO write limit.
-  const indexJobs = months.filter((m) => m.indexState === 'indexing' || m.indexState === 'waiting' || m.indexState === 'queued' || (!m.indexState && indexing(m)));
-  const indexSection = indexJobs.length > 0 && (
-    <BackfillSection title="Indexing" count={indexJobs.length}>
-      {index.kind === 'limit' && <li className="py-2 text-xs text-muted-foreground">Indexing paused. {index.detail}</li>}
-      {indexJobs.map((m) => (
-        <BackfillRow key={m.month} m={m} count={{ done: Math.min(m.indexed, m.inBasin), total: m.inBasin, noun: 'searchable' }} note={m.indexState === 'waiting' ? 'waiting for limit' : m.indexState === 'queued' ? 'queued' : 'indexing'} />
-      ))}
-    </BackfillSection>
-  );
-  if (!busy.length && !halting.length && !failed.length)
+  const inCopy = new Set([...held, ...next, ...failed].map((m) => m.month));
+  const indexJobs = months.filter((m) => !inCopy.has(m.month) && (m.indexState === 'indexing' || m.indexState === 'waiting' || m.indexState === 'queued' || (!m.indexState && indexing(m))));
+  const each = rate && now.length ? rate / now.length : null;
+  const rows: { m: MonthCoverage; stage: Stage; left?: string; action?: RowAction }[] = [
+    ...failed.map((m) => ({ m, stage: 'failed' as const, left: m.error ? shortError(m.error) : 'Failed', action: { label: 'Retry', primary: true, busy: inFlight === m.month, disabled: inFlight !== null, run: () => void retry(m.month) } })),
+    ...now.map((m) => ({ m, stage: 'copying' as const, left: each ? `${duration(left(m) / each)} left` : undefined, action: { label: 'Stop', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) } })),
+    ...halting.map((m) => ({ m, stage: 'stopping' as const, action: { label: 'Stop', busy: true, run: () => {} } })),
+    ...indexJobs.map((m) => ({
+      m,
+      stage: (m.indexState === 'waiting' ? 'index_waiting' : m.indexState === 'queued' ? 'index_queued' : 'indexing') as Stage,
+      left: m.indexState === 'waiting' && m.resumesAt ? `Until ${resumeTime(m.resumesAt)}` : undefined,
+    })),
+    ...next.map((m) => ({ m, stage: 'next' as const, action: { label: 'Remove', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) } })),
+  ];
+  const counts = new Map<StageFilter, number>([['all', rows.length]]);
+  for (const r of rows) counts.set(STAGES[r.stage].filter, (counts.get(STAGES[r.stage].filter) ?? 0) + 1);
+  // A filter whose rows have all gone shows everything again.
+  const on = filter !== 'all' && !counts.get(filter) ? 'all' : filter;
+  const picked = on === 'all' ? rows : rows.filter((r) => STAGES[r.stage].filter === on);
+  // Under All, the Next queue shows its first few; its filter shows them all.
+  const nextRows = picked.filter((r) => r.stage === 'next');
+  const folded = on === 'all' ? nextRows.slice(NEXT_SHOWN) : [];
+  const shown = picked.filter((r) => !folded.includes(r));
+  if (!busy.length && !halting.length && !failed.length && !indexJobs.length)
     return (
       <div className="flex flex-col gap-1 text-sm">
         {said && <span className="text-xs text-gain">{said}</span>}
         <p className="text-muted-foreground">Nothing queued to copy. Pick months on the map, or use Select months.{paused ? ' Copying is paused.' : ''}</p>
-        {indexSection}
       </div>
     );
-  const each = rate && now.length ? rate / now.length : null;
-  const rest = next.slice(NEXT_SHOWN);
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="flex flex-col gap-0.5 text-sm">
           <span>
-            <b className="tabular-nums">{fmt(toCopy)}</b> messages left in <b className="tabular-nums">{fmt(busy.length)}</b> month{busy.length === 1 ? '' : 's'}
+            <b className="tabular-nums">{fmt(toCopy)}</b> to copy
+            {indexJobs.length > 0 && <> · <b className="tabular-nums">{fmt(indexJobs.reduce((n, m) => n + Math.max(0, m.inBasin - m.indexed), 0))}</b> to index</>}
             {rate && toCopy ? ` · ${duration(toCopy / rate)} at ${fmt(Math.round(rate))} a minute` : ''}
           </span>
-          <span className="text-xs text-muted-foreground">
-            {copy.kind === 'running' || copy.kind === 'idle' ? `Copying ${fmt(now.length)} at once` : <b className="font-medium text-foreground">{copy.label}</b>} · {fmt(next.length)} waiting
-            {failed.length > 0 && <> · <span className="text-loss">{fmt(failed.length)} failed</span></>}
-          </span>
-          {copy.detail && <span className="text-xs text-muted-foreground">{copy.detail}</span>}
-          {index.kind === 'limit' && <span className="text-xs text-muted-foreground">Indexing paused. {index.detail} Copying goes on.</span>}
+          {copy.kind !== 'running' && copy.kind !== 'idle' && (
+            <span className="text-xs text-muted-foreground">
+              <b className="font-medium text-foreground">{copy.label}</b>
+              {copy.detail ? ` ${copy.detail}` : ''}
+            </span>
+          )}
+          {index.kind === 'limit' && <span className="text-xs text-[var(--cov-index)]">Indexing paused. {index.detail} Copying goes on.</span>}
           {said && <span className="text-xs text-gain">{said}</span>}
         </div>
         <span className="flex gap-2">
@@ -636,37 +688,41 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
           )}
         </span>
       </div>
-      {failed.length > 0 && (
-        <BackfillSection title="Needs attention" count={failed.length}>
-          {failed.map((m) => (
-            <BackfillRow key={m.month} m={m} note={m.error ? shortError(m.error) : 'Failed'} action={{ label: 'Retry', primary: true, busy: inFlight === m.month, disabled: inFlight !== null, run: () => void retry(m.month) }} />
+      <ToggleGroup type="single" variant="outline" size="sm" spacing={1} className="flex-wrap" value={on} onValueChange={(v) => v && setFilter(v as StageFilter)}>
+        {FILTERS.filter((f) => f.key === 'all' || counts.get(f.key)).map((f) => (
+          <ToggleGroupItem key={f.key} value={f.key} className={`h-7 rounded-full px-3 text-xs ${f.key === 'failed' ? 'text-loss' : ''}`}>
+            {f.label} <span className="tabular-nums">{fmt(counts.get(f.key) ?? 0)}</span>
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      <Table className="text-sm">
+        <TableHeader>
+          <TableRow className="text-xs">
+            <TableHead className="w-24">Month</TableHead>
+            <TableHead className="w-32">Stage</TableHead>
+            <TableHead>Copied</TableHead>
+            <TableHead className="hidden md:table-cell">Searchable</TableHead>
+            <TableHead className="hidden text-right sm:table-cell">Left</TableHead>
+            <TableHead className="w-16 sm:w-20" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {shown.map((r) => (
+            <BackfillRow key={r.m.month} {...r} />
           ))}
-        </BackfillSection>
-      )}
-      {held.length > 0 && (
-        <BackfillSection title="Copying now" count={now.length}>
-          {now.map((m) => (
-            <BackfillRow key={m.month} m={m} note={each ? `${duration(left(m) / each)} left` : undefined} action={{ label: 'Stop', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) }} />
-          ))}
-          {halting.map((m) => (
-            <BackfillRow key={m.month} m={m} note="Stopping…" action={{ label: 'Stop', busy: true, run: () => {} }} />
-          ))}
-        </BackfillSection>
-      )}
-      {next.length > 0 && (
-        <BackfillSection title="Next" count={next.length}>
-          {next.slice(0, NEXT_SHOWN).map((m) => (
-            <BackfillRow key={m.month} m={m} action={{ label: 'Remove', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) }} />
-          ))}
-          {rest.length > 0 && (
-            <li className="py-2 text-xs text-muted-foreground">
-              and {fmt(rest.length)} more: {monthName(rest[0].month)}
-              {rest.length > 1 ? ` to ${monthName(rest[rest.length - 1].month)}` : ''}
-            </li>
+          {folded.length > 0 && (
+            <TableRow className="h-9">
+              <TableCell colSpan={6} className="text-xs text-muted-foreground">
+                and {fmt(folded.length)} more next: {monthName(folded[0].m.month)}
+                {folded.length > 1 ? ` to ${monthName(folded[folded.length - 1].m.month)}` : ''} ·{' '}
+                <Button variant="link" size="xs" className="h-auto p-0 text-xs" onClick={() => setFilter('next')}>
+                  Show all
+                </Button>
+              </TableCell>
+            </TableRow>
           )}
-        </BackfillSection>
-      )}
-      {indexSection}
+        </TableBody>
+      </Table>
       {problem && <ErrorLine error={new Error(problem)} />}
     </div>
   );
