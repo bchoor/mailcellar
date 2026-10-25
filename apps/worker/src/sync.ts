@@ -554,11 +554,24 @@ async function auditIndex(env: Env, user: UserId, account: string, year: string)
     if (!ids) return { error: `couldn't list ${m}` };
     for (const id of ids) listed.set(id, m);
   }
-  const indexed = await accountMailbox(env, user, account).indexedIn(year);
+  const mailbox = accountMailbox(env, user, account);
+  const indexed = await mailbox.indexedIn(year);
   const have = new Set(indexed.map((r) => r.id));
   const month = (ts: number) => new Date(ts).toISOString().slice(0, 7);
+  // Each month as the screens count it (census, counter, copied) beside what the index and Gmail hold.
+  const counters = new Map(((await mailbox.archive('months')) as { month: string; n: number }[]).map((r) => [r.month, r.n]));
+  const coverage = new Map((await mailbox.coverageMonths()).map((m) => [m.month, m]));
+  const byMonth = months.map((m) => ({
+    month: m,
+    census: coverage.get(m)?.gmail ?? null,
+    copied: coverage.get(m)?.copied ?? null,
+    counter: counters.get(m) ?? 0,
+    rows: indexed.filter((r) => month(r.ts) === m).length,
+    listed: [...listed.values()].filter((l) => l === m).length,
+  }));
   return {
     live,
+    byMonth,
     listed: listed.size,
     indexed: indexed.length,
     notListed: indexed.filter((r) => !listed.has(r.id)).map((r) => ({ id: r.id, date: new Date(r.ts).toISOString(), labels: r.labels })),
