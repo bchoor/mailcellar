@@ -1713,9 +1713,10 @@ export class MailboxDO extends DurableObject<Env> {
   /**
    * The watchdog: restart what stopped without a page open (a dead or stale sync, lanes whose run
    * died, the census) for every account. Page polls only read. Returns whether anything is still
-   * going, which keeps the watchdog alarm set.
+   * going, which keeps the watchdog alarm set. A census that stopped on an error is retried only
+   * at a sync slot (`slot`): retried every tick, a failing census kept the alarm going all day.
    */
-  private async recover(user: UserId): Promise<boolean> {
+  private async recover(user: UserId, slot: boolean): Promise<boolean> {
     const paused = this.isPaused();
     let busy = false;
     for (const a of this.accountList()) {
@@ -1723,11 +1724,11 @@ export class MailboxDO extends DurableObject<Env> {
         const mailbox = accountMailbox(this.env, user, a.id);
         const v = await mailbox.statusView();
         const sync = await this.keepRunning(user, a.id, v.sync, paused);
-        const census = (await this.keepCounting(user, a.id, v.census)) ?? v.census;
+        const census = (await this.keepCounting(user, a.id, v.census, slot)) ?? v.census;
         const status = syncStatus(sync);
         if (
           (!paused && (status === 'running' || status === 'waiting' || !!sync?.lanes?.length || (await mailbox.hasQueued()))) ||
-          (!!census && census.month !== null && !census.error) ||
+          (!!census && census.month !== null && !census.error && !(census.resumesAt && Date.parse(census.resumesAt) > Date.now())) ||
           v.index.status !== 'idle'
         )
           busy = true;
@@ -1764,8 +1765,8 @@ export class MailboxDO extends DurableObject<Env> {
     const sync = this.schedule('gmail-sync')!;
     const slot = sync.last ? nextRun(sync, new Date(sync.last.at)) : this.syncDue != null ? new Date(this.syncDue) : null;
     const due = !!slot && Date.now() >= slot.getTime() - 1000;
-    console.log('gmail-sync', JSON.stringify({ on: sync.on, every: sync.every, tz: sync.tz, last: sync.last, slot: slot?.toISOString() ?? null, due, paused: this.pausedBy() }));
-    this.watching = await this.recover(user);
+    this.watching = await this.recover(user, due);
+    console.log('gmail-sync', JSON.stringify({ on: sync.on, every: sync.every, tz: sync.tz, last: sync.last, slot: slot?.toISOString() ?? null, due, paused: this.pausedBy(), watching: this.watching }));
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
     if (due && ids.length && sync.on) {
       let run: ScheduleRun;
@@ -1919,14 +1920,20 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
-   * Opening the map starts the census when there is none, resumes one that stopped, and
-   * recounts recent months every 6 hours. Returns the census once started, else null.
+   * Starts the census when there is none and resumes one whose run died. At a sync slot (`slot`)
+   * it also retries one that stopped on an error and recounts recent months every 6 hours.
+   * Returns the census once started, else null.
    */
-  private async keepCounting(user: UserId, account: string, c: CensusState | null): Promise<CensusState | null> {
+  private async keepCounting(user: UserId, account: string, c: CensusState | null, slot: boolean): Promise<CensusState | null> {
     const now = Date.now();
     const stale = c && now - Date.parse(c.updatedAt) >= SYNC_STALE_MS;
     const held = !!c?.resumesAt && Date.parse(c.resumesAt) > now;
-    const mode = held ? null : !c ? 'full' : c.month !== null && (c.error || stale) ? 'resume' : c.finishedAt && now - Date.parse(c.finishedAt) >= 6 * 3_600_000 ? 'refresh' : null;
+    const mode =
+      held ? null
+      : !c ? 'full'
+      : c.month !== null && (c.error ? slot : stale) ? 'resume'
+      : slot && c.finishedAt && now - Date.parse(c.finishedAt) >= 6 * 3_600_000 ? 'refresh'
+      : null;
     if (!mode) return null;
     await syncDeps.census(this.env, user, account, mode === 'refresh' ? 'refresh' : 'full');
     return accountMailbox(this.env, user, account).censusState();
