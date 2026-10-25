@@ -135,7 +135,7 @@ export interface BasinTarget {
 export const INDEX_COLUMNS = ['account', 'id', 'thread_id', 'ts', 'from_addr', 'from_name', 'subject', 'snippet', 'size', 'attachments', 'labels'] as const;
 export type IndexColumns = Pick<BasinRow, (typeof INDEX_COLUMNS)[number]>;
 
-type TableMetadata = Parameters<typeof icebergManifestList>[0]['metadata'];
+export type TableMetadata = Parameters<typeof icebergManifestList>[0]['metadata'];
 
 /** Months since January 1970: Iceberg's `month` partition value. */
 const monthOrdinal = (month: string) => {
@@ -145,12 +145,8 @@ const monthOrdinal = (month: string) => {
 /** A manifest's partition bound: a 4-byte little-endian int for the month transform. */
 const boundInt = (b: unknown) => (b instanceof Uint8Array && b.byteLength >= 4 ? new DataView(b.buffer, b.byteOffset, 4).getInt32(0, true) : null);
 
-/**
- * Read one month of one account back from the messages table: only the manifests whose month
- * range covers it, only that month's data files, and only the index columns. A message
- * committed twice (a retried batch) comes back once.
- */
-export async function readMonth(metadata: TableMetadata, resolver: Resolver, account: string, month: string): Promise<IndexColumns[]> {
+/** The data files that hold a month's rows: only the manifests whose month range covers it. */
+export async function monthFiles(metadata: TableMetadata, resolver: Resolver, month: string): Promise<{ path: string; size: number }[]> {
   if (metadata['current-snapshot-id'] == null || Number(metadata['current-snapshot-id']) < 0) return [];
   const target = monthOrdinal(month);
   const { manifests } = await icebergManifestList({ metadata, resolver });
@@ -167,6 +163,15 @@ export async function readMonth(metadata: TableMetadata, resolver: Resolver, acc
       files.push({ path: e.data_file.file_path, size: Number(e.data_file.file_size_in_bytes) });
     }
   }
+  return files;
+}
+
+/**
+ * Read one month of one account back from the messages table: only that month's data files,
+ * and only the index columns. A message committed twice (a retried batch) comes back once.
+ */
+export async function readMonth(metadata: TableMetadata, resolver: Resolver, account: string, month: string): Promise<IndexColumns[]> {
+  const files = await monthFiles(metadata, resolver, month);
   const byId = new Map<string, IndexColumns>();
   for (const f of files) {
     const file = await resolver.reader(f.path, f.size);

@@ -36,6 +36,7 @@ import {
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
+import { MessageDrawer } from './message-drawer';
 import { daySpan, localDay, type Period, periodOf, periodSpan, periods } from './period';
 
 // Sizes stay exact here and round only when shown, so a total matches the sum of its rows.
@@ -140,7 +141,7 @@ function useUserLabels() {
   const mine = new Map((labels.data ?? []).filter((l) => l.type === 'user').map((l) => [l.id, l.name]));
   return (ids: string[]): Chip[] => ids.filter((x) => mine.has(x)).map((x) => ({ name: mine.get(x)!, ...colors.data?.[x] }));
 }
-interface Chip {
+export interface Chip {
   name: string;
   bg?: string;
   fg?: string;
@@ -450,6 +451,8 @@ export function MessagesPage() {
   }));
   const loaded = !!data && !messages.isPlaceholderData;
   const crumbs = useMailboxCrumbs('Messages');
+  // A row click opens the message in the drawer.
+  const [opened, setOpened] = useState<MessageView | null>(null);
   if (loaded && !rows.length && !filters.length && page === 0) return <EmptyPage title="Messages" />;
   const noMatch = loaded && !rows.length && (
     <EmptyState icon={SearchIcon} title="No mail matches these filters">
@@ -467,6 +470,7 @@ export function MessagesPage() {
       .filter(Boolean)
       .join(' · ');
   return (
+    <>
     <LumenLayout
       crumbs={crumbs}
       meta={meta ? <span className="text-xs text-muted-foreground">{meta}</span> : undefined}
@@ -476,6 +480,7 @@ export function MessagesPage() {
       load={load}
       onConfigChange={setConfig}
       rowTitle={(r) => r.subject}
+      onOpen={setOpened}
       state={noMatch || undefined}
       onTokens={setTokens}
       paging={{
@@ -490,6 +495,8 @@ export function MessagesPage() {
         onSort: (s) => setAsc(s?.key === 'date' && !s.desc),
       }}
     />
+    {id && <MessageDrawer account={id} row={opened} chips={opened?.chips ?? []} onClose={() => setOpened(null)} />}
+    </>
   );
 }
 

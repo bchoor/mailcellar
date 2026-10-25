@@ -167,3 +167,25 @@ export function messageFilters(raw: string | null): MessageFilter[] | null {
 
 /** A label's colours in Gmail, by label id (`#fb4c2f` style hex). */
 export type LabelColors = Record<string, { bg: string; fg: string }>;
+
+/** A name and address on a message, as its headers give them. */
+export interface MailAddress { name: string; address: string }
+/** One attachment of an opened message; `index` is what its download asks for. */
+export interface MessageAttachment { index: number; filename: string; mimeType: string; size: number }
+/**
+ * One message opened from the Messages page, parsed from its raw file. `html` has its inline
+ * (cid:) images as data URLs; remote images stay as written, for the app to block or show.
+ */
+export interface MessageDetail {
+  from: MailAddress | null;
+  to: MailAddress[];
+  cc: MailAddress[];
+  bcc: MailAddress[];
+  replyTo: MailAddress[];
+  /** ISO time from the Date header, when it parses. */
+  date: string | null;
+  subject: string;
+  html: string | null;
+  text: string | null;
+  attachments: MessageAttachment[];
+}
