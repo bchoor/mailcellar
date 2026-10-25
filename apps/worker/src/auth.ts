@@ -112,7 +112,10 @@ const redirect = (to: string, setCookie?: string) => {
 };
 const back = (error?: AuthError) => redirect(`/?settings=accounts${error ? `&auth_error=${error}` : ''}`, cookie('', 0));
 
-/** GET /api/accounts/connect: off to Google to pick a Gmail account and allow access to it. */
+/**
+ * GET /api/accounts/connect: off to Google to pick a Gmail account and allow access to it.
+ * `?email=` (Reconnect) suggests that account; it keeps its ID, so its mail stays.
+ */
 export async function connect(url: URL, env: Env): Promise<Response> {
   const flow: Flow = { state: random(), verifier: random() };
   const params = new URLSearchParams({
@@ -124,6 +127,7 @@ export async function connect(url: URL, env: Env): Promise<Response> {
     include_granted_scopes: 'true',
     // Consent every time, so Google always issues a refresh token, even for an account seen before.
     prompt: 'select_account consent',
+    ...(url.searchParams.get('email') ? { login_hint: url.searchParams.get('email')! } : {}),
     state: flow.state,
     code_challenge: b64url(await sha256(flow.verifier)),
     code_challenge_method: 'S256',
@@ -213,8 +217,8 @@ export async function accessTokenFor(env: Env, refreshToken: string): Promise<{ 
     const body = (await res.json()) as { access_token?: string; error?: string };
     if (body.access_token) return { token: body.access_token };
     return body.error === 'invalid_grant'
-      ? { error: 'Google no longer accepts this connection (revoked or expired). Remove the account and add it again.', revoked: true }
-      : { error: `Google rejected the connection (HTTP ${res.status}). Try again; if it keeps failing, remove the account and add it again.`, revoked: false };
+      ? { error: 'Google no longer accepts this connection (revoked or expired). Reconnect the account.', revoked: true }
+      : { error: `Google rejected the connection (HTTP ${res.status}). Try again; if it keeps failing, reconnect the account.`, revoked: false };
   } catch {
     return { error: 'Couldn’t reach Google. Try again.', revoked: false };
   }
