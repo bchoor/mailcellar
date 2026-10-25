@@ -203,6 +203,18 @@ export function mailboxCounts(months: MonthCoverage[]): { gmail: number; copied:
   return { gmail, copied, searchable };
 }
 
+/**
+ * Why Searchable differs from copied, in words. Search holds mail Gmail's count leaves out: new
+ * since Gmail last counted, Spam and Trash, and mail since deleted in Gmail (MailCellar keeps it).
+ * Less: mail still to index.
+ */
+function searchableNote(c: { copied: number; searchable: number }): string {
+  const extra = c.searchable - c.copied;
+  if (extra < 0) return `${fmt(-extra)} copied, not yet searchable`;
+  if (!extra) return c.copied ? 'all copied mail' : 'nothing copied yet';
+  return `${fmt(c.copied)} copied + ${fmt(extra)} not in Gmail's count`;
+}
+
 /** Copied of Gmail's count, to a tenth; 100 only when every message is copied. */
 const pct = (c: { gmail: number; copied: number }) => (c.gmail ? (c.copied >= c.gmail ? 100 : Math.min(99.9, Math.floor((c.copied / c.gmail) * 1000) / 10)) : 0);
 
@@ -214,14 +226,10 @@ function StageHead({ title, state, fallback }: { title: string; state: StageStat
   const line = state.detail ?? fallback;
   return (
     // One line in both groups, so the cards below share a top edge; the whole reason shows on hover.
-    <div className="flex h-6 min-w-0 items-center gap-2 text-sm">
+    <div className="flex h-6 min-w-0 items-center gap-2 overflow-hidden text-sm" title={line ? `${title}: ${text}. ${line}` : `${title}: ${text}`}>
       <span className="shrink-0 font-medium">{title}</span>
       <Badge variant={variant} className="shrink-0">{text}</Badge>
-      {line && (
-        <span className="min-w-0 truncate text-muted-foreground" title={line}>
-          {line}
-        </span>
-      )}
+      {line && <span className="min-w-0 truncate text-muted-foreground">{line}</span>}
     </div>
   );
 }
@@ -263,7 +271,6 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
   const rate = rateTile(s, copy);
   // Copied to Basin and not yet searchable: what indexing has left.
   const inBasin = cov?.months.reduce((n, m) => n + m.inBasin, 0) ?? 0;
-  const indexed = cov?.months.reduce((n, m) => n + Math.min(m.indexed, m.inBasin), 0) ?? 0;
   const toIndex = cov?.months.filter(indexing) ?? [];
   const unindexed = toIndex.reduce((n, m) => n + m.inBasin - m.indexed, 0);
   const writes = meters.find((m) => m.metric === 'do_rows_written');
@@ -327,9 +334,9 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
         )}
         {inBasin > 0 && (
           <div className="flex min-w-0 flex-col gap-3">
-            <StageHead title="Indexing" state={index} />
+            <StageHead title="Indexing" state={index} fallback={toIndex.length ? `Building search for ${months(toIndex.length)}` : index.kind === 'idle' ? 'Copied mail is searchable' : null} />
             <TileRow className="flex-1">
-              <Tile className="lg:flex-1" label="Searchable" value={fmt(counts.searchable)} caption={inBasin ? `${Math.floor((indexed / inBasin) * 1000) / 10}% of copied mail` : 'nothing copied yet'} />
+              <Tile className="lg:flex-1" label="Searchable" value={fmt(counts.searchable)} caption={searchableNote(counts)} />
               <Tile className="lg:flex-1" label="Queued for indexing" value={fmt(unindexed)} caption={toIndex.length ? `in ${months(toIndex.length)}` : 'nothing queued'} />
               <Tile
                 className="lg:flex-1"
