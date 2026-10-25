@@ -70,12 +70,12 @@ export const quotaStop = (metric: QuotaMetric) => QUOTA_STOPS[metric] ?? QUOTA_S
 
 /**
  * The Workers plan the run budgets are sized for (CPU, outside requests, batch sizes). The
- * account went to Workers Paid on 2026-10-25 and goes back to Free on 2026-10-27 or 28
- * (Bikram), so Paid's budgets end at the earlier one, 2026-10-27 00:00 PT, on their own.
- * After that, remove `limits` from wrangler.jsonc: Free can't take it.
+ * account went to Workers Paid on 2026-10-25; billing says its period ends 2026-10-27 00:00
+ * UTC (Oct 26, 5 PM PT), so Paid's budgets end then, on their own. After that, remove
+ * `limits` from wrangler.jsonc: Free can't take it.
  */
 export const WORKERS_PLAN: QuotaPlan = 'paid';
-export const PAID_ENDS = Date.parse('2026-10-27T07:00:00Z');
+export const PAID_ENDS = Date.parse('2026-10-27T00:00:00Z');
 /** Whether Paid's budgets apply now. Read at each use, so a long-lived isolate switches too. */
 export const paidNow = (now = Date.now()) => WORKERS_PLAN === 'paid' && now < PAID_ENDS;
 
