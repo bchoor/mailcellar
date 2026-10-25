@@ -1748,6 +1748,8 @@ export class MailboxDO extends DurableObject<Env> {
         const sync = await this.keepRunning(user, a.id, v.sync, paused);
         const census = (await this.keepCounting(user, a.id, v.census, slot)) ?? v.census;
         const status = syncStatus(sync);
+        if (status === 'stopped' || census?.error)
+          console.warn('account-error', JSON.stringify({ account: a.id, email: a.email, sync: status === 'stopped' ? sync?.error : null, census: census?.error ?? null }));
         if (!paused && (status === 'running' || status === 'waiting' || !!sync?.lanes?.length)) busy.push(`${a.id}:sync ${status}`);
         else if (!paused && (await mailbox.hasQueued())) busy.push(`${a.id}:queued`);
         if (!!census && census.month !== null && !census.error && !(census.resumesAt && Date.parse(census.resumesAt) > Date.now())) busy.push(`${a.id}:census ${census.month}`);
@@ -1788,7 +1790,16 @@ export class MailboxDO extends DurableObject<Env> {
     const sync = this.schedule('gmail-sync')!;
     const slot = sync.last ? nextRun(sync, new Date(sync.last.at)) : this.syncDue != null ? new Date(this.syncDue) : null;
     const due = !!slot && Date.now() >= slot.getTime() - 1000;
-    const busy = await this.recover(user, due);
+    // A reconnected account retries its census now, and its stopped sync starts again.
+    const reconnected = [...this.reconnected];
+    this.reconnected.clear();
+    const busy = await this.recover(user, due || reconnected.length > 0);
+    for (const id of reconnected)
+      try {
+        await this.syncAccount(id, true);
+      } catch (e) {
+        console.error('reconnect sync', id, e);
+      }
     this.watching = busy.length > 0;
     console.log('gmail-sync', JSON.stringify({ on: sync.on, every: sync.every, tz: sync.tz, last: sync.last, slot: slot?.toISOString() ?? null, due, paused: this.pausedBy(), busy }));
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
@@ -2138,11 +2149,15 @@ export class MailboxDO extends DurableObject<Env> {
     );
     this.accountsKept = null;
     this.count({ do_rows_written: rowsWritten });
+    if (known) this.reconnected.add(account.id);
     // The watchdog starts the account's census (recover, keepCounting).
     this.watching = true;
     await this.ctx.storage.setAlarm(Date.now());
     return { ok: true };
   }
+
+  /** Accounts added again since the last alarm (a fresh Google token): retried at the next one. */
+  private reconnected = new Set<string>();
 
   /** An account's refresh token, for the Worker to test or sync with. Never sent to the app. */
   async accountToken(id: string): Promise<string | null> {
