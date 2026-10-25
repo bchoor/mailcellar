@@ -13,11 +13,10 @@ import { Progress } from '@columenlabs/lumen-ui/ui/progress';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@columenlabs/lumen-ui/ui/table';
 import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-group';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
 import { addMonths, monthRange, type AccountCoverage, type BackfillStatus, type MonthCoverage, type SyncOverview, type SyncSummary, type AccountStatus, type QuotaMeter, quotaStop } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { EmptyState } from './archive';
 import { AccountLimits, AccountLimitsTools, useQuota } from './quota';
@@ -416,12 +415,12 @@ const STATE_LABELS = { running: 'Copying', high: 'Almost (95–99%)' } as const;
 
 const busyMonth = (m: MonthCoverage) => m.state === 'queued' || m.state === 'running';
 
-/** The months a preset copies. Months Gmail counted as empty are left out. */
+/** The months a preset copies. Months Gmail counted as empty, and months already copied, are left out. */
 function presetMonths(c: AccountCoverage, preset: Preset): string[] {
   const by = new Map(c.months.map((m) => [m.month, m]));
   const worth = (month: string) => {
     const m = by.get(month);
-    return !m || ((m.gmail === null || m.gmail > 0) && !busyMonth(m));
+    return !m || ((m.gmail === null || m.gmail > m.copied) && !busyMonth(m));
   };
   switch (preset) {
     case 'missing':
@@ -430,17 +429,14 @@ function presetMonths(c: AccountCoverage, preset: Preset): string[] {
       return monthRange(addMonths(c.current, -2), c.current).filter(worth);
     case '12m':
       return monthRange(addMonths(c.current, -11), c.current).filter(worth);
-    case 'all':
-      return c.months.filter((m) => m.gmail !== null && m.gmail > 0 && !busyMonth(m)).map((m) => m.month);
   }
 }
 
-type Preset = 'missing' | '3m' | '12m' | 'all';
+type Preset = 'missing' | '3m' | '12m';
 const PRESETS: { id: Preset; label: string }[] = [
-  { id: 'missing', label: 'Missing months' },
+  { id: 'missing', label: 'All missing' },
   { id: '3m', label: 'Last 3 months' },
   { id: '12m', label: 'Last 12 months' },
-  { id: 'all', label: 'All months' },
 ];
 
 /** Queue months to copy; resolves to an error in words, or null. */
@@ -463,7 +459,7 @@ function censusHint(c: AccountCoverage | undefined): string | null {
 }
 
 /**
- * One account's coverage map: pick months (click, shift-click a range, or Select months), then
+ * One account's coverage map: pick months (tap one, then another for the range; a year; or a quick pick), then
  * Start backfill, or Remove from queue for queued ones. Nothing starts from a pick alone.
  */
 function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; email: string; basin: boolean; rate: number | null; copying: string[] }) {
@@ -503,7 +499,7 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
         select={basin ? 'backfill' : undefined}
         selectable={(_row, key) => {
           const m = month(key);
-          return !!m && m.gmail !== null && m.gmail > 0 && !busyMonth(m);
+          return !!m && m.gmail !== null && m.gmail > m.copied && !busyMonth(m);
         }}
         onQueue={(pick: CoveragePick) => queue(pick.flatMap((p) => p.months))}
         queueLabel="Start backfill"
@@ -517,26 +513,20 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
         }}
         onRemove={(pick: CoveragePick) => unqueue(pick.flatMap((p) => p.months))}
         preselect={preselect}
-        hint={censusHint(data) ?? 'Click a month, shift-click for a range. Nothing starts until Start backfill.'}
-        tools={
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" disabled={!basin || !data}>
-                <ListTodoIcon /> Select months <ChevronDownIcon />
+        hint={censusHint(data) ?? 'Nothing starts until Start backfill.'}
+        pickTools={
+          <span className="flex flex-wrap items-center gap-1.5">
+            {PRESETS.map((p) => (
+              <Button key={p.id} variant="outline" size="sm" className="h-7 rounded-full" disabled={!data} onClick={() => data && select(presetMonths(data, p.id))}>
+                {p.label}
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {PRESETS.map((p) => (
-                <DropdownMenuItem key={p.id} onSelect={() => data && select(presetMonths(data, p.id))}>
-                  {p.label}
-                </DropdownMenuItem>
-              ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem disabled={!anyQueued} onSelect={() => void unqueue()}>
+            ))}
+            {anyQueued && (
+              <Button variant="ghost" size="sm" className="h-7" onClick={() => void unqueue()}>
                 <ListXIcon /> Clear queue
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+              </Button>
+            )}
+          </span>
         }
         empty={
           <p className="py-6 text-center text-muted-foreground">
@@ -729,7 +719,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
     return (
       <div className="flex flex-col gap-1 text-sm">
         {said && <span className="text-xs text-gain">{said}</span>}
-        <p className="text-muted-foreground">Nothing queued to copy. Pick months on the map, or use Select months.{paused ? ' Copying is paused.' : ''}</p>
+        <p className="text-muted-foreground">Nothing queued to copy. Pick months on the map.{paused ? ' Copying is paused.' : ''}</p>
       </div>
     );
   return (
