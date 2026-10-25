@@ -860,6 +860,11 @@ export class MailboxDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec(`SELECT 1 FROM job_months WHERE state IN ('queued', 'running') LIMIT 1`).toArray().length > 0;
   }
 
+  /** Whether any month has mail in Basin its search index hasn't been built for yet. */
+  async indexPending(): Promise<boolean> {
+    return this.ctx.storage.sql.exec(`SELECT 1 FROM basin_months WHERE copied > 0 AND indexed_at IS NULL LIMIT 1`).toArray().length > 0;
+  }
+
   /** A backfill month's state now (a canceled one is dropped by the sync). */
   async partState(part: SyncPart): Promise<PartState | null> {
     return (
