@@ -86,7 +86,7 @@ export async function accessToken(env: Env, refreshToken: string): Promise<strin
   });
   const body = (await res.json()) as { access_token?: string; error?: string };
   if (body.access_token) return body.access_token;
-  throw new GmailError(body.error === 'invalid_grant' ? 401 : res.status, 'Google no longer accepts this account. Remove it and add it again.');
+  throw new GmailError(body.error === 'invalid_grant' ? 401 : res.status, `Google no longer accepts this account (${body.error ?? `HTTP ${res.status}`}). Add it again in Settings ▸ Accounts.`);
 }
 
 /** Gzipped JSON, for staged Basin rows. */
