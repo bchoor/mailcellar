@@ -647,8 +647,7 @@ export function MessagesPage() {
   });
   const { groups, grouped } = useServerGroups(id, filters, sort, list, toView);
   const messages = useQuery({
-    // Grouped, each open group loads its own rows instead.
-    enabled: !grouped,
+    // Grouped, each open group loads its own rows; this page still gives the filter its values.
     queryKey: ['messages', id, key, size, cursor, sort.by, asc],
     queryFn: async (): Promise<MessagePage | null> => {
       if (!id) return null;
@@ -687,8 +686,11 @@ export function MessagesPage() {
         ? { ...next, columns: [...next.columns.slice(0, at), 'category', ...next.columns.slice(at)] }
         : next,
     );
-  // Grouped, the groups bring their own rows: the flat page's stay out of the count.
-  const rows = grouped ? [] : (data?.rows ?? []).map(toView);
+  const page0 = (data?.rows ?? []).map(toView);
+  // Grouped, the table draws the open groups' rows; these rows only feed the filter's values.
+  const rows = grouped
+    ? [...new Map([...page0, ...(groups.list ?? []).flatMap((g) => g.rows as MessageView[])].map((r) => [r.id, r])).values()]
+    : page0;
   const loaded = !grouped && !!data && !messages.isPlaceholderData;
   const crumbs = useMailboxCrumbs('Messages');
   // A row click opens the message in the drawer.
