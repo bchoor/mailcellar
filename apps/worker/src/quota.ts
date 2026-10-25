@@ -334,7 +334,19 @@ export class QuotaDO extends DurableObject<Env> {
     const use = await this.spendUse();
     // The test switch can only lower the stop, never raise it.
     const stop = Math.min(SPEND.stop, this.testLimit()?.spendStop ?? SPEND.stop);
-    return { since: SPEND.since, cap: SPEND.cap, stop, spent: spendCost(use), use, readAt: this.spendCf?.at ? new Date(this.spendCf.at).toISOString() : null };
+    const overage = this.overage();
+    return { since: SPEND.since, cap: SPEND.cap, stop, spent: spendCost(use) + overage, use, overage, readAt: this.spendCf?.at ? new Date(this.spendCf.at).toISOString() : null };
+  }
+
+  /**
+   * On Paid, dollars billed past the month's included Workers requests, DO and D1 rows (account
+   * wide). They count toward the spend guard with the backfill's R2; R2 is counted above.
+   */
+  private overage(now = new Date()): number {
+    if (this.plan !== 'paid') return 0;
+    return metrics
+      .filter((m) => m !== 'r2_class_a' && m !== 'r2_class_b')
+      .reduce((t, m) => t + (quotaCost(this.limits[m], this.used(m, now).used) ?? 0), 0);
   }
 
   /** The end-to-end test switch while it lasts (TEST_MS from when it was set), else null. */
