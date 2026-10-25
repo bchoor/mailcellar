@@ -170,7 +170,7 @@ export async function openMessage(env: Env, user: UserId, account: string, id: s
 }
 
 /** Types the app may show in place; anything else is only ever a download. SVG stays out: as a page it can run scripts. */
-const VIEWABLE = /^(image\/(png|jpeg|gif|webp|avif|bmp)|application\/pdf|text\/(plain|csv)|application\/json)$/i;
+const VIEWABLE = /^(image\/(png|jpe?g|gif|webp|avif|bmp)|application\/pdf|text\/(plain|csv)|application\/json)$/i;
 
 /**
  * GET /api/accounts/:id/messages/:mid/attachments/:n?month=: one attachment, as a download; with
