@@ -1375,6 +1375,40 @@ export class MailboxDO extends DurableObject<Env> {
    * the rollup's, so they hold for the whole mailbox only: under other filters each is null.
    * Senders and domains page on their n index, GROUPS_PAGE at a time; the rest come whole.
    */
+  /**
+   * How many messages each time span holds, for Group by Period. Whole UTC months come from the
+   * months rollup; the rest (a week, a day, a time zone's hours at a month's edge) is counted off
+   * the ts index, a read per message there.
+   */
+  async periodCounts(spans: [number, number][]): Promise<number[]> {
+    const sql = this.ctx.storage.sql;
+    let read = 0;
+    const exec = <R extends Record<string, SqlStorageValue>>(query: string, ...args: number[]) => {
+      const c = sql.exec<R>(query, ...args);
+      read += c.rowsRead;
+      return c.toArray();
+    };
+    const months = new Map(exec<{ month: string; n: number }>(`SELECT month, n FROM months`).map((r) => [r.month, r.n]));
+    const count = (a: number, b: number) => (a < b ? exec<{ n: number }>(`SELECT count(*) AS n FROM messages WHERE ts >= ? AND ts < ?`, a, b)[0].n : 0);
+    const monthStart = (t: number, up: boolean) => {
+      const d = new Date(t);
+      const at = Date.UTC(d.getUTCFullYear(), d.getUTCMonth());
+      return up && at < t ? Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1) : at;
+    };
+    const out = spans.map(([from, to]) => {
+      to = Math.min(to, Date.now() + 86_400_000);
+      if (to <= from) return 0;
+      const a = monthStart(from, true);
+      const b = monthStart(to, false);
+      if (a >= b) return count(from, to);
+      let n = count(from, a) + count(b, to);
+      for (let m = a; m < b; m = monthStart(m + 32 * 86_400_000, false)) n += months.get(monthOf(m)) ?? 0;
+      return n;
+    });
+    this.count({ do_rows_read: read });
+    return out;
+  }
+
   async messageGroups(by: MessageGroupBy, filtered: boolean, after: string | null): Promise<MessageGroups> {
     const sql = this.ctx.storage.sql;
     let read = 0;
@@ -1390,7 +1424,7 @@ export class MailboxDO extends DurableObject<Env> {
     if (by === 'from' || by === 'domain') {
       const [table, key] = by === 'from' ? ['senders', 'addr'] : ['domains', 'domain'];
       // The cursor is the last group's (n, key): shaped like a Size cursor, (number, string).
-      const at = after ? decodeCursor(after, 'size') : null;
+      const at = after ? decodeCursor(after, [{ keys: SORT_KEYS.size }])?.slice(1) : null;
       const got = exec<{ k: string; n: number }>(
         `SELECT ${key} AS k, n FROM ${table} WHERE n > 0 ${at ? `AND (n, ${key}) < (?, ?)` : ''} ORDER BY n DESC, ${key} DESC LIMIT ?`,
         ...(at ? [at[0], at[1]] : []),
@@ -1440,9 +1474,10 @@ export class MailboxDO extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     if (!this.sortsReady) {
       const have = new Set(
-        sql.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('messages_from', 'messages_size')`).toArray().map((r) => r.name),
+        sql.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'messages_%'`).toArray().map((r) => r.name),
       );
-      this.sortsReady = new Set<MessageSort>(['date', ...SORT_INDEXES.filter((x) => have.has(x.name)).map((x) => x.sort)]);
+      // Category needs no index: it reads each category in date order, one after another.
+      this.sortsReady = new Set<MessageSort>(['date', 'category', ...SORT_INDEXES.filter((x) => have.has(x.name)).map((x) => x.sort)]);
     }
     const ready = this.sortsReady;
     const missing = SORT_INDEXES.filter((x) => !ready.has(x.sort));
@@ -1479,7 +1514,6 @@ export class MailboxDO extends DurableObject<Env> {
     };
     const sorts = await this.buildSorts();
     const by = sorts.includes(sort) ? sort : 'date';
-    const keys = SORT_KEYS[by];
     const text = filters.filter((f) => f.key === 'text' && !f.not).flatMap((f) => f.values).join(' ');
     const rest = filters.filter((f) => !(f.key === 'text' && !f.not));
     // Label chips name labels as the page shows them (Inbox, Promotions, yours by name).
@@ -1501,30 +1535,46 @@ export class MailboxDO extends DurableObject<Env> {
       .map((r) => [Math.min(...r.map((x) => x[0])), Math.max(...r.map((x) => x[1]))]);
     // Another order reads its own index and checks dates on the rows: bounding ts there would sort
     // the whole period again for every chunk.
-    const lo = spans.length && by === 'date' ? Math.max(...spans.map((x) => x[0])) : null;
-    const hi = spans.length && by === 'date' ? Math.min(...spans.map((x) => x[1])) : null;
+    const lo = spans.length ? Math.max(...spans.map((x) => x[0])) : null;
+    const hi = spans.length ? Math.min(...spans.map((x) => x[1])) : null;
+    // The order as phases read one after another (Attachments: with, then without; Category: each).
+    const phases = sortPhases(by, asc, by === 'category' && !labelIds.length ? exec<{ id: string; n: number }>(`SELECT id, n FROM labels`) : labelIds, this.indexedTotal());
     const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
       subject, snippet, size, attachments, labels, state`;
     const [cmp, dir] = asc ? ['>', 'ASC'] : ['<', 'DESC'];
-    let at = cursor ? decodeCursor(cursor, by) : null;
+    // A cursor is the phase, then the last row's keys in that phase's order.
+    const from = cursor ? decodeCursor(cursor, phases) : null;
+    let p = from?.[0] ?? 0;
+    let at: SortKey | null = from ? from.slice(1) : null;
     const rows: MessageRow[] = [];
+    const ends: SortKey[] = [];
     let scanned = 0;
     let more = true;
     let last: SortKey | null = null;
-    while (rows.length <= size && scanned < SCAN_BUDGET && more) {
-      const chunk = rest.length ? SCAN_CHUNK : size + 1 - rows.length;
+    while (rows.length <= size && scanned < SCAN_BUDGET && (more || p < phases.length - 1)) {
+      if (!more) {
+        // This phase is read to its end: the next starts from its top.
+        p++;
+        at = null;
+        more = true;
+      }
+      const { keys, where: also, test, label } = phases[p];
+      const phaseMatch = [match, label ? `labels : "${label}"` : ''].filter(Boolean).join(' ');
+      const bounded = keys[0] === 'ts';
+      const chunk = rest.length || test ? SCAN_CHUNK : size + 1 - rows.length;
       const where = [
         at ? `(${keys.join(', ')}) ${cmp} (${keys.map(() => '?').join(', ')})` : '1',
-        lo !== null && Number.isFinite(lo) ? 'ts >= ?' : '1',
-        hi !== null && Number.isFinite(hi) ? 'ts < ?' : '1',
-        match ? `id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?)` : '1',
+        bounded && lo !== null && Number.isFinite(lo) ? 'ts >= ?' : '1',
+        bounded && hi !== null && Number.isFinite(hi) ? 'ts < ?' : '1',
+        phaseMatch ? `id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?)` : '1',
         sender ? 'lower(from_addr) = ?' : '1',
+        also ?? '1',
       ];
       const args: (string | number)[] = [
         ...(at ?? []),
-        ...(lo !== null && Number.isFinite(lo) ? [lo] : []),
-        ...(hi !== null && Number.isFinite(hi) ? [hi] : []),
-        ...(match ? [match] : []),
+        ...(bounded && lo !== null && Number.isFinite(lo) ? [lo] : []),
+        ...(bounded && hi !== null && Number.isFinite(hi) ? [hi] : []),
+        ...(phaseMatch ? [phaseMatch] : []),
         ...(sender ? [sender.values[0].toLowerCase()] : []),
       ];
       const got = exec<Record<string, SqlStorageValue>>(
@@ -1535,23 +1585,24 @@ export class MailboxDO extends DurableObject<Env> {
       more = got.length === chunk;
       scanned += got.length;
       for (const g of got) {
-        last = sortKey(by, g);
+        last = keyOf(keys, g);
         const m = { ...g, labels: g.labels.split(' ').filter(Boolean) } as MessageRow;
-        if (!keep(m)) continue;
+        if (!keep(m) || (test && !test(m))) continue;
         rows.push(m);
+        ends.push([p, ...last]);
         if (rows.length > size) break;
       }
       at = last;
     }
     const full = rows.length > size;
     if (full) rows.length = size;
-    const end = full ? sortKey(by, rows[rows.length - 1]) : more ? last : null;
+    const end = full ? ends[size - 1] : more ? (last ? [p, ...last] : null) : p < phases.length - 1 ? [p + 1] : null;
     const unindexed = Object.values(this.status().months).filter((m) => m.inBasin > 0 && m.indexState !== null && m.indexState !== 'done').length;
     const total = this.filteredTotal(filters, labelIds, exec);
     this.count({ do_rows_read: read });
     return {
       rows,
-      next: end ? JSON.stringify(end) : null,
+      next: end ? JSON.stringify(phases.length > 1 ? end : end.slice(1)) : null,
       total,
       partial: !full && !!end,
       unindexed,
@@ -2133,17 +2184,51 @@ const categoryName = (id: string) => id.charAt(9) + id.slice(10).toLowerCase();
 const GROUPS_PAGE = 50;
 const SCAN_CHUNK = 250;
 /** Each order's keyset columns, matching its index (a WITHOUT ROWID index ends in the key, id). Senders sort as the rollup keys them: lower case. */
-const SORT_KEYS: Record<MessageSort, readonly string[]> = { date: ['ts', 'id'], from: ['lower(from_addr)', 'ts', 'id'], size: ['size', 'id'] };
+const SORT_KEYS: Record<'date' | 'from' | 'size', readonly string[]> = { date: ['ts', 'id'], from: ['lower(from_addr)', 'ts', 'id'], size: ['size', 'id'] };
 /** The sort indexes built after the fact (buildSorts), one DO write per message indexed each. */
 const SORT_INDEXES: readonly { sort: MessageSort; name: string; create: string }[] = [
   { sort: 'from', name: 'messages_from', create: `CREATE INDEX IF NOT EXISTS messages_from ON messages (lower(from_addr), ts)` },
   { sort: 'size', name: 'messages_size', create: `CREATE INDEX IF NOT EXISTS messages_size ON messages (size)` },
+  // Partial: only mail with attachments, so it costs a write for those alone.
+  { sort: 'attachments', name: 'messages_attachments', create: `CREATE INDEX IF NOT EXISTS messages_attachments ON messages (attachments, ts) WHERE attachments > 0` },
 ];
 type SortKey = (string | number)[];
-const sortKey = (by: MessageSort, m: { ts: number; id: string; fromAddr: string; size: number }): SortKey =>
-  by === 'from' ? [m.fromAddr.toLowerCase(), m.ts, m.id] : by === 'size' ? [m.size, m.id] : [m.ts, m.id];
-/** A cursor is the last row's keys as JSON; one of another order or shape is ignored (page one). */
-function decodeCursor(c: string, by: MessageSort): SortKey | null {
+/** One stretch of an order: its keyset columns and what narrows it (a where, a row test, a label searched). */
+interface SortPhase {
+  keys: readonly string[];
+  where?: string;
+  test?: (m: MessageRow) => boolean;
+  label?: string;
+}
+/**
+ * An order as phases read one after another. Date, Sender and Size are one phase off their
+ * index. Attachments reads mail with attachments off its partial index, then the rest by date.
+ * Category reads each category by date, in name order; a rare one through search.
+ */
+function sortPhases(by: MessageSort, asc: boolean, labels: { id: string; n: number }[], total: number): SortPhase[] {
+  if (by === 'attachments') {
+    const some: SortPhase = { keys: ['attachments', 'ts', 'id'], where: 'attachments > 0' };
+    const none: SortPhase = { keys: ['ts', 'id'], where: 'attachments = 0' };
+    return asc ? [none, some] : [some, none];
+  }
+  if (by === 'category') {
+    const n = (id: string) => labels.find((l) => l.id === id)?.n ?? 0;
+    const named = [
+      { name: 'Primary', phase: { keys: SORT_KEYS.date, test: (m: MessageRow) => !m.labels.some((l) => CATEGORY_LABEL.test(l)) } as SortPhase },
+      ...CATEGORY_IDS.map((id) => ({
+        name: categoryName(id),
+        phase: (n(id) < total * 0.05 ? { keys: SORT_KEYS.date, label: id } : { keys: SORT_KEYS.date, test: (m: MessageRow) => m.labels.includes(id) }) as SortPhase,
+      })),
+    ].sort((a, b) => a.name.localeCompare(b.name));
+    return (asc ? named : named.reverse()).map((x) => x.phase);
+  }
+  return [{ keys: SORT_KEYS[by as 'date' | 'from' | 'size'] }];
+}
+/** A row's values for a phase's keyset columns. */
+const keyOf = (keys: readonly string[], m: { ts: number; id: string; fromAddr: string; size: number; attachments: number }): SortKey =>
+  keys.map((k) => (k === 'lower(from_addr)' ? m.fromAddr.toLowerCase() : m[k as 'ts' | 'id' | 'size' | 'attachments']));
+/** A cursor is [phase, ...keys] (or the keys alone for a one-phase order); a bad one is page one. */
+function decodeCursor(c: string, phases: SortPhase[]): [number, ...SortKey] | null {
   if (c.length > 600) return null;
   let v: unknown;
   try {
@@ -2151,8 +2236,15 @@ function decodeCursor(c: string, by: MessageSort): SortKey | null {
   } catch {
     return null;
   }
-  const like = sortKey(by, { ts: 0, id: '', fromAddr: '', size: 0 });
-  return Array.isArray(v) && v.length === like.length && v.every((x, i) => typeof x === typeof like[i]) ? (v as SortKey) : null;
+  if (!Array.isArray(v)) return null;
+  const at = (phases.length > 1 ? v : [0, ...v]) as [number, ...SortKey];
+  const phase = phases[at[0]];
+  if (!phase || !Number.isInteger(at[0])) return null;
+  const keys = at.slice(1);
+  // A phase's start ([p] alone) is a cursor too: the phase before it was read to its end.
+  if (!keys.length) return at;
+  const like = keyOf(phase.keys, { ts: 0, id: '', fromAddr: '', size: 0, attachments: 0 });
+  return keys.length === like.length && keys.every((x, i) => typeof x === typeof like[i]) ? at : null;
 }
 
 /** Gmail's built-in label ids as the pages name them: INBOX is Inbox, CATEGORY_SOCIAL is Social. */
