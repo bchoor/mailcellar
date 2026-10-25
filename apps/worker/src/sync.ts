@@ -351,6 +351,21 @@ export async function runBatch(
         added.bytes += m.sizeEstimate;
       }
     }
+    // Gmail's count of a month goes stale as new mail lands in it: count the months it landed in again.
+    const landed = new Set(basin.map((r) => new Date(r.ts).toISOString().slice(0, 7)).filter((m) => m >= addMonths(monthNow(), -1)));
+    for (const month of landed) {
+      if (calls + LIST_CALLS > limits.calls) break;
+      let n = 0;
+      let pageToken: string | undefined;
+      for (let page = 0; page < LIST_CALLS; page++) {
+        calls++;
+        const got = await listPage(token, pageToken, 500, monthQuery(month));
+        n += got.ids.length;
+        pageToken = got.next ?? undefined;
+        if (!pageToken) break;
+      }
+      if (!pageToken) await mailbox.putMonthCount(month, n);
+    }
   } catch (e) {
     // Mail fetched before the error isn't staged for Basin, so it isn't counted; the next run copies it again.
     Object.assign(added, { copied: 0, bytes: 0 });
