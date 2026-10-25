@@ -86,8 +86,8 @@ function headline(s: SyncSummary): string | null {
   if (s.phase === null || s.status === 'stopped') return null;
   // The DO write limit is the Indexing panel's to explain.
   if (doHeld(s)) return 'Not copying right now. The next run picks up the queue.';
-  if (s.phase === 'paused' && s.resumesAt && s.pausedFor) return `Paused before the account's daily limit (${s.pausedFor}). Resumes ${when(s.resumesAt)}.`;
-  if (s.phase === 'paused' && s.resumesAt) return `Paused at today's free limit. Resumes ${when(s.resumesAt)}.`;
+  if (s.phase === 'waiting' && s.resumesAt && s.pausedFor) return `Waiting for the account's daily limit (${s.pausedFor}). Resumes ${when(s.resumesAt)}.`;
+  if (s.phase === 'waiting' && s.resumesAt) return `Waiting for today's free limit to reset. Resumes ${when(s.resumesAt)}.`;
   if (s.status === 'waiting' && s.resumesAt) return `Trying again ${when(s.resumesAt)}.`;
   if (s.phase === 'live') return 'New mail is copied on each sync. Pick months below to copy older mail.';
   if (s.status === 'running') return s.month ? `Copying ${monthName(s.month)}.` : 'Copying.';
@@ -123,20 +123,20 @@ function meterLine(name: string | null | undefined, meters: QuotaMeter[]): strin
 const isDoWrites = (name: string | null | undefined, meters: QuotaMeter[]) =>
   name === 'do_rows_written' || meters.some((m) => m.metric === 'do_rows_written' && m.label === name);
 export function copyState(o: { paused: boolean; pausedBy: 'person' | 'budget' | null } | undefined, a: AccountStatus | undefined, meters: QuotaMeter[] = []): StageState {
-  if (o?.paused && o.pausedBy === 'budget') return { kind: 'budget', label: 'Copying paused: spend cap', detail: 'Stopped at the backfill spend cap. Resume to go on.' };
-  if (o?.paused) return { kind: 'person', label: 'Copying paused by you', detail: 'Nothing copies until you resume.' };
+  if (o?.paused && o.pausedBy === 'budget') return { kind: 'budget', label: 'Copying paused: spend cap', detail: 'Stopped at the backfill spend cap. Indexing continues. Resume to go on.' };
+  if (o?.paused) return { kind: 'person', label: 'Copying paused by you', detail: 'Nothing copies until you resume. Indexing continues.' };
   const s = a?.sync;
   // The DO write limit holds indexing only; a sync that still names it is not a copy pause.
-  if (s?.phase === 'paused' && !isDoWrites(s.pausedFor, meters)) {
+  if (s?.phase === 'waiting' && !isDoWrites(s.pausedFor, meters)) {
     const why = meterLine(s.pausedFor, meters);
     const until = s.resumesAt ? `Resumes ${resumeTime(s.resumesAt)}.` : '';
-    return { kind: 'limit', label: 'Copying paused: daily limit', detail: why ? `${why}. ${until}`.trim() : until || null };
+    return { kind: 'limit', label: 'Copying waiting: daily limit', detail: why ? `${why}. ${until}`.trim() : until || null };
   }
   if (a?.copy.status === 'copying' || s?.status === 'running') return { kind: 'running', label: 'Copying', detail: null };
   return { kind: 'idle', label: 'Not copying', detail: null };
 }
 export function indexState(a: AccountStatus | undefined, meters: QuotaMeter[] = []): StageState {
-  const held = a?.sync.phase === 'paused' && isDoWrites(a.sync.pausedFor, meters);
+  const held = a?.sync.phase === 'waiting' && isDoWrites(a.sync.pausedFor, meters);
   if (a?.index.status === 'waiting' || held) {
     const why = meterLine(a?.index.pausedFor ?? 'do_rows_written', meters) ?? 'daily DO write limit';
     const until = a?.index.resumesAt ?? (held ? a?.sync.resumesAt : null);
@@ -147,13 +147,13 @@ export function indexState(a: AccountStatus | undefined, meters: QuotaMeter[] = 
 }
 
 /** A sync paused for the DO write limit: that limit holds indexing, not copying. */
-const doHeld = (s: SyncSummary) => s.phase === 'paused' && (s.pausedFor === 'do_rows_written' || /durable object rows written/i.test(s.pausedFor ?? ''));
+const doHeld = (s: SyncSummary) => s.phase === 'waiting' && (s.pausedFor === 'do_rows_written' || /durable object rows written/i.test(s.pausedFor ?? ''));
 
 /** The badge: what the sync is doing now. */
 function badge(s: SyncSummary): { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' } {
   if (s.phase === null) return { label: 'Not started', variant: 'outline' };
   if (s.phase === 'live' && s.status !== 'running') return { label: 'Live', variant: 'secondary' };
-  if (s.phase === 'paused') return { label: doHeld(s) ? 'Indexing paused' : 'Copying paused', variant: 'secondary' };
+  if (s.phase === 'waiting') return { label: doHeld(s) ? 'Indexing waiting' : 'Copying waiting', variant: 'secondary' };
   return STATUS[s.status];
 }
 
@@ -551,7 +551,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
     act('pause', async () => {
       const res = await fetch('/api/backfill/paused', { method: 'PUT', body: JSON.stringify({ paused: to }) });
       if (!res.ok) {
-        setProblem(`Not ${to ? 'paused' : 'resumed'} (${res.status})`);
+        setProblem(res.status === 409 ? 'Held by spend cap: spend is still past the stop line.' : `Not ${to ? 'paused' : 'resumed'} (${res.status})`);
         return null;
       }
       setProblem(null);
@@ -887,8 +887,8 @@ export function SyncStatus() {
           ? `${Math.floor((copied / total) * 100)}%`
           : syncs.every((s) => s.phase === null)
             ? 'Not started'
-            : syncs.some((s) => s.phase === 'paused')
-              ? syncs.every((s) => s.phase !== 'paused' || doHeld(s)) ? 'Indexing paused' : 'Copying paused'
+            : syncs.some((s) => s.phase === 'waiting')
+              ? syncs.every((s) => s.phase !== 'waiting' || doHeld(s)) ? 'Indexing waiting' : 'Copying waiting'
               : 'Not running';
   const ok = !data.basin || syncs.some((s) => s.status === 'stopped') ? false : syncs.every((s) => s.phase === 'live') ? true : null;
   return (

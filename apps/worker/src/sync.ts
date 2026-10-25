@@ -135,7 +135,7 @@ const isDailyLimit = (e: unknown) => /exceeded|limit/i.test(String(e));
 
 /** The phase a stopped sync resumes in: back to the backfill, or on to new mail. */
 const resumePhase = (s: SyncState): SyncState['phase'] =>
-  s.phase === 'paused' || s.phase === 'error'
+  s.phase === 'waiting' || s.phase === 'error'
     ? s.pageToken !== null || s.pending.length || s.historyId === null || s.part ? 'backfill' : 'live'
     : s.phase;
 
@@ -266,7 +266,7 @@ export async function runBatch(
   const full = await quota.reserve(RUN_COST);
   if (full) {
     state.pausedFor = full.label;
-    return later(new Date(full.resumesAt), 'paused', null);
+    return later(new Date(full.resumesAt), 'waiting', null);
   }
   state.pausedFor = null;
   // The spend cap: a run that could pass it pauses all backfill instead (Bikram's $1.10, 2026-10-24).
