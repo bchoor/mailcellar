@@ -173,7 +173,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     const month = url.searchParams.get('month') ?? '';
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return Response.json({ error: 'bad_month' }, { status: 400, headers: noStore });
     const [, id, mid, n] = opened;
-    if (n !== undefined) return (await attachment(env, who.user, id, mid, month, Number(n))) ?? Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    if (n !== undefined) return (await attachment(env, who.user, id, mid, month, Number(n), url.searchParams.get('view') === '1')) ?? Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
     const detail = await openMessage(env, who.user, id, mid, month);
     // A message never changes once copied: the app keeps it for the day.
     return detail ? Response.json(detail, { headers: { 'cache-control': 'private, max-age=86400' } }) : Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
