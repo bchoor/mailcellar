@@ -130,6 +130,24 @@ export interface MessageFilter {
   op?: 'gt' | 'lt' | 'eq' | 'between';
 }
 export const MESSAGE_PAGE_SIZES = [25, 50, 100] as const;
+/** What the server can order messages by: Date always; Sender and Size once their indexes are built. */
+export const MESSAGE_SORTS = ['date', 'from', 'size'] as const;
+export type MessageSort = (typeof MESSAGE_SORTS)[number];
+/** What the server groups messages by, each from a rollup: Sender, Domain, Category, Labels, Read. */
+export const MESSAGE_GROUPS = ['from', 'domain', 'category', 'label', 'is'] as const;
+export type MessageGroupBy = (typeof MESSAGE_GROUPS)[number];
+/** One group: its key as the page shows it, its count from the rollup (null under other filters,
+ *  which the rollup can't apply), and the filter that loads its rows. */
+export interface MessageGroup {
+  key: string;
+  n: number | null;
+  filter: MessageFilter;
+}
+/** A page of groups, largest first, and where the next starts. */
+export interface MessageGroups {
+  groups: MessageGroup[];
+  next: string | null;
+}
 /** One page of messages, newest first (or oldest first), and where the next starts. */
 export interface MessagePage {
   rows: MessageRow[];
@@ -141,6 +159,8 @@ export interface MessagePage {
   partial: boolean;
   /** Months copied to Basin whose mail is not in this index yet (not shown here). */
   unindexed: number;
+  /** The orders this mailbox can serve now; a page asked in another comes by date. */
+  sorts: MessageSort[];
 }
 
 const FILTER_KEYS: readonly MessageFilter['key'][] = ['from', 'domain', 'subject', 'label', 'text', 'size', 'attachments', 'range'];
