@@ -136,6 +136,8 @@ export const MIGRATIONS: readonly string[] = [
 
 
 const today = () => new Date().toISOString().slice(0, 10);
+/** How often the watchdog alarm checks on work in progress (MailboxDO.recover). */
+const WATCH_MS = 5 * 60_000;
 
 /** What one ingest call wrote: rows written is what the Free plan's 100k a day counts. */
 export interface IngestResult {
@@ -281,6 +283,12 @@ export class MailboxDO extends DurableObject<Env> {
       this.migrate();
       this.refillSearch();
       this.dropSample();
+      // A user's mailbox that just started (a deploy, say) doesn't know what is going on: the
+      // watchdog looks within WATCH_MS, and keeps looking while something is.
+      if (this.userId()) {
+        const at = await ctx.storage.getAlarm();
+        if (at === null || at > Date.now() + WATCH_MS) await ctx.storage.setAlarm(Date.now() + WATCH_MS);
+      }
     });
   }
 
@@ -380,6 +388,7 @@ export class MailboxDO extends DurableObject<Env> {
     this.pausedKept = undefined;
     if (rowsWritten) this.count({ do_rows_written: rowsWritten });
     if (paused || !this.env.BASIN_TOKEN) return true;
+    await this.watch();
     for (const { id } of sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray()) {
       try {
         await this.syncAccount(id, true);
@@ -1359,8 +1368,51 @@ export class MailboxDO extends DurableObject<Env> {
   private async armSync(): Promise<void> {
     if (!this.userId()) return;
     const next = this.schedule('gmail-sync')!.next;
-    if (next) await this.ctx.storage.setAlarm(Date.parse(next));
+    this.syncDue = next ? Date.parse(next) : null;
+    const at = Math.min(this.syncDue ?? Infinity, this.watching ? Date.now() + WATCH_MS : Infinity);
+    if (at !== Infinity) await this.ctx.storage.setAlarm(at);
     else if ((await this.ctx.storage.getAlarm()) !== null) await this.ctx.storage.deleteAlarm();
+  }
+
+  /** When the scheduled Gmail sync is due (the alarm also fires for the watchdog); unknown after a restart. */
+  private syncDue: number | null | undefined;
+  /** Something is copying, indexing, counting or queued: the watchdog alarm checks it every WATCH_MS. */
+  private watching = false;
+
+  /** Keep the watchdog alarm going: called when work starts. */
+  private async watch(): Promise<void> {
+    if (this.watching) return;
+    this.watching = true;
+    await this.armSync();
+  }
+
+  /**
+   * The watchdog: restart what stopped without a page open (a dead or stale sync, lanes whose run
+   * died, the census) for every account. Page polls only read. Returns whether anything is still
+   * going, which keeps the watchdog alarm set.
+   */
+  private async recover(user: UserId): Promise<boolean> {
+    const paused = this.isPaused();
+    let busy = false;
+    for (const a of this.accountList()) {
+      try {
+        const mailbox = accountMailbox(this.env, user, a.id);
+        const v = await mailbox.statusView();
+        const sync = await this.keepRunning(user, a.id, v.sync, paused);
+        const census = (await this.keepCounting(user, a.id, v.census)) ?? v.census;
+        const status = syncStatus(sync);
+        if (
+          (!paused && (status === 'running' || status === 'waiting' || !!sync?.lanes?.length || (await mailbox.hasQueued()))) ||
+          (!!census && census.month !== null && !census.error) ||
+          v.index.status !== 'idle'
+        )
+          busy = true;
+      } catch (e) {
+        console.error('watchdog', a.id, e);
+        busy = true;
+      }
+    }
+    return busy;
   }
 
   /** Gmail sync's scheduled run: start a sync for each account that isn't syncing already. */
@@ -1383,8 +1435,11 @@ export class MailboxDO extends DurableObject<Env> {
     if (retry) await this.ctx.storage.setAlarm(Date.now() + 30_000);
     const user = this.userId();
     if (!user) return;
+    // Unknown after a restart: not due (the restart's watchdog alarm isn't the schedule's); the next slot runs.
+    const due = this.syncDue != null && Date.now() >= this.syncDue - 1000;
+    this.watching = await this.recover(user);
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
-    if (ids.length && this.schedule('gmail-sync')!.on) {
+    if (due && ids.length && this.schedule('gmail-sync')!.on) {
       let run: ScheduleRun;
       if (this.isPaused()) run = { at: new Date().toISOString(), ok: true, detail: 'Backfill paused' };
       else if (!this.env.BASIN_TOKEN) run = { at: new Date().toISOString(), ok: false, detail: 'Waiting for Basin write access' };
@@ -1435,8 +1490,7 @@ export class MailboxDO extends DurableObject<Env> {
       accounts: user
         ? await Promise.all(
             this.accountList().map(async (a) => {
-              const state = await this.keepRunning(user, a.id, await accountMailbox(this.env, user, a.id).syncView(), paused);
-              return { ...a, sync: syncSummary(state) };
+              return { ...a, sync: syncSummary(await accountMailbox(this.env, user, a.id).syncView()) };
             }),
           )
         : [],
@@ -1487,8 +1541,9 @@ export class MailboxDO extends DurableObject<Env> {
           this.accountList().map(async (a) => {
             const mailbox = accountMailbox(this.env, user, a.id);
             const v = await mailbox.statusView();
-            const sync = syncSummary(await this.keepRunning(user, a.id, v.sync, paused));
-            const census = (await this.keepCounting(user, a.id, v.census)) ?? v.census;
+            // Read only: the watchdog alarm (recover) restarts what stopped.
+            const sync = syncSummary(v.sync);
+            const census = v.census;
             const index = await this.indexHeld(v.index, v.months);
             // Held for the limit: every month queued for indexing waits with it.
             if (index.status === 'waiting')
@@ -1567,6 +1622,7 @@ export class MailboxDO extends DurableObject<Env> {
       if (e instanceof BasinNotReady) return { error: 'basin_not_ready' };
       throw e;
     }
+    await this.watch();
     return { status: 'started' };
   }
 
@@ -1580,8 +1636,7 @@ export class MailboxDO extends DurableObject<Env> {
     if (!user || !this.hasAccount(account)) return null;
     const mailbox = accountMailbox(this.env, user, account);
     const v = await mailbox.statusView();
-    const c = (await this.keepCounting(user, account, v.census)) ?? v.census;
-    return { months: v.months, census: censusView(c), current: monthNow() };
+    return { months: v.months, census: censusView(v.census), current: monthNow() };
   }
 
   /** Queue months to copy for an account, and start its sync if none is going. */
@@ -1595,6 +1650,7 @@ export class MailboxDO extends DurableObject<Env> {
     const r = await this.syncAccount(account, true);
     // A sync already going: the new months get lanes now, up to MAX_LANES at once.
     if (!('error' in r) && r.status !== 'started') await launchLanes(this.env, user, account);
+    await this.watch();
     return 'error' in r ? r : { job, status: r.status };
   }
 
@@ -1722,7 +1778,9 @@ export class MailboxDO extends DurableObject<Env> {
     );
     this.accountsKept = null;
     this.count({ do_rows_written: rowsWritten });
-    await this.armSync();
+    // The watchdog starts the account's census (recover, keepCounting).
+    this.watching = true;
+    await this.ctx.storage.setAlarm(Date.now());
     return { ok: true };
   }
 
