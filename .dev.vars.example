@@ -1,0 +1,9 @@
+# Local dev only (wrangler dev). Copy to .dev.vars, which git ignores.
+# ACCESS_AUD stays empty locally, so the Worker acts as DEV_USER_EMAIL.
+ACCESS_AUD=""
+DEV_USER_EMAIL="you@example.com"
+GOOGLE_CLIENT_ID=""
+GOOGLE_CLIENT_SECRET=""
+# Optional: Basin and the Usage page against a real account.
+CF_ACCOUNT_ID=""
+BASIN_TOKEN=""

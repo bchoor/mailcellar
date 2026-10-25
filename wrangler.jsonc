@@ -1,13 +1,16 @@
 {
-  // MailCellar on the Bchoor@gmail.com Cloudflare account, Workers Free.
-  // One Worker serves the app (static assets) and the API (/api/*), and hosts the
-  // per-user mailbox Durable Object, and the sync Workflow that copies Gmail into it.
+  // One Worker serves the app (static assets) and the API (/api/*), and hosts the per-mailbox
+  // Durable Objects and the sync Workflow that copies Gmail into them. Setup: docs/setup.md.
+  // Nothing here names an account or domain: the account comes from your wrangler login (or
+  // CLOUDFLARE_ACCOUNT_ID), the custom domain is set on the Worker in the dashboard, and the
+  // deployment's own values are Worker variables and secrets, which keep_vars keeps on deploy.
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "mailcellar",
-  "account_id": "87a4f50952b4b2ce00cab6c2680e63ae",
   "main": "apps/worker/src/index.ts",
   "compatibility_date": "2026-10-01",
-  "routes": [{ "pattern": "mailcellar.icaruslab.dev", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "keep_vars": true,
   "assets": {
     "directory": "./apps/web/dist",
     "binding": "ASSETS",
@@ -16,17 +19,11 @@
   },
   "vars": {
     "APP_VERSION": "dev",
-    // Cloudflare Access app "icaruslab.dev apps (wildcard)", which covers this domain.
-    "ACCESS_TEAM_DOMAIN": "https://bchoor.cloudflareaccess.com",
-    "ACCESS_AUD": "3b94450e06686e3e57c6a9bf1f017485bb9750730246009dddd9739955009fb0",
-    // Basin: R2 Data Catalog on the mailcellar bucket. The write token is the BASIN_TOKEN secret.
-    "BASIN_CATALOG_URI": "https://catalog.cloudflarestorage.com/87a4f50952b4b2ce00cab6c2680e63ae/mailcellar",
-    "BASIN_WAREHOUSE": "87a4f50952b4b2ce00cab6c2680e63ae_mailcellar",
-    "BASIN_BUCKET": "mailcellar",
-    // The account whose analytics and plan the quota meter reads: secrets CF_ANALYTICS_TOKEN and CF_BILLING_TOKEN.
-    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae",
-    // Who may use the end-to-end test switch (PUT /api/admin/test-limit).
-    "ADMIN_EMAILS": "bchoor@gmail.com"
+    // The R2 bucket that holds the raw files and Basin; must match r2_buckets below.
+    "BASIN_BUCKET": "mailcellar"
+    // Set per deployment (docs/setup.md), not here: CF_ACCOUNT_ID, ACCESS_TEAM_DOMAIN, ACCESS_AUD,
+    // ADMIN_EMAILS; secrets GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASIN_TOKEN, CF_ANALYTICS_TOKEN,
+    // CF_BILLING_TOKEN.
   },
   "durable_objects": {
     "bindings": [

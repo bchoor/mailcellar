@@ -194,14 +194,18 @@ export async function readMonth(metadata: TableMetadata, resolver: Resolver, acc
   return [...byId.values()];
 }
 
+/** The bucket's R2 Data Catalog. Its URI and warehouse follow from the account and bucket unless set. */
+export const basinCatalog = (env: Env) =>
+  restCatalogConnect({
+    url: env.BASIN_CATALOG_URI || `https://catalog.cloudflarestorage.com/${env.CF_ACCOUNT_ID}/${env.BASIN_BUCKET}`,
+    warehouse: env.BASIN_WAREHOUSE || `${env.CF_ACCOUNT_ID}_${env.BASIN_BUCKET}`,
+    requestInit: { headers: { authorization: `Bearer ${env.BASIN_TOKEN}` } },
+  });
+
 /** The user's table in the R2 Data Catalog, or null while the write token isn't set. */
 export async function catalogTarget(env: Env, user: UserId): Promise<BasinTarget | null> {
   if (!env.BASIN_TOKEN) return null;
-  const catalog = await restCatalogConnect({
-    url: env.BASIN_CATALOG_URI,
-    warehouse: env.BASIN_WAREHOUSE,
-    requestInit: { headers: { authorization: `Bearer ${env.BASIN_TOKEN}` } },
-  });
+  const catalog = await basinCatalog(env);
   const namespace = basinNamespace(user);
   const resolver = r2Resolver(env.ARCHIVE, env.BASIN_BUCKET);
   return {

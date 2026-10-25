@@ -144,7 +144,7 @@ export const MIGRATIONS: readonly string[] = [
   // constructor takes them out of the index and deletes their raw files.
   `INSERT INTO meta (key, value) VALUES ('drop_spam', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
   // 13: new mail indexed into a month already built from Basin wasn't added to its copied count
-  // (2026-10-25: bikramc@columenlabs.com showed 43 short of Gmail with all 43 searchable). Once:
+  // (2026-10-25: one mailbox showed 43 short of Gmail with all 43 searchable). Once:
   // recent indexed months take the index's count where it is higher. ingest keeps it from now on.
   `UPDATE basin_months SET copied = (SELECT n FROM months WHERE months.month = basin_months.month)
    WHERE month >= '2026-09' AND indexed_at IS NOT NULL
