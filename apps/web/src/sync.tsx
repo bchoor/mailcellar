@@ -17,10 +17,10 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { addMonths, monthRange, type AccountCoverage, type BackfillStatus, type MonthCoverage, type SyncOverview, type SyncSummary, type AccountStatus, type QuotaMeter, quotaStop } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, ChevronDownIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { EmptyState } from './archive';
-import { AccountLimits, AccountLimitsTools, useQuota } from './quota';
+import { useQuota } from './quota';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 const size = (bytes: number) =>
@@ -991,11 +991,6 @@ export function BackfillPage() {
                   const a = followed(data.accounts, f);
                   return <Backfills key={a.id} id={a.id} rate={a.sync.ratePerMin} copying={a.sync.months} />;
                 },
-              },
-              {
-                id: 'limits', title: 'Account limits', icon: GaugeIcon, kind: 'widget' as const, link: false as const, w: 6,
-                tools: <AccountLimitsTools />,
-                children: <AccountLimits />,
               },
             ]
           : []),
