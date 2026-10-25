@@ -2,6 +2,7 @@ import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, messageFilters, monthNow, type Archi
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
+import { attachment, openMessage } from './message';
 import { accountQuota } from './quota';
 import { accountMailbox } from './sync';
 
@@ -149,6 +150,18 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
   if (job && request.method === 'POST') {
     const r = await mailbox.jobAction(job[1], Number(job[2]), job[3] as 'cancel' | 'retry');
     return r ? Response.json(r, { headers: noStore }) : Response.json({ error: 'not_found' }, { status: 404 });
+  }
+  // One message, opened from the Messages page: read from its raw file, not from Gmail. The month
+  // (YYYY-MM, UTC) says which of Basin's partitions holds its row.
+  const opened = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/([0-9a-f]{1,16})(?:\/attachments\/(\d{1,4}))?$/);
+  if (opened && request.method === 'GET') {
+    const month = url.searchParams.get('month') ?? '';
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return Response.json({ error: 'bad_month' }, { status: 400, headers: noStore });
+    const [, id, mid, n] = opened;
+    if (n !== undefined) return (await attachment(env, who.user, id, mid, month, Number(n))) ?? Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    const detail = await openMessage(env, who.user, id, mid, month);
+    // A message never changes once copied: the app keeps it for the day.
+    return detail ? Response.json(detail, { headers: { 'cache-control': 'private, max-age=86400' } }) : Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
   }
   // One page of an account's messages under the Messages page's filters.
   const paged = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages$/);

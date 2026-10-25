@@ -139,7 +139,7 @@ export interface BasinTarget {
 export const INDEX_COLUMNS = ['account', 'id', 'thread_id', 'ts', 'from_addr', 'from_name', 'subject', 'snippet', 'size', 'attachments', 'labels'] as const;
 export type IndexColumns = Pick<BasinRow, (typeof INDEX_COLUMNS)[number]>;
 
-type TableMetadata = Parameters<typeof icebergManifestList>[0]['metadata'];
+export type TableMetadata = Parameters<typeof icebergManifestList>[0]['metadata'];
 
 /** Months since January 1970: Iceberg's `month` partition value. */
 const monthOrdinal = (month: string) => {
@@ -259,4 +259,25 @@ export async function basinCheck(env: Env): Promise<{ ok: boolean; ms: number; e
   } catch (e) {
     return { ok: false, ms: Date.now() - start, error: String(e).slice(0, 500) };
   }
+}
+
+/** The data files that hold one month's rows: only the manifests whose month range covers it. */
+export async function monthFiles(metadata: TableMetadata, resolver: Resolver, month: string): Promise<{ path: string; size: number }[]> {
+  if (metadata['current-snapshot-id'] == null || Number(metadata['current-snapshot-id']) < 0) return [];
+  const target = monthOrdinal(month);
+  const { manifests } = await icebergManifestList({ metadata, resolver });
+  const files: { path: string; size: number }[] = [];
+  for (const m of manifests) {
+    if (m.content === 1) continue;
+    const range = (m as { partitions?: { lower_bound?: unknown; upper_bound?: unknown }[] }).partitions?.[0];
+    const lo = boundInt(range?.lower_bound);
+    const hi = boundInt(range?.upper_bound);
+    if (lo !== null && hi !== null && (target < lo || target > hi)) continue;
+    for (const e of await fetchManifestEntries(m, resolver)) {
+      const part = (e.data_file.partition as Record<string, unknown> | undefined)?.ts_month;
+      if (e.status === 2 || e.data_file.content || (part !== undefined && part !== null && Number(part) !== target)) continue;
+      files.push({ path: e.data_file.file_path, size: Number(e.data_file.file_size_in_bytes) });
+    }
+  }
+  return files;
 }
