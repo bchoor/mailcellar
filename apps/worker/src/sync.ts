@@ -8,7 +8,7 @@
 // every message's row to Basin, the system of record. Basin rows are staged in R2 first, so
 // a failed commit is retried by the next run instead of losing the batch.
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
-import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES, PAID } from '@mailcellar/schema';
+import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES, paidNow } from '@mailcellar/schema';
 import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
@@ -18,7 +18,7 @@ import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, he
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
 export const RUN_SIZE = 500;
 /** Outside requests a run may make: Workers Free stops a run at 50 (spike S7), Paid at 10,000. */
-export const RUN_CALLS = PAID ? 400 : 45;
+export const RUN_CALLS = () => (paidNow() ? 400 : 45);
 /** Raw mail fetched in one Gmail batch, as Gmail sizes it: keeps the answer well inside 128 MB. */
 export const BATCH_BYTES = 8 * 1024 * 1024;
 /** Messages up to this size are gzipped; larger ones are mostly already-compressed attachments. */
@@ -28,7 +28,7 @@ export const GZIP_MAX = 256 * 1024;
  * 2026-10-24 (the spike's 1.9 s had passed), so a run stays at a quarter of that and the
  * next run copies the rest. Workers can't read their own CPU time, so it is estimated.
  */
-export const RUN_CPU_MS = PAID ? 10_000 : 500;
+export const RUN_CPU_MS = () => (paidNow() ? 10_000 : 500);
 /**
  * Estimated CPU to copy one message: twice what a local benchmark measured on 2026-10-24
  * (20 KB 3 ms, 100 KB 5 ms, 6.8 MB 9 ms), since the first estimate ran about 5x low in
@@ -234,7 +234,7 @@ export async function runBatch(
   user: UserId,
   account: string,
   runId: string,
-  limits: RunOptions = { calls: RUN_CALLS, batchBytes: BATCH_BYTES },
+  limits: RunOptions = { calls: RUN_CALLS(), batchBytes: BATCH_BYTES },
 ): Promise<RunResult> {
   const mailbox = accountMailbox(env, user, account);
   const state = await mailbox.syncState();
@@ -323,7 +323,7 @@ export async function runBatch(
       rest.push(...retry);
     }
     // Keep the run's CPU in budget: what doesn't fit goes to the next run.
-    const budget = limits.cpuMs ?? RUN_CPU_MS;
+    const budget = limits.cpuMs ?? RUN_CPU_MS();
     let cpu = 0;
     let fit = 0;
     while (fit < sized.length && (fit === 0 || cpu + messageCpuMs(sized[fit].sizeEstimate) <= budget)) cpu += messageCpuMs(sized[fit++].sizeEstimate);
@@ -354,10 +354,10 @@ export async function runBatch(
     // Gmail's count of a month goes stale as new mail lands in it: count the months it landed in again.
     const landed = new Set(basin.map((r) => new Date(r.ts).toISOString().slice(0, 7)).filter((m) => m >= addMonths(monthNow(), -1)));
     for (const month of landed) {
-      if (calls + LIST_CALLS > limits.calls) break;
+      if (calls + LIST_CALLS() > limits.calls) break;
       let n = 0;
       let pageToken: string | undefined;
-      for (let page = 0; page < LIST_CALLS; page++) {
+      for (let page = 0; page < LIST_CALLS(); page++) {
         calls++;
         const got = await listPage(token, pageToken, 500, monthQuery(month));
         n += got.ids.length;
@@ -441,7 +441,7 @@ export async function runBatch(
 /** Index rows written a call when building a month's index (fewer calls, fewer search segments). Measured ~3 DO rows a message (Jul 2026). */
 export const INDEX_CHUNK = 500;
 /** Chunks one index run writes before handing over to a fresh run (each run reads the month from Basin again). */
-export const INDEX_CHUNKS_A_RUN = PAID ? 20 : 4;
+export const INDEX_CHUNKS_A_RUN = () => (paidNow() ? 20 : 4);
 
 /**
  * Build a landed month's search index from Basin: read the month back, and index what the
@@ -460,7 +460,7 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   const quota = accountQuota(env);
   let at = from;
   let indexed = 0;
-  for (let i = 0; i < INDEX_CHUNKS_A_RUN && at < rows.length; i++) {
+  for (let i = 0; i < INDEX_CHUNKS_A_RUN() && at < rows.length; i++) {
     const chunk = rows.slice(at, at + INDEX_CHUNK);
     const full = await quota.reserve({ do_rows_written: chunk.length * INDEX_ROWS, do_rows_read: chunk.length * 2 });
     if (full) {
@@ -505,7 +505,7 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
 }
 
 /** Gmail list calls an index run may spend listing its month (500 IDs a call). */
-const LIST_CALLS = PAID ? 100 : 30;
+const LIST_CALLS = () => (paidNow() ? 100 : 30);
 
 /**
  * The IDs Gmail lists for a month, saved to R2 for the index runs after this one. Null when
@@ -520,7 +520,7 @@ async function listMonth(env: Env, user: UserId, account: string, month: string)
     const ids: string[] = [];
     let pageToken: string | undefined;
     for (let calls = 0; ; calls++) {
-      if (calls === LIST_CALLS) return null;
+      if (calls === LIST_CALLS()) return null;
       const page = await listPage(token, pageToken, 500, monthQuery(month));
       ids.push(...page.ids);
       if (!page.next) break;
@@ -596,7 +596,7 @@ async function auditIndex(env: Env, user: UserId, account: string, year: string)
 }
 
 /** Outside requests a census run may make (one is the token refresh). */
-export const CENSUS_CALLS = PAID ? 400 : 40;
+export const CENSUS_CALLS = () => (paidNow() ? 400 : 40);
 /** Months in a row with no mail, before the first month of Gmail, after which the census asks if anything is older. */
 const EMPTY_STREAK = 12;
 
@@ -619,7 +619,7 @@ export async function startCensus(env: Env, user: UserId, account: string, mode:
  * One census run: count months, newest first, by listing message IDs (500 a call). A month
  * already counted after it ended can't change, so a full census skips it and a refresh stops there.
  */
-export async function runCensus(env: Env, user: UserId, account: string, runId: string, budget = CENSUS_CALLS): Promise<{ more: boolean; counted: string[] }> {
+export async function runCensus(env: Env, user: UserId, account: string, runId: string, budget = CENSUS_CALLS()): Promise<{ more: boolean; counted: string[] }> {
   const mailbox = accountMailbox(env, user, account);
   const c = await mailbox.censusState();
   if (!c || c.runId !== runId || c.month === null) return { more: false, counted: [] };
