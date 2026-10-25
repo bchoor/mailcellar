@@ -255,6 +255,8 @@ export interface MonthCoverage {
   month: string;
   /** Messages Gmail has that month (the census); null until counted. */
   gmail: number | null;
+  /** Of those, messages Gmail lists but won't give (404, or 400 on some old mail): not copyable, so not missing. */
+  unavailable?: number;
   /** Messages MailCellar has that month: copied to Basin, or indexed if more (mail copied before Basin came first). */
   copied: number;
   /** Messages copied to Basin, the system of record, this month (a backfill in progress counts as it goes). */
