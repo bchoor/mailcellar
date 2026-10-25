@@ -37,6 +37,10 @@ import './index.css';
 
 // Until a person picks: the device's theme, and Pacific time (Bikram, 2026-10-24).
 configureLumen({ defaultPrefs: { theme: 'system', timeZone: 'America/Los_Angeles' } });
+// Whether the last input was a pointer or a key, for index.css: a clicked tab gets no focus ring.
+const html = document.documentElement;
+addEventListener('pointerdown', () => html.setAttribute('data-pointer', ''), true);
+addEventListener('keydown', () => html.removeAttribute('data-pointer'), true);
 
 // Schedules are saved in the mailbox, which runs Gmail sync on its own. Run now syncs every account now.
 function SchedulesSettings() {
