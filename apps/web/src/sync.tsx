@@ -4,7 +4,7 @@
 // preset, then Start backfill; picked queued months can be taken back out.
 // Everything shown is what the sync state says now; nothing is estimated.
 import {
-  ErrorLine, IconButton, LumenCoverageMap, LumenLayout, NoteLine, StatusItem, Tile, TileRow,
+  ErrorLine, IconButton, LumenCoverageMap, useIsMobile, LumenLayout, NoteLine, StatusItem, Tile, TileRow,
   type CoverageData, type CoverageFact, type CoveragePick, type FilterToken, type ScheduleRun,
 } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
@@ -702,71 +702,54 @@ function freshness(s: SyncSummary, now = Date.now()): string {
   return `Synced ${ago}`;
 }
 
-/**
- * Every mailbox on one map: one row each, one column per month (or quarter, or year), and how
- * fresh each copy is. Picks queue a backfill in each mailbox picked.
- */
-function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string | null; onPick: (email: string) => void }) {
-  const source = backfillQuery;
-  return (
-    <div className="flex flex-col gap-2">
-      <LumenCoverageMap
-        source={{
-          ...source,
-          select: (s: BackfillStatus): CoverageData => {
-            const all = Object.fromEntries(s.accounts.map((a) => [a.id, a as AccountCoverage]));
-            const per = accounts.map((a) => (all[a.id] ? facts(a.id, a.email, a.sync.months)(all[a.id]) : { facts: [], rows: [] }));
-            return {
-              facts: per.flatMap((p) => p.facts),
-              rows: accounts.map((a) => ({
-                row: a.id,
-                label: a.email,
-                sub: `${badge(a.sync).label} · ${freshness(a.sync)}`,
-              })),
-              current: Object.values(all)[0]?.current,
-            };
-          },
-        }}
-        title="All mailboxes by month"
-        stateLabels={STATE_LABELS}
-        icon={CalendarRangeIcon}
-        rows={{ title: 'Mailbox' }}
-        block="month"
-        zoom={['month', 'quarter', 'year']}
-        unit="messages"
-        summary={['complete']}
-        select="drill"
-        drilled={null}
-        onDrill={(row) => {
-          const a = accounts.find((x) => x.id === row);
-          if (a) onPick(a.email);
-        }}
-        hint="Tap a row to show that mailbox below."
-      />
-    </div>
-  );
-}
+/** The badge in a word or two, to fit beside the mailbox on the map. */
+const shortBadge = (s: SyncSummary) => {
+  const b = badge(s);
+  return { ...b, label: b.label.replace(/^(Copying|Indexing) paused$/, 'Paused') };
+};
 
-/** Every mailbox, one line each: tap one to show it in the cards below. */
-function MailboxList({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string; onPick: (email: string) => void }) {
+/**
+ * Every mailbox on one map: one row each with its status and last sync, one column per year (or
+ * quarter, or month), and how complete each copy is. Tap a row to show that mailbox below.
+ */
+function MailboxesMap({ accounts, onPick }: { accounts: SyncOverview['accounts']; onPick: (email: string) => void }) {
+  // A phone's name column fits the address or the status, not both: it keeps the address.
+  const mobile = useIsMobile();
   return (
-    <ul className="flex flex-col gap-1 text-sm">
-      {accounts.map((a) => (
-        <li key={a.id}>
-          <Button
-            variant={a.email === picked ? 'secondary' : 'ghost'}
-            className="h-auto w-full justify-start gap-3 py-2"
-            aria-pressed={a.email === picked}
-            onClick={() => onPick(a.email)}
-          >
-            <span className="min-w-0 flex-1 truncate text-left font-medium">{a.email}</span>
-            <Badge variant={badge(a.sync).variant}>{badge(a.sync).label}</Badge>
-            <span className="hidden text-muted-foreground sm:inline">{freshness(a.sync)}</span>
-            <span className="w-14 text-right tabular-nums text-muted-foreground">{a.sync.total ? `${pct(a.sync)}%` : '—'}</span>
-          </Button>
-        </li>
-      ))}
-    </ul>
+    <LumenCoverageMap
+      source={{
+        ...backfillQuery,
+        select: (s: BackfillStatus): CoverageData => {
+          const all = Object.fromEntries(s.accounts.map((a) => [a.id, a as AccountCoverage]));
+          const per = accounts.map((a) => (all[a.id] ? facts(a.id, a.email, a.sync.months)(all[a.id]) : { facts: [], rows: [] }));
+          return {
+            facts: per.flatMap((p) => p.facts),
+            rows: accounts.map((a) => ({
+              row: a.id,
+              label: a.email,
+              badge: mobile ? undefined : <Badge variant={shortBadge(a.sync).variant}>{shortBadge(a.sync).label}</Badge>,
+              sub: freshness(a.sync),
+            })),
+            current: Object.values(all)[0]?.current,
+          };
+        },
+      }}
+      title="Mailboxes"
+      stateLabels={STATE_LABELS}
+      icon={MailIcon}
+      rows={{ title: 'Mailbox' }}
+      block="year"
+      zoom={['month', 'quarter', 'year']}
+      unit="messages"
+      summary={['complete']}
+      select="drill"
+      drilled={null}
+      onDrill={(row) => {
+        const a = accounts.find((x) => x.id === row);
+        if (a) onPick(a.email);
+      }}
+      hint={accounts.length > 1 ? 'Tap a row to show that mailbox below.' : undefined}
+    />
   );
 }
 
@@ -811,35 +794,22 @@ export function BackfillPage() {
               ),
             }]
           : []),
-        // The mailbox map picks the mailbox: its chip goes to every card of its colour (Lumen's
-        // linked cards), and the cards below show the mailbox they follow.
-        // Picking a mailbox shares its chip with every card of the same colour (Lumen's linked
-        // cards); the cards below show the mailbox they follow.
+        // Tapping a row in Mailboxes picks the mailbox; the cards below show it.
         ...(data && data.accounts.length
           ? [
               {
-                id: 'mailboxes', title: 'Mailboxes', icon: MailIcon, kind: 'widget' as const, color: 'teal' as const, w: 6,
+                id: 'mailboxes', title: 'Mailboxes', kind: 'own' as const, w: 6,
+                children: <MailboxesMap accounts={data.accounts} onPick={setPicked} />,
+              },
+              {
+                // An own card can't share a chip, so Sync shares the picked mailbox with the cards below.
+                id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6,
                 publishes: [{ key: 'mailbox', value: shown!.email }],
                 tools: <RefreshTool keys={[BACKFILL_KEY]} />,
-                children: <MailboxList accounts={data.accounts} picked={shown!.email} onPick={setPicked} />,
-              },
-              ...(data.accounts.length > 1
-                ? [{
-                    id: 'all', title: 'All mailboxes by month', kind: 'own' as const, w: 6,
-                    children: <AllMailboxesMap accounts={data.accounts} picked={shown!.email} onPick={setPicked} />,
-                  }]
-                : []),
-            ]
-          : []),
-        ...(data && data.accounts.length
-          ? [
-              {
-                id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
-                tools: <RefreshTool keys={[BACKFILL_KEY]} />,
-                children: (f: FilterToken[]) => {
-                  const a = followed(data.accounts, f);
+                children: (() => {
+                  const a = shown!;
                   return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} />;
-                },
+                })(),
               },
               {
                 id: 'map', title: 'By month', kind: 'own' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
