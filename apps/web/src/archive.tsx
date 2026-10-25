@@ -9,7 +9,7 @@ import {
   type ArchiveRows,
   type ArchiveView,
   type DomainRow,
-  type LabelColors,
+  type GmailLabels,
   type LabelRow,
   MESSAGE_PAGE_SIZES,
   type MessageFilter,
@@ -18,7 +18,7 @@ import {
   type MonthRow,
   type SenderRow,
 } from '@mailcellar/schema';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AtSignIcon,
   CalendarClockIcon,
@@ -111,11 +111,34 @@ function useArchive<V extends ArchiveView>(view: V, q = '') {
   });
 }
 
-// Labels are IDs on a message; the Labels rollup names them.
+/**
+ * The mailbox's labels as Gmail has them now, read live, so a label made or renamed since the
+ * last sync shows its name, not its ID. Reading them also renames the index's labels, so the
+ * Labels rollup is read again once they arrive.
+ */
+function useGmailLabels() {
+  const id = useMailbox().account?.id ?? null;
+  const client = useQueryClient();
+  return useQuery({
+    queryKey: ['gmail-labels', id],
+    queryFn: async (): Promise<GmailLabels> => {
+      if (!id) return {};
+      const res = await fetch(`/api/accounts/${id}/labels`);
+      // Gmail unreachable: the index's names stand in.
+      if (!res.ok) return {};
+      const body: GmailLabels = await res.json();
+      client.invalidateQueries({ queryKey: ['archive', id, 'labels'] });
+      return body;
+    },
+  });
+}
+
+// Labels are IDs on a message; Gmail names them, then the Labels rollup.
 function useLabelNames() {
   const labels = useArchive('labels');
+  const gmail = useGmailLabels().data ?? {};
   const names = new Map((labels.data ?? []).map((l) => [l.id, labelName(l)]));
-  return (ids: string[]) => ids.map((id) => names.get(id) ?? id);
+  return (ids: string[]) => ids.map((id) => (gmail[id] ? labelName(gmail[id]) : (names.get(id) ?? id)));
 }
 
 /** Gmail's inbox tabs: a message is in one, Primary when it carries none of the other four. */
@@ -125,22 +148,13 @@ const categoryOf = (ids: string[]) => CATEGORIES.find((c) => ids.includes(`CATEG
 
 /** A message's own labels (the person's, not Gmail's built-in ones), each with its Gmail colours. */
 function useUserLabels() {
-  const id = useMailbox().account?.id ?? null;
   const labels = useArchive('labels');
-  const colors = useQuery({
-    queryKey: ['label-colors', id],
-    queryFn: async (): Promise<LabelColors> => {
-      if (!id) return {};
-      const res = await fetch(`/api/accounts/${id}/label-colors`);
-      // No colours is fine: the chips show plain.
-      return res.ok ? res.json() : {};
-    },
-    staleTime: Infinity,
-  });
+  const gmail = useGmailLabels().data ?? {};
   const mine = new Map((labels.data ?? []).filter((l) => l.type === 'user').map((l) => [l.id, l.name]));
+  for (const [id, l] of Object.entries(gmail)) if (l.type === 'user') mine.set(id, l.name);
   return (ids: string[]): Chip[] => [
     ...FOLDERS.filter((f) => ids.includes(f.id)).map(({ id: _, ...c }) => c),
-    ...ids.filter((x) => mine.has(x)).map((x) => ({ name: mine.get(x)!, ...colors.data?.[x] })),
+    ...ids.filter((x) => mine.has(x)).map((x) => ({ name: mine.get(x)!, bg: gmail[x]?.bg, fg: gmail[x]?.fg })),
   ];
 }
 interface Chip {
