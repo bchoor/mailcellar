@@ -47,7 +47,7 @@ import {
   type MessagePage,
 } from '@mailcellar/schema';
 import type { Env } from './env';
-import { accountMailbox, accessToken, BasinNotReady, INDEX_CHUNK, INDEX_ROWS, launchLanes, runDied, syncDeps } from './sync';
+import { accountMailbox, accessToken, BasinNotReady, INDEX_CHUNK, INDEX_ROWS, launchLanes, RUN_COST, runDied, syncDeps } from './sync';
 import { BUCKET, FLIGHT, freshLane, readLane, saveLane } from './copy';
 import { GmailError } from './gmail';
 import { accountQuota } from './quota';
@@ -1433,11 +1433,21 @@ export class MailboxDO extends DurableObject<Env> {
    * run as running. Lanes are checked on their own: a lane that stopped saving starts again where
    * it stood. Returns the sync as it is now.
    */
+  /**
+   * A sync paused for an account limit that no longer stops it: the run sleeping until the reset
+   * paused under an older rule (before #56 the DO's write limit paused copying too). A fresh run
+   * replaces it now; the sleeping one finds another run ID when it wakes, and stops.
+   */
+  private async pauseLifted(state: SyncState): Promise<boolean> {
+    if (state.phase !== 'paused' || syncStatus(state) !== 'waiting') return false;
+    return !(await accountQuota(this.env).reserve(RUN_COST));
+  }
+
   private async keepRunning(user: UserId, account: string, state: SyncState | null, paused: boolean): Promise<SyncState | null> {
     if (paused || !state) return state;
     const ownWork = state.phase !== 'live' || state.pending.length > 0 || state.basinQueue.length > 0;
     if (state.lanes?.length) await launchLanes(this.env, user, account);
-    if (ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) {
+    if ((ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) || (await this.pauseLifted(state))) {
       try {
         await syncDeps.start(this.env, user, account);
         return await accountMailbox(this.env, user, account).syncView();
@@ -1534,7 +1544,8 @@ export class MailboxDO extends DurableObject<Env> {
     const state = await accountMailbox(this.env, user, account).syncState();
     const status = syncStatus(state);
     const dead = status === 'running' && (await runDied(this.env, state!.runId));
-    if ((status === 'running' && !dead) || status === 'waiting' || (status === 'stopped' && !manual)) return { status };
+    const lifted = status === 'waiting' && (await this.pauseLifted(state!));
+    if ((status === 'running' && !dead) || (status === 'waiting' && !lifted) || (status === 'stopped' && !manual)) return { status };
     try {
       await syncDeps.start(this.env, user, account);
     } catch (e) {
