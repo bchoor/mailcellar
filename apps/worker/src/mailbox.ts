@@ -1436,8 +1436,16 @@ export class MailboxDO extends DurableObject<Env> {
     const full = rows.length > size;
     if (full) rows.length = size;
     const end = full ? rows[rows.length - 1] : more ? last : null;
-    // Totals from the status row: no table read.
-    const total = filters.length ? null : this.indexedTotal();
+    // Totals from the status row: no table read. A category tab alone counts from the labels
+    // rollup (four rows at most); Primary is everything outside the other four.
+    const cat = filters.length === 1 && filters[0].key === 'label' && filters[0].values.every((v) => CATEGORY_LABEL.test(v)) ? filters[0] : null;
+    let total: number | null = filters.length ? null : this.indexedTotal();
+    if (cat) {
+      const n = exec<{ n: number }>(
+        `SELECT n FROM labels WHERE id IN (${cat.values.map(() => '?').join(', ')})`, ...cat.values,
+      ).reduce((t, r) => t + r.n, 0);
+      total = cat.not ? Math.max(0, this.indexedTotal() - n) : n;
+    }
     const unindexed = Object.values(this.status().months).filter((m) => m.inBasin > 0 && m.indexState !== null && m.indexState !== 'done').length;
     this.count({ do_rows_read: read });
     return {
@@ -1981,6 +1989,8 @@ function censusView(c: CensusState | null): AccountCoverage['census'] {
 
 /** Rows read at most for one Messages page, and how many a read takes. */
 const SCAN_BUDGET = 2000;
+/** Gmail's four category labels; Primary is a message with none of them. */
+const CATEGORY_LABEL = /^CATEGORY_(PROMOTIONS|SOCIAL|UPDATES|FORUMS)$/;
 const SCAN_CHUNK = 250;
 const encodeCursor = (k: { ts: number; id: string }) => `${k.ts}.${k.id}`;
 function decodeCursor(c: string): { ts: number; id: string } | null {
