@@ -56,11 +56,20 @@ export function useSync() {
 
 const monthName = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', year: 'numeric', timeZone: 'UTC' });
 
+const REFUSED: Record<string, string> = {
+  paused: 'Backfill is paused',
+  basin_not_ready: 'Waiting for Basin write access',
+  not_found: 'This account was removed',
+};
+
 /** Start a sync for one account. Resolves to what happened, in words. */
 async function syncNow(id: string): Promise<{ ok: boolean; detail: string }> {
   const res = await fetch(`/api/accounts/${id}/sync`, { method: 'POST' });
-  if (res.status === 409) return { ok: false, detail: 'Waiting for Basin write access' };
-  if (!res.ok) return { ok: false, detail: `Not started (${res.status})` };
+  if (!res.ok) {
+    // The Worker names why it refused: paused, Basin not ready, or no such account.
+    const error = ((await res.json().catch(() => ({}))) as { error?: string }).error;
+    return { ok: false, detail: (error && REFUSED[error]) ?? `Not started (${res.status})` };
+  }
   const body = (await res.json()) as { started: boolean; sync: SyncSummary };
   return { ok: true, detail: body.started ? 'Started' : STATUS[body.sync.status].label };
 }
