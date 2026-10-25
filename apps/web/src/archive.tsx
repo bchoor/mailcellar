@@ -454,6 +454,17 @@ export function MessagesPage() {
   const labelNames = useLabelNames();
   const userLabels = useUserLabels();
   const [tab, setTab] = useTab(MESSAGE_TABS);
+  // Each tab's count from the rollups (the same counts Labels and Time show); none until they load.
+  const months = useArchive('months');
+  const labelRows = useArchive('labels');
+  const tabCounts = useMemo(() => {
+    if (!months.data || !labelRows.data) return MESSAGE_TABS;
+    const all = months.data.reduce((t, m) => t + m.n, 0);
+    const of = (v: string) => labelRows.data?.find((l) => l.id === `CATEGORY_${v.toUpperCase()}`)?.n ?? 0;
+    const cats = CATEGORIES.reduce((t, c) => t + of(c), 0);
+    const n = (v: string) => (v === 'all' ? all : v === 'primary' ? Math.max(0, all - cats) : of(v));
+    return MESSAGE_TABS.map((t) => ({ ...t, after: <span className="text-xs text-muted-foreground tabular-nums">{count(n(t.value))}</span> }));
+  }, [months.data, labelRows.data]);
   const [tokens, setTokens] = useState<FilterToken[]>([]);
   const [size, setSize] = useState(50);
   // Page n starts after cursors[n]; each page read adds the next one's.
@@ -495,6 +506,16 @@ export function MessagesPage() {
   const [config, setConfig] = useState(() =>
     view('Messages', { columns: ['date', 'from', 'subject', 'category', 'label', 'size_kb', 'attachments'], sort: { key: 'date', desc: true } }),
   );
+  // A category tab holds one category, so its column says nothing there; the saved view keeps it for All.
+  const byCategory = tab !== 'all' && config.columns.includes('category');
+  const shown = byCategory ? { ...config, columns: config.columns.filter((c) => c !== 'category') } : config;
+  const at = config.columns.indexOf('category');
+  const onConfig = (next: typeof config) =>
+    setConfig(
+      byCategory && !next.columns.includes('category')
+        ? { ...next, columns: [...next.columns.slice(0, at), 'category', ...next.columns.slice(at)] }
+        : next,
+    );
   const rows = (data?.rows ?? []).map((m) => ({
     ...m,
     labelNames: labelNames(m.labels),
@@ -510,7 +531,7 @@ export function MessagesPage() {
   // A row click opens the message in the drawer.
   const [opened, setOpened] = useState<MessageView | null>(null);
   if (loaded && !rows.length && !filters.length && page === 0) return <EmptyPage title="Messages" />;
-  const intro = <LumenTabs tabs={MESSAGE_TABS} value={tab} onChange={setTab} />;
+  const intro = <LumenTabs tabs={tabCounts} value={tab} onChange={setTab} />;
   const noMatch = loaded && !rows.length && (
     <EmptyState icon={SearchIcon} title={tokens.length ? 'No mail matches these filters' : 'No mail in this tab'}>
       {data?.partial ? 'None in the mail searched so far. Next page keeps searching.' : 'Text search looks at the subject, the sender and the first lines of each message.'}
@@ -533,10 +554,10 @@ export function MessagesPage() {
       meta={meta ? <span className="text-xs text-muted-foreground">{meta}</span> : undefined}
       intro={intro}
       domain={MESSAGES}
-      config={config}
+      config={shown}
       rows={rows}
       load={load}
-      onConfigChange={setConfig}
+      onConfigChange={onConfig}
       rowTitle={(r) => r.subject}
       onOpen={setOpened}
       state={noMatch || undefined}
