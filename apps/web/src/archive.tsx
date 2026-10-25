@@ -1,6 +1,6 @@
 // The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
 // mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
-import { type FilterToken, LumenLayout, LumenSavedWidget, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
+import { type FilterToken, LumenLayout, type LumenTab, LumenTabs, LumenSavedWidget, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
@@ -19,6 +19,7 @@ import {
   type SenderRow,
 } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate, useSearch } from '@tanstack/react-router';
 import {
   AtSignIcon,
   CalendarClockIcon,
@@ -27,12 +28,16 @@ import {
   type LucideIcon,
   HardDriveIcon,
   InboxIcon,
+  InfoIcon,
   MailIcon,
   MailOpenIcon,
+  MailsIcon,
+  MessagesSquareIcon,
   PaperclipIcon,
   SearchIcon,
   TagIcon,
   UserIcon,
+  UsersIcon,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
@@ -145,6 +150,25 @@ function useLabelNames() {
 const CATEGORIES = ['Promotions', 'Social', 'Updates', 'Forums'] as const;
 const CATEGORY_IDS = CATEGORIES.map((c) => `CATEGORY_${c.toUpperCase()}`);
 const categoryOf = (ids: string[]) => CATEGORIES.find((c) => ids.includes(`CATEGORY_${c.toUpperCase()}`)) ?? 'Primary';
+
+/** The open tab, kept in the address (?tab=) so refresh and links keep it; the first tab when none or unknown. */
+function useTab<V extends string>(tabs: LumenTab<V>[]): [V, (v: V) => void] {
+  const raw = useSearch({ strict: false, select: (s: { tab?: unknown }) => s.tab });
+  const navigate = useNavigate();
+  const value = tabs.find((t) => t.value === raw)?.value ?? tabs[0].value;
+  const set = (v: V) => void navigate({ to: '.', search: v === tabs[0].value ? {} : { tab: v }, replace: true });
+  return [value, set];
+}
+
+/** Messages' tabs: every message, then Gmail's inbox tabs. */
+const MESSAGE_TABS: LumenTab<'all' | 'primary' | 'promotions' | 'social' | 'updates' | 'forums'>[] = [
+  { value: 'all', label: 'All', icon: MailsIcon },
+  { value: 'primary', label: 'Primary', icon: InboxIcon },
+  { value: 'promotions', label: 'Promotions', icon: TagIcon },
+  { value: 'social', label: 'Social', icon: UsersIcon },
+  { value: 'updates', label: 'Updates', icon: InfoIcon },
+  { value: 'forums', label: 'Forums', icon: MessagesSquareIcon },
+];
 
 /** A message's own labels (the person's, not Gmail's built-in ones), each with its Gmail colours. */
 function useUserLabels() {
@@ -428,6 +452,7 @@ export function MessagesPage() {
   const { timeZone } = usePrefs();
   const labelNames = useLabelNames();
   const userLabels = useUserLabels();
+  const [tab, setTab] = useTab(MESSAGE_TABS);
   const [tokens, setTokens] = useState<FilterToken[]>([]);
   const [size, setSize] = useState(50);
   // Page n starts after cursors[n]; each page read adds the next one's.
@@ -436,7 +461,11 @@ export function MessagesPage() {
   // The server sorts by date only (its index is on time): newest first unless the header says oldest.
   const [asc, setAsc] = useState(false);
   const list = useMemo(() => periods(Date.now(), timeZone), [timeZone]);
-  const filters = useMemo(() => toFilters(tokens, list, timeZone), [tokens, list, timeZone]);
+  // A category tab is one more chip the server applies, ANDed with the person's.
+  const filters = useMemo(
+    () => toFilters(tab === 'all' ? tokens : [{ key: 'category', value: tab } as FilterToken, ...tokens], list, timeZone),
+    [tab, tokens, list, timeZone],
+  );
   const key = JSON.stringify(filters);
   // A new filter or page size starts again from the newest.
   // biome-ignore lint/correctness/useExhaustiveDependencies: resets when the filter, size or sort changes.
@@ -478,8 +507,9 @@ export function MessagesPage() {
   const loaded = !!data && !messages.isPlaceholderData;
   const crumbs = useMailboxCrumbs('Messages');
   if (loaded && !rows.length && !filters.length && page === 0) return <EmptyPage title="Messages" />;
+  const intro = <LumenTabs tabs={MESSAGE_TABS} value={tab} onChange={setTab} />;
   const noMatch = loaded && !rows.length && (
-    <EmptyState icon={SearchIcon} title="No mail matches these filters">
+    <EmptyState icon={SearchIcon} title={tokens.length ? 'No mail matches these filters' : 'No mail in this tab'}>
       {data?.partial ? 'None in the mail searched so far. Next page keeps searching.' : 'Text search looks at the subject, the sender and the first lines of each message.'}
     </EmptyState>
   );
@@ -497,6 +527,7 @@ export function MessagesPage() {
     <LumenLayout
       crumbs={crumbs}
       meta={meta ? <span className="text-xs text-muted-foreground">{meta}</span> : undefined}
+      intro={intro}
       domain={MESSAGES}
       config={config}
       rows={rows}
@@ -521,9 +552,10 @@ export function MessagesPage() {
 }
 
 function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
-  title, source, domain, initial, rowTitle,
+  title, source, domain, initial, rowTitle, intro,
 }: {
   title: string;
+  intro: ReactNode;
   source: V;
   domain: ViewDomain<ArchiveRows[V]>;
   initial: Record<string, unknown>;
@@ -532,11 +564,12 @@ function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
   const query = useArchive(source);
   const load = useLumenLoad(query);
   const [config, setConfig] = useState(() => view(title, initial));
-  const crumbs = useMailboxCrumbs(title);
-  if (isEmpty(query)) return <EmptyPage title={title} />;
+  const crumbs = useMailboxCrumbs('Panes', title);
+  if (isEmpty(query)) return <EmptyPage title="Panes" />;
   return (
     <LumenLayout
       crumbs={crumbs}
+      intro={intro}
       domain={domain}
       config={config}
       rows={query.data ?? []}
@@ -547,30 +580,30 @@ function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
   );
 }
 
-export const SendersPage = () => (
+const SendersPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Senders" source="senders" domain={SENDERS} rowTitle={(r) => r.addr}
+    title="Senders" source="senders" domain={SENDERS} rowTitle={(r) => r.addr} intro={intro}
     initial={{ columns: ['from', 'name', 'n', 'size_mb', 'first', 'last'], sort: { key: 'n', desc: true } }}
   />
 );
 
-export const DomainsPage = () => (
+const DomainsPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Domains" source="domains" domain={DOMAINS} rowTitle={(r) => r.domain}
+    title="Domains" source="domains" domain={DOMAINS} rowTitle={(r) => r.domain} intro={intro}
     initial={{ columns: ['domain', 'n', 'size_mb'], sort: { key: 'n', desc: true } }}
   />
 );
 
-export const LabelsPage = () => (
+const LabelsPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Labels" source="labels" domain={LABELS} rowTitle={labelName}
+    title="Labels" source="labels" domain={LABELS} rowTitle={labelName} intro={intro}
     initial={{ columns: ['label', 'type', 'n', 'size_mb'], sort: { key: 'n', desc: true } }}
   />
 );
 
-export const TimePage = () => (
+const TimePane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Time" source="months" domain={MONTHS} rowTitle={(r) => monthName(r.month)}
+    title="Time" source="months" domain={MONTHS} rowTitle={(r) => monthName(r.month)} intro={intro}
     initial={{
       shape: 'group',
       group: { fields: ['year'], default: 'year' },
@@ -580,3 +613,18 @@ export const TimePage = () => (
     }}
   />
 );
+
+/** Panes: the mailbox rolled up by sender, domain, label and month, one tab each. */
+export const PANE_TABS: LumenTab<'senders' | 'domains' | 'labels' | 'time'>[] = [
+  { value: 'senders', label: 'Senders', icon: UsersIcon },
+  { value: 'domains', label: 'Domains', icon: GlobeIcon },
+  { value: 'labels', label: 'Labels', icon: TagIcon },
+  { value: 'time', label: 'Time', icon: CalendarClockIcon },
+];
+const PANES = { senders: SendersPane, domains: DomainsPane, labels: LabelsPane, time: TimePane };
+
+export function PanesPage() {
+  const [tab, setTab] = useTab(PANE_TABS);
+  const Pane = PANES[tab];
+  return <Pane key={tab} intro={<LumenTabs tabs={PANE_TABS} value={tab} onChange={setTab} />} />;
+}
