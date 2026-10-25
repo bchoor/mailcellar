@@ -7,20 +7,20 @@
 
 :root[data-app="mailcellar"] { --primary: oklch(0.52 0.13 250); }
 
-/* The month map: copied is green, Copying blue, Indexing violet, Missing a muted tan hatch. */
+/* The month map: copied is a muted green, Copying blue, Indexing violet, Missing a muted tan hatch. */
 :root[data-app="mailcellar"] {
-  --cov-full: #16a34a; --cov-high: #6cc58d; --cov-low: #c6ead3;
+  --cov-full: #3f9462; --cov-high: #93c8a6; --cov-low: #d2e9da;
   --cov-run: #2563eb; --cov-run-soft: #c3d3f8;
   --cov-index: #7c3aed; --cov-index-soft: #ddd0fb;
   --gap: #d3c6b8; --gap-soft: #f3eee8;
-  --cov-part: #d97706;
+  --cov-part: #c48a3c;
 }
 :root[data-app="mailcellar"].dark, [data-app="mailcellar"] .dark {
-  --cov-full: #3fb950; --cov-high: #2e7d45; --cov-low: #1b3d27;
+  --cov-full: #3b7a52; --cov-high: #2a5a3c; --cov-low: #1a3324;
   --cov-run: #4c8dff; --cov-run-soft: #1d3360;
   --cov-index: #a78bfa; --cov-index-soft: #3a2b66;
   --gap: #4d433a; --gap-soft: #29231e;
-  --cov-part: #e3a008;
+  --cov-part: #a67b36;
 }
 
 /*
