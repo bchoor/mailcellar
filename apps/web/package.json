@@ -9,8 +9,8 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@columenlabs/lumen-ui": "0.1.41",
-    "@columenlabs/lumen-ui-types": "0.1.41",
+    "@columenlabs/lumen-ui": "0.1.42",
+    "@columenlabs/lumen-ui-types": "0.1.42",
     "@mailcellar/schema": "workspace:*",
     "@tanstack/react-query": "5.103.2",
     "@tanstack/react-router": "1.170.39",
