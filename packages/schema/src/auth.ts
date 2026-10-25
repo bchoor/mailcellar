@@ -23,6 +23,24 @@ export interface ConnectedAccount {
   /** The last connection test, in Lumen's KeyTestResult shape. Read access is enough to pass;
    * without modify the account is read only (no archiving or deleting in Gmail). */
   test: { at: string; ok: boolean; detail: string | null; error: string | null };
+  /** 'archive': mail imported from an mbox file, with no Gmail link and no sync. Absent for Gmail. */
+  kind?: 'gmail' | 'archive';
+  /** An archive's file and how far its upload and import are. */
+  archive?: ArchiveImport;
+}
+
+/** An archive mailbox's mbox file: uploaded in parts straight to raw files, then imported from there. */
+export interface ArchiveImport {
+  file: string;
+  bytes: number;
+  uploaded: number;
+  /** Messages found in the file (null until the import's first pass has read it all), and imported so far. */
+  messages: number | null;
+  imported: number;
+  status: 'uploading' | 'upload_paused' | 'importing' | 'done' | 'failed';
+  /** Upload speed while uploading, bytes a second. */
+  bytesPerSec: number | null;
+  error: string | null;
 }
 
 /** Response of GET /api/me: the Access user and their connected Gmail accounts. */

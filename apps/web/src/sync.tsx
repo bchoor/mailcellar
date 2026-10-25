@@ -265,7 +265,7 @@ function SyncNowHelp() {
   );
 }
 
-function AccountSync({ id, sync: s, basin, copy, index, meters, sizes = [], doHours = [] }: { id: string; sync: SyncSummary; basin: boolean; copy: StageState; index: StageState; meters: QuotaMeter[]; sizes?: AccountStatus['sizes']; doHours?: { at: string; written: number }[] }) {
+function AccountSync({ id, archive = false, sync: s, basin, copy, index, meters, sizes = [], doHours = [] }: { id: string; archive?: boolean; sync: SyncSummary; basin: boolean; copy: StageState; index: StageState; meters: QuotaMeter[]; sizes?: AccountStatus['sizes']; doHours?: { at: string; written: number }[] }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
@@ -287,14 +287,14 @@ function AccountSync({ id, sync: s, basin, copy, index, meters, sizes = [], doHo
           <div className="grid w-full min-w-0 grid-cols-[1fr_auto] items-center gap-3 text-sm sm:w-auto sm:flex-1">
             <Progress value={pct(counts)} className="h-2" />
             <span className="tabular-nums text-muted-foreground">
-              {fmt(counts.copied)} of {fmt(counts.gmail)} in Gmail · {pct(counts)}%
+              {fmt(counts.copied)} of {fmt(counts.gmail)} {archive ? 'in the file' : 'in Gmail'} · {pct(counts)}%
             </span>
           </div>
         ) : (
           <span className="text-sm text-muted-foreground">{headline(s)}</span>
         )}
-        {/* The span keeps the tooltip working while the button is disabled. */}
-        <Tooltip>
+        {/* The span keeps the tooltip working while the button is disabled. An archive has nothing to sync. */}
+        {!archive && <Tooltip>
           <TooltipTrigger asChild>
             <span tabIndex={0}>
               <Button
@@ -318,18 +318,18 @@ function AccountSync({ id, sync: s, basin, copy, index, meters, sizes = [], doHo
           <TooltipContent side="bottom" align="end" className="max-w-xs">
             <SyncNowHelp />
           </TooltipContent>
-        </Tooltip>
+        </Tooltip>}
       </div>
       {/* Copying and Indexing side by side: six cards on one row on desktop. */}
       <div className="grid gap-4 lg:grid-cols-2">
         {s.phase !== null && (
           <div className="flex min-w-0 flex-col gap-3">
-            <StageHead title="Copying" state={copy} fallback={copy.kind === 'running' || copy.kind === 'idle' ? headline(s) : null} />
+            <StageHead title={archive ? 'Importing' : 'Copying'} state={copy} fallback={archive && copy.kind === 'idle' ? 'All of the file is imported' : copy.kind === 'running' || copy.kind === 'idle' ? headline(s) : null} />
             <TileRow className="flex-1">
               <Tile className="lg:flex-1" label="Rate" value={rate.value} caption={rate.caption} />
               <Tile
                 className="lg:flex-1"
-                label="Queued to copy"
+                label={archive ? 'Left to import' : 'Queued to copy'}
                 value={fmt(toCopy)}
                 caption={!queued.length ? 'nothing queued' : `in ${months(queued.length)}${s.ratePerMin ? ` · ${duration(toCopy / s.ratePerMin).replace('about ', '~')}` : ''}`}
               />
@@ -337,7 +337,7 @@ function AccountSync({ id, sync: s, basin, copy, index, meters, sizes = [], doHo
                 className="lg:flex-1"
                 label="Size"
                 value={<WithSpark value={size(s.bytes)} spark={<Spark label="Size over the last hour" points={sizes.map((p) => [Date.parse(p.at), p.bytes])} />} />}
-                caption="as Gmail counts it"
+                caption={archive ? 'as the file holds it' : 'as Gmail counts it'}
               />
             </TileRow>
           </div>
@@ -477,7 +477,7 @@ function censusHint(c: AccountCoverage | undefined): string | null {
  * One account's coverage map: pick months (tap one, then another for the range; a year; or a quick pick), then
  * Start backfill, or Remove from queue for queued ones. Nothing starts from a pick alone.
  */
-function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; email: string; basin: boolean; rate: number | null; copying: string[] }) {
+function AccountCoverageMap({ id, email, archive = false, basin, rate, copying }: { id: string; email: string; archive?: boolean; basin: boolean; rate: number | null; copying: string[] }) {
   const client = useQueryClient();
   const source = useCoverage(id);
   const { data } = useQuery(source);
@@ -511,7 +511,8 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
         layout="months"
         unit="messages"
         summary={['complete', 'counts']}
-        select={basin ? 'backfill' : undefined}
+        // An archive imports the whole file: no months to pick.
+        select={basin && !archive ? 'backfill' : undefined}
         selectable={(_row, key) => {
           const m = month(key);
           return !!m && m.gmail !== null && copyable(m)! > m.copied && !busyMonth(m);
@@ -528,8 +529,8 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
         }}
         onRemove={(pick: CoveragePick) => unqueue(pick.flatMap((p) => p.months))}
         preselect={preselect}
-        hint={censusHint(data) ?? 'Nothing starts until Start backfill.'}
-        pickTools={
+        hint={archive ? 'Months as the file dates its mail. The import covers all of it.' : censusHint(data) ?? 'Nothing starts until Start backfill.'}
+        pickTools={archive ? undefined : 
           <span className="flex flex-wrap items-center gap-1.5">
             {PRESETS.map((p) => (
               <Button key={p.id} variant="outline" size="sm" className="h-7 rounded-full" disabled={!data} onClick={() => data && select(presetMonths(data, p.id))}>
@@ -545,7 +546,7 @@ function AccountCoverageMap({ id, email, basin, rate, copying }: { id: string; e
         }
         empty={
           <p className="py-6 text-center text-muted-foreground">
-            {data?.census.status === 'stopped' ? 'Counting stopped. It resumes when you open this page.' : 'Counting Gmail by month. Months show here as they are counted.'}
+            {archive ? 'Reading the file. Months show here as they are found.' : data?.census.status === 'stopped' ? 'Counting stopped. It resumes when you open this page.' : 'Counting Gmail by month. Months show here as they are counted.'}
           </p>
         }
       />
@@ -844,9 +845,12 @@ function freshness(s: SyncSummary, now = Date.now()): string {
 }
 
 /** The badge in a word or two, to fit beside the mailbox on the map. */
-const shortBadge = (s: SyncSummary) => {
+const shortBadge = (s: SyncSummary, kind?: 'gmail' | 'archive') => {
   const b = badge(s);
-  return { ...b, label: b.label.replace(/^(Copying|Indexing) paused$/, 'Paused') };
+  const label = b.label.replace(/^(Copying|Indexing) paused$/, 'Paused');
+  // An archive never syncs: it imports once, then it's done.
+  if (kind === 'archive') return { ...b, label: label === 'Copying' ? 'Importing' : label === 'Live' ? 'Imported' : label };
+  return { ...b, label };
 };
 
 /**
@@ -881,8 +885,8 @@ function MailboxesMap({ accounts }: { accounts: SyncOverview['accounts'] }) {
             rows: accounts.map((a) => ({
               row: a.id,
               label: a.email,
-              badge: mobile ? undefined : <Badge variant={shortBadge(a.sync).variant}>{shortBadge(a.sync).label}</Badge>,
-              sub: freshness(a.sync),
+              badge: mobile ? undefined : <Badge variant={shortBadge(a.sync, a.kind).variant}>{shortBadge(a.sync, a.kind).label}</Badge>,
+              sub: a.kind === 'archive' ? 'mbox archive' : freshness(a.sync),
             })),
             current: Object.values(all)[0]?.current,
           };
@@ -967,14 +971,14 @@ export function BackfillPage() {
                 tools: <RefreshTool keys={[BACKFILL_KEY]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountSync key={a.id} id={a.id} sync={a.sync} basin={data.basin} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} />;
+                  return <AccountSync key={a.id} id={a.id} archive={a.kind === 'archive'} sync={a.sync} basin={data.basin} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} />;
                 },
               },
               {
                 id: 'map', title: 'By month', kind: 'own' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountCoverageMap key={a.id} id={a.id} email={a.email} basin={data.basin} rate={a.sync.ratePerMin} copying={a.sync.months} />;
+                  return <AccountCoverageMap key={a.id} id={a.id} email={a.email} archive={a.kind === 'archive'} basin={data.basin} rate={a.sync.ratePerMin} copying={a.sync.months} />;
                 },
               },
               {

@@ -7,6 +7,7 @@ import { AUTH_ERRORS, type AuthError, type Me } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LogOutIcon, PlusIcon, RefreshCwIcon, ShieldAlertIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { AddArchive, ArchiveRow } from './archive-import';
 
 /** The Access user and their Gmail accounts: null when Access sent no identity (the API answers 401). */
 export function useMe() {
@@ -83,10 +84,12 @@ export function AccountsSettings() {
     <div className="flex flex-col gap-3">
       <ErrorLine error={problem ?? me.error} />
       {accounts.length === 0 && !me.isPending && (
-        <p className="text-sm text-muted-foreground">No Gmail accounts yet. Add one so MailCellar can start copying its mail.</p>
+        <p className="text-sm text-muted-foreground">No mailboxes yet. Add a Gmail account, or an mbox archive.</p>
       )}
       <div>
-        {accounts.map((a) => (
+        {accounts.map((a) => a.kind === 'archive' ? (
+          <ArchiveRow key={a.id} a={a} open={open === a.id} onOpenChange={(o: boolean) => setOpen(o ? a.id : null)} />
+        ) : (
           <IntegrationRow
             key={a.id}
             name={a.email}
@@ -141,13 +144,14 @@ export function AccountsSettings() {
           </IntegrationRow>
         ))}
       </div>
-      <div>
+      <div className="flex flex-wrap gap-2">
         <Button asChild variant="outline" size="sm">
           <a href="/api/accounts/connect">
             <PlusIcon /> Add Gmail account
           </a>
         </Button>
       </div>
+      <AddArchive />
     </div>
   );
 }

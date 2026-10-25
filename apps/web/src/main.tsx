@@ -123,7 +123,7 @@ function Frame() {
       releases="/api/releases"
       statusEnd={<SyncStatus />}
       settings={[
-        { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts MailCellar copies', content: <AccountsSettings /> },
+        { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts and mbox archives MailCellar keeps', content: <AccountsSettings /> },
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },
       ]}
     >

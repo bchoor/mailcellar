@@ -36,8 +36,8 @@ export function MailboxNav() {
               { title: 'Overview', to: to(), icon: LayoutDashboardIcon, exact: true },
               { title: 'Messages', to: to('messages'), icon: SearchIcon },
               { title: 'Panes', to: to('panes'), icon: PanelsTopLeftIcon },
-              // Read live from Gmail; separate from Settings ▸ Accounts, which connects mailboxes.
-              {
+              // Read live from Gmail; separate from Settings ▸ Accounts, which connects mailboxes. Archives have no Gmail.
+              ...(a.kind === 'archive' ? [] : [{
                 title: 'Gmail settings',
                 to: to('gmail'),
                 icon: SettingsIcon,
@@ -45,7 +45,7 @@ export function MailboxNav() {
                   { title: 'Filters', to: to('gmail/filters'), icon: FilterIcon },
                   { title: 'Subscriptions', to: to('gmail/subscriptions'), icon: NewspaperIcon },
                 ],
-              },
+              }]),
             ]}
           />
         );

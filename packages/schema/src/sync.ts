@@ -189,7 +189,8 @@ export interface SyncOverview {
   paused: boolean;
   /** Who paused it: the person, or the backfill's spend cap (SPEND in quota.ts). */
   pausedBy: 'person' | 'budget' | null;
-  accounts: { id: string; email: string; sync: SyncSummary }[];
+  /** `kind` archive: an imported mbox, with no Gmail link; its `email` is the name it was given. */
+  accounts: { id: string; email: string; kind?: 'gmail' | 'archive'; sync: SyncSummary }[];
 }
 
 /** The first month Gmail had mail (April 2004). The census looks further back only if Gmail has older mail. */
@@ -294,6 +295,8 @@ export interface AccountCoverage {
 export interface AccountStatus extends AccountCoverage {
   id: string;
   email: string;
+  /** archive: an imported mbox; its months count the file, not Gmail. */
+  kind?: 'gmail' | 'archive';
   sync: SyncSummary;
   /** Copying is never paused by the DO write limit, only by the person or the spend guard. */
   copy: { status: 'copying' | 'paused' | 'idle'; pausedBy?: 'person' | 'budget' };
