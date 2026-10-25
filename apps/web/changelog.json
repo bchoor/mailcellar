@@ -1,5 +1,42 @@
 [
   {
+    "tag": "v0.0.8",
+    "sha": "2a3ab23fef5f7da776dddc80784d7c4876b97ac5",
+    "published_at": "2026-10-25T01:02:08Z",
+    "takeaways": [
+      {
+        "text": "**Read a message in a drawer**: On the Messages page, click any row to open a drawer showing its details, its body (remote images stay blocked until you click Show images), and its attachments to download.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Panes page and category tabs**: In the sidebar, the new Panes page holds Senders, Domains, Labels and Time as tabs, and the Messages page has All, Primary, Promotions, Social, Updates and Forums tabs.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Backfills is one table**: On the Backfills page, a single table with stage filters (All, Needs attention, Copying, Next, Indexing) replaces the four stacked sections, so you can see each month's copy and search progress in one row.",
+        "types": [
+          "improvement"
+        ]
+      },
+      {
+        "text": "**Month counts match Gmail**: On the month map, a month turns green only when everything Gmail lists for it is saved, and the Sync card now shows the same count as Messages.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Cheaper re-indexing**: Re-indexing a month that is already searchable, which runs in the background and has no screen of its own, now costs about one database read per message instead of about seven.",
+        "types": [
+          "performance"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.7",
     "sha": "d1e0778cf670745ffe563a45dde48aef769632c6",
     "published_at": "2026-10-25T00:31:51Z",
