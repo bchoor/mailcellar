@@ -1713,12 +1713,12 @@ export class MailboxDO extends DurableObject<Env> {
   /**
    * The watchdog: restart what stopped without a page open (a dead or stale sync, lanes whose run
    * died, the census) for every account. Page polls only read. Returns whether anything is still
-   * going, which keeps the watchdog alarm set. A census that stopped on an error is retried only
+   * going (what, per account: logged on the gmail-sync line), which keeps the watchdog alarm set. A census that stopped on an error is retried only
    * at a sync slot (`slot`): retried every tick, a failing census kept the alarm going all day.
    */
-  private async recover(user: UserId, slot: boolean): Promise<boolean> {
+  private async recover(user: UserId, slot: boolean): Promise<string[]> {
     const paused = this.isPaused();
-    let busy = false;
+    const busy: string[] = [];
     for (const a of this.accountList()) {
       try {
         const mailbox = accountMailbox(this.env, user, a.id);
@@ -1726,15 +1726,13 @@ export class MailboxDO extends DurableObject<Env> {
         const sync = await this.keepRunning(user, a.id, v.sync, paused);
         const census = (await this.keepCounting(user, a.id, v.census, slot)) ?? v.census;
         const status = syncStatus(sync);
-        if (
-          (!paused && (status === 'running' || status === 'waiting' || !!sync?.lanes?.length || (await mailbox.hasQueued()))) ||
-          (!!census && census.month !== null && !census.error && !(census.resumesAt && Date.parse(census.resumesAt) > Date.now())) ||
-          v.index.status !== 'idle'
-        )
-          busy = true;
+        if (!paused && (status === 'running' || status === 'waiting' || !!sync?.lanes?.length)) busy.push(`${a.id}:sync ${status}`);
+        else if (!paused && (await mailbox.hasQueued())) busy.push(`${a.id}:queued`);
+        if (!!census && census.month !== null && !census.error && !(census.resumesAt && Date.parse(census.resumesAt) > Date.now())) busy.push(`${a.id}:census ${census.month}`);
+        if (v.index.status !== 'idle') busy.push(`${a.id}:index ${v.index.status}`);
       } catch (e) {
         console.error('watchdog', a.id, e);
-        busy = true;
+        busy.push(`${a.id}:error`);
       }
     }
     return busy;
@@ -1765,8 +1763,9 @@ export class MailboxDO extends DurableObject<Env> {
     const sync = this.schedule('gmail-sync')!;
     const slot = sync.last ? nextRun(sync, new Date(sync.last.at)) : this.syncDue != null ? new Date(this.syncDue) : null;
     const due = !!slot && Date.now() >= slot.getTime() - 1000;
-    this.watching = await this.recover(user, due);
-    console.log('gmail-sync', JSON.stringify({ on: sync.on, every: sync.every, tz: sync.tz, last: sync.last, slot: slot?.toISOString() ?? null, due, paused: this.pausedBy(), watching: this.watching }));
+    const busy = await this.recover(user, due);
+    this.watching = busy.length > 0;
+    console.log('gmail-sync', JSON.stringify({ on: sync.on, every: sync.every, tz: sync.tz, last: sync.last, slot: slot?.toISOString() ?? null, due, paused: this.pausedBy(), busy }));
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
     if (due && ids.length && sync.on) {
       let run: ScheduleRun;
