@@ -1221,8 +1221,15 @@ export class MailboxDO extends DurableObject<Env> {
       const months: Tally = new Map();
       const labels: Tally = new Map();
       const addedIds: string[] = [];
+      // Find what's indexed already with one keyed read a message: an insert that conflicts reads
+      // about seven rows, so indexing a month again (a recount) cost seven reads a message for nothing.
+      const have = new Set<string>();
+      for (let i = 0; i < batch.length; i += 100) {
+        const ids = batch.slice(i, i + 100).map((m) => m.id);
+        for (const r of sql.exec<{ id: string }>(`SELECT id FROM messages WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids)) have.add(r.id);
+      }
       for (const m of batch) {
-        if (notKept(m.labels)) continue;
+        if (have.has(m.id) || notKept(m.labels)) continue;
         const labelText = m.labels.join(' ');
         const insert = sql.exec(
           `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels)
