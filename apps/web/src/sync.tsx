@@ -10,6 +10,7 @@ import {
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Progress } from '@columenlabs/lumen-ui/ui/progress';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@columenlabs/lumen-ui/ui/table';
 import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-group';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
@@ -226,6 +227,30 @@ function StageHead({ title, state, fallback }: { title: string; state: StageStat
 
 const months = (n: number) => `${fmt(n)} month${n === 1 ? '' : 's'}`;
 
+/** What Sync now does, for its tooltip. Matches syncAccount and runBatch in the Worker. */
+const SYNC_NOW_HELP = [
+  'Copies mail that reached Gmail since the last sync.',
+  'Saves each message as a raw file and a row in Basin.',
+  "Makes new mail searchable at once if today's DO writes have room. If not, indexing does it later.",
+  'Starts copying queued months, up to 3 at a time. It never queues months.',
+  'Skips Spam and Trash.',
+  'Does not recount Gmail. That runs every 6 hours.',
+  'Restarts a sync that stopped on an error.',
+  'Does nothing while backfill is paused, or while a daily limit holds.',
+];
+function SyncNowHelp() {
+  return (
+    <div className="flex flex-col gap-1.5 py-1 text-left">
+      <span className="font-medium">Sync now</span>
+      <ul className="flex list-disc flex-col gap-1 pl-4">
+        {SYNC_NOW_HELP.map((line) => (
+          <li key={line}>{line}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; sync: SyncSummary; basin: boolean; copy: StageState; index: StageState; meters: QuotaMeter[] }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
@@ -254,22 +279,32 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
         ) : (
           <span className="text-sm text-muted-foreground">{headline(s)}</span>
         )}
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy || !basin || s.status === 'running'}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              setResult(await syncNow(id));
-              await client.invalidateQueries({ queryKey: BACKFILL_KEY });
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <RefreshCwIcon className={busy ? 'animate-spin' : undefined} /> Sync now
-        </Button>
+        {/* The span keeps the tooltip working while the button is disabled. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span tabIndex={0}>
+              <Button
+              variant="outline"
+              size="sm"
+              disabled={busy || !basin || s.status === 'running'}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  setResult(await syncNow(id));
+                  await client.invalidateQueries({ queryKey: BACKFILL_KEY });
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <RefreshCwIcon className={busy ? 'animate-spin' : undefined} /> Sync now
+            </Button>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" align="end" className="max-w-xs">
+            <SyncNowHelp />
+          </TooltipContent>
+        </Tooltip>
       </div>
       {/* Copying and Indexing side by side: six cards on one row on desktop. */}
       <div className="grid gap-4 lg:grid-cols-2">

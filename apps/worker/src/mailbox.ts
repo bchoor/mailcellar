@@ -133,7 +133,14 @@ export const MIGRATIONS: readonly string[] = [
    INSERT INTO meta (key, value) VALUES ('fts_refill', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
   // 11: the status row (2026-10-24) keeps each month's latest backfill state, found by month.
   `CREATE INDEX job_months_month ON job_months (month, job);`,
+  // 12: Spam and Trash are not kept (Bikram, 2026-10-24). Live sync had copied some; the
+  // constructor takes them out of the index and deletes their raw files.
+  `INSERT INTO meta (key, value) VALUES ('drop_spam', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
 ];
+
+/** Gmail labels whose mail MailCellar doesn't keep: the index never takes it in. */
+const NOT_KEPT = ['SPAM', 'TRASH'];
+const notKept = (labels: string[]) => labels.some((l) => NOT_KEPT.includes(l));
 
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -285,6 +292,7 @@ export class MailboxDO extends DurableObject<Env> {
       this.migrate();
       this.refillSearch();
       this.dropSample();
+      await this.dropSpam();
       // A user's mailbox that just started (a deploy, say) doesn't know what is going on: the
       // watchdog looks within WATCH_MS, and keeps looking while something is.
       if (this.userId()) {
@@ -305,6 +313,66 @@ export class MailboxDO extends DurableObject<Env> {
       for (const table of ['messages', 'senders', 'domains', 'months', 'labels']) sql.exec(`DELETE FROM ${table}`);
       sql.exec(`INSERT INTO message_fts (message_fts) VALUES ('delete-all')`);
       sql.exec(`DELETE FROM meta WHERE key = 'sample'`);
+    });
+  }
+
+  /**
+   * After migration 12: take Spam and Trash out of the index and its rollups, and delete their
+   * raw files (live sync wrote one file a message). Raw files go first: if R2 fails, the flag
+   * stays and the next start tries again. Basin keeps its rows.
+   */
+  private async dropSpam(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'drop_spam'`).toArray().length) return;
+    const cursor = sql.exec<{ id: string; ts: number; from_addr: string; from_name: string; subject: string; snippet: string; size: number; labels: string }>(
+      `SELECT id, ts, from_addr, from_name, subject, snippet, size, labels FROM messages
+       WHERE ' ' || labels || ' ' LIKE '% SPAM %' OR ' ' || labels || ' ' LIKE '% TRASH %'`,
+    );
+    const rows = cursor.toArray();
+    const read = cursor.rowsRead;
+    const name = this.ctx.id.name ?? '';
+    const at = name.lastIndexOf(':');
+    if (rows.length && at > 0 && !name.endsWith(':default')) {
+      try {
+        const user = asUserId(name.slice(0, at));
+        const account = name.slice(at + 1);
+        const keys = rows.map((r) => r2Keys.raw(user, account, r.id));
+        for (let i = 0; i < keys.length; i += 1000) await this.env.ARCHIVE.delete(keys.slice(i, i + 1000));
+      } catch (e) {
+        console.log(JSON.stringify({ dropSpam: { error: String(e) } }));
+        return;
+      }
+    }
+    this.ctx.storage.transactionSync(() => {
+      let written = 0;
+      const run = (query: string, ...args: (string | number)[]) => {
+        written += sql.exec(query, ...args).rowsWritten;
+      };
+      const senders: Tally = new Map();
+      const domains: Tally = new Map();
+      const months: Tally = new Map();
+      const labels: Tally = new Map();
+      for (const r of rows) {
+        run(
+          `INSERT INTO message_fts (message_fts, rowid, subject, from_addr, from_name, snippet, labels) VALUES ('delete', CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
+          ftsRowid(r.id), r.subject, r.from_addr, r.from_name, r.snippet, r.labels,
+        );
+        run(`DELETE FROM messages WHERE id = ?`, r.id);
+        const m = { ts: r.ts, size: r.size } as IndexedMessage;
+        tally(senders, r.from_addr.toLowerCase(), m);
+        tally(domains, domainOf(r.from_addr), m);
+        tally(months, monthOf(r.ts), m);
+        for (const l of r.labels.split(' ').filter(Boolean)) tally(labels, l, m);
+      }
+      for (const [table, key, t] of [['senders', 'addr', senders], ['domains', 'domain', domains], ['months', 'month', months], ['labels', 'id', labels]] as const)
+        for (const [k, x] of t) {
+          run(`UPDATE ${table} SET n = n - ?, bytes = max(0, bytes - ?) WHERE ${key} = ?`, x.n, x.bytes, k);
+          run(`DELETE FROM ${table} WHERE ${key} = ? AND n <= 0`, k);
+        }
+      run(`DELETE FROM meta WHERE key = 'drop_spam'`);
+      if (rows.length) written += this.changed(months.keys());
+      console.log(JSON.stringify({ dropSpam: { removed: rows.length, rowsRead: read, rowsWritten: written } }));
+      this.count({ do_rows_read: read, do_rows_written: written });
     });
   }
 
@@ -1163,7 +1231,15 @@ export class MailboxDO extends DurableObject<Env> {
       const months: Tally = new Map();
       const labels: Tally = new Map();
       const addedIds: string[] = [];
+      // Find what's indexed already with one keyed read a message: an insert that conflicts reads
+      // about seven rows, so indexing a month again (a recount) cost seven reads a message for nothing.
+      const have = new Set<string>();
+      for (let i = 0; i < batch.length; i += 100) {
+        const ids = batch.slice(i, i + 100).map((m) => m.id);
+        for (const r of sql.exec<{ id: string }>(`SELECT id FROM messages WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids)) have.add(r.id);
+      }
       for (const m of batch) {
+        if (have.has(m.id) || notKept(m.labels)) continue;
         const labelText = m.labels.join(' ');
         const insert = sql.exec(
           `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels)
