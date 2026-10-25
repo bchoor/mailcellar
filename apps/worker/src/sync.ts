@@ -8,7 +8,7 @@
 // every message's row to Basin, the system of record. Basin rows are staged in R2 first, so
 // a failed commit is retried by the next run instead of losing the batch.
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
-import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES } from '@mailcellar/schema';
+import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES, PAID } from '@mailcellar/schema';
 import { basinCheck, catalogTarget, COMMIT_CALLS, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
@@ -17,8 +17,8 @@ import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, bodyText, GmailError, he
 
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
 export const RUN_SIZE = 500;
-/** Outside requests a run may make; Workers Free stops a run at 50 (spike S7). */
-export const RUN_CALLS = 45;
+/** Outside requests a run may make: Workers Free stops a run at 50 (spike S7), Paid at 10,000. */
+export const RUN_CALLS = PAID ? 400 : 45;
 /** Raw mail fetched in one Gmail batch, as Gmail sizes it: keeps the answer well inside 128 MB. */
 export const BATCH_BYTES = 8 * 1024 * 1024;
 /** Messages up to this size are gzipped; larger ones are mostly already-compressed attachments. */
@@ -28,7 +28,7 @@ export const GZIP_MAX = 256 * 1024;
  * 2026-10-24 (the spike's 1.9 s had passed), so a run stays at a quarter of that and the
  * next run copies the rest. Workers can't read their own CPU time, so it is estimated.
  */
-export const RUN_CPU_MS = 500;
+export const RUN_CPU_MS = PAID ? 10_000 : 500;
 /**
  * Estimated CPU to copy one message: twice what a local benchmark measured on 2026-10-24
  * (20 KB 3 ms, 100 KB 5 ms, 6.8 MB 9 ms), since the first estimate ran about 5x low in
@@ -135,7 +135,7 @@ const isDailyLimit = (e: unknown) => /exceeded|limit/i.test(String(e));
 
 /** The phase a stopped sync resumes in: back to the backfill, or on to new mail. */
 const resumePhase = (s: SyncState): SyncState['phase'] =>
-  s.phase === 'paused' || s.phase === 'error'
+  s.phase === 'waiting' || s.phase === 'error'
     ? s.pageToken !== null || s.pending.length || s.historyId === null || s.part ? 'backfill' : 'live'
     : s.phase;
 
@@ -266,7 +266,7 @@ export async function runBatch(
   const full = await quota.reserve(RUN_COST);
   if (full) {
     state.pausedFor = full.label;
-    return later(new Date(full.resumesAt), 'paused', null);
+    return later(new Date(full.resumesAt), 'waiting', null);
   }
   state.pausedFor = null;
   // The spend cap: a run that could pass it pauses all backfill instead (Bikram's $1.10, 2026-10-24).
@@ -318,7 +318,8 @@ export async function runBatch(
       if (calls) await scheduler.wait(1000);
       calls++;
       const { messages, retry } = await batchGet(token, take.slice(i, i + BATCH_SIZE), 'minimal');
-      sized.push(...messages);
+      // Spam and Trash are left out, as the backfill's Gmail list leaves them out.
+      sized.push(...messages.filter((m) => !m.labelIds?.some((l) => l === 'SPAM' || l === 'TRASH')));
       rest.push(...retry);
     }
     // Keep the run's CPU in budget: what doesn't fit goes to the next run.
@@ -349,6 +350,21 @@ export async function runBatch(
         added.copied++;
         added.bytes += m.sizeEstimate;
       }
+    }
+    // Gmail's count of a month goes stale as new mail lands in it: count the months it landed in again.
+    const landed = new Set(basin.map((r) => new Date(r.ts).toISOString().slice(0, 7)).filter((m) => m >= addMonths(monthNow(), -1)));
+    for (const month of landed) {
+      if (calls + LIST_CALLS > limits.calls) break;
+      let n = 0;
+      let pageToken: string | undefined;
+      for (let page = 0; page < LIST_CALLS; page++) {
+        calls++;
+        const got = await listPage(token, pageToken, 500, monthQuery(month));
+        n += got.ids.length;
+        pageToken = got.next ?? undefined;
+        if (!pageToken) break;
+      }
+      if (!pageToken) await mailbox.putMonthCount(month, n);
     }
   } catch (e) {
     // Mail fetched before the error isn't staged for Basin, so it isn't counted; the next run copies it again.
@@ -424,8 +440,8 @@ export async function runBatch(
 
 /** Index rows written a call when building a month's index (fewer calls, fewer search segments). Measured ~3 DO rows a message (Jul 2026). */
 export const INDEX_CHUNK = 500;
-/** Chunks one index run writes before handing over to a fresh run. */
-export const INDEX_CHUNKS_A_RUN = 4;
+/** Chunks one index run writes before handing over to a fresh run (each run reads the month from Basin again). */
+export const INDEX_CHUNKS_A_RUN = PAID ? 20 : 4;
 
 /**
  * Build a landed month's search index from Basin: read the month back, and index what the
@@ -438,7 +454,9 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   await mailbox.indexStarted(month);
   const target = await syncDeps.basin(env, user);
   if (!target) return { indexed: 0, next: from, resumesAt: new Date(Date.now() + 5 * 60_000).toISOString() };
-  const rows = (await target.monthRows(account, month)).sort((a, b) => a.id.localeCompare(b.id));
+  // Gmail's month decides what the month holds: listed on the first run, kept in R2 for the rest.
+  const listed = from === 0 ? await listMonth(env, user, account, month) : await readListed(env, user, account, month);
+  const rows = (await target.monthRows(account, month, listed ?? undefined)).sort((a, b) => a.id.localeCompare(b.id));
   const quota = accountQuota(env);
   let at = from;
   let indexed = 0;
@@ -465,8 +483,11 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
     at += chunk.length;
   }
   if (at < rows.length) return { indexed, next: at, resumesAt: null };
-  const inBasin = new Set(rows.map((r) => r.id)).size;
-  console.log(JSON.stringify({ indexedMonth: { month, inBasin, rows: rows.length } }));
+  const ids = new Set(rows.map((r) => r.id));
+  // Counted against Gmail's list: mail Gmail no longer has stays indexed but isn't owed.
+  const inBasin = listed ? [...listed].filter((id) => ids.has(id)).length : ids.size;
+  console.log(JSON.stringify({ indexedMonth: { month, inBasin, rows: rows.length, listed: listed?.size ?? null } }));
+  if (listed && inBasin < listed.size) await forgetMissing(env, user, account, month, [...listed].filter((id) => !ids.has(id)));
   await mailbox.markIndexed(month, inBasin);
   // Senders, domains and labels once backfill is done, not once a month.
   // (Senders, domains and labels left with no mail after unindexMonth keep their rows until mail returns.)
@@ -483,8 +504,99 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   return { indexed, next: null, resumesAt: null };
 }
 
+/** Gmail list calls an index run may spend listing its month (500 IDs a call). */
+const LIST_CALLS = PAID ? 100 : 30;
+
+/**
+ * The IDs Gmail lists for a month, saved to R2 for the index runs after this one. Null when
+ * Gmail didn't answer or the month is too big to list in one run: the month then counts its
+ * own rows, as before.
+ */
+async function listMonth(env: Env, user: UserId, account: string, month: string): Promise<Set<string> | null> {
+  try {
+    const refreshToken = await env.MAILBOX.getByName(mailboxName(user)).accountToken(account);
+    if (!refreshToken) return null;
+    const token = await accessToken(env, refreshToken);
+    const ids: string[] = [];
+    let pageToken: string | undefined;
+    for (let calls = 0; ; calls++) {
+      if (calls === LIST_CALLS) return null;
+      const page = await listPage(token, pageToken, 500, monthQuery(month));
+      ids.push(...page.ids);
+      if (!page.next) break;
+      pageToken = page.next;
+    }
+    await env.ARCHIVE.put(r2Keys.listed(user, account, month), JSON.stringify(ids));
+    await accountQuota(env).charge({ classA: 1 });
+    return new Set(ids);
+  } catch (e) {
+    if (!(e instanceof GmailError) && !retryable(e)) throw e;
+    console.log(JSON.stringify({ listMonth: { month, error: String(e).slice(0, 160) } }));
+    return null;
+  }
+}
+
+async function readListed(env: Env, user: UserId, account: string, month: string): Promise<Set<string> | null> {
+  const obj = await env.ARCHIVE.get(r2Keys.listed(user, account, month));
+  return obj ? new Set((await obj.json()) as string[]) : null;
+}
+
+/**
+ * Gmail lists these IDs for the month but Basin hasn't got them: take them out of the month's
+ * landed-IDs file, so copying the month again fetches them.
+ */
+async function forgetMissing(env: Env, user: UserId, account: string, month: string, missing: string[]): Promise<void> {
+  console.log(JSON.stringify({ monthGap: { account, month, missing } }));
+  const key = r2Keys.copied(user, account, month);
+  const obj = await env.ARCHIVE.get(key);
+  if (!obj) return;
+  const gone = new Set(missing);
+  const ids = ((await obj.json()) as string[]).filter((id) => !gone.has(id));
+  await env.ARCHIVE.put(key, JSON.stringify(ids));
+}
+
+/**
+ * The search index against Gmail's month lists for a year: indexed messages no month of the year
+ * lists (with their dates and labels), and listed messages the index lacks. Months with a saved
+ * list use it; the rest are listed from Gmail now. Reads only.
+ */
+async function auditIndex(env: Env, user: UserId, account: string, year: string) {
+  const months = Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`).filter((m) => m <= monthNow());
+  const listed = new Map<string, string>();
+  const live: string[] = [];
+  for (const m of months) {
+    const ids = (await readListed(env, user, account, m)) ?? (live.push(m), await listMonth(env, user, account, m));
+    if (!ids) return { error: `couldn't list ${m}` };
+    for (const id of ids) listed.set(id, m);
+  }
+  const mailbox = accountMailbox(env, user, account);
+  const indexed = await mailbox.indexedIn(year);
+  const have = new Set(indexed.map((r) => r.id));
+  const month = (ts: number) => new Date(ts).toISOString().slice(0, 7);
+  // Each month as the screens count it (census, counter, copied) beside what the index and Gmail hold.
+  const counters = new Map(((await mailbox.archive('months')) as { month: string; n: number }[]).map((r) => [r.month, r.n]));
+  const coverage = new Map((await mailbox.coverageMonths()).map((m) => [m.month, m]));
+  const byMonth = months.map((m) => ({
+    month: m,
+    census: coverage.get(m)?.gmail ?? null,
+    copied: coverage.get(m)?.copied ?? null,
+    counter: counters.get(m) ?? 0,
+    rows: indexed.filter((r) => month(r.ts) === m).length,
+    listed: [...listed.values()].filter((l) => l === m).length,
+  }));
+  return {
+    live,
+    byMonth,
+    listed: listed.size,
+    indexed: indexed.length,
+    notListed: indexed.filter((r) => !listed.has(r.id)).map((r) => ({ id: r.id, date: new Date(r.ts).toISOString(), labels: r.labels })),
+    notIndexed: [...listed].filter(([id]) => !have.has(id)).map(([id, m]) => ({ id, month: m })),
+    otherMonth: indexed.filter((r) => listed.has(r.id) && listed.get(r.id) !== month(r.ts)).map((r) => ({ id: r.id, date: new Date(r.ts).toISOString(), listedIn: listed.get(r.id) })),
+  };
+}
+
 /** Outside requests a census run may make (one is the token refresh). */
-export const CENSUS_CALLS = 40;
+export const CENSUS_CALLS = PAID ? 400 : 40;
 /** Months in a row with no mail, before the first month of Gmail, after which the census asks if anything is older. */
 const EMPTY_STREAK = 12;
 
@@ -592,6 +704,10 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       if (r.resumesAt) await step.sleepUntil('wait before trying again', new Date(r.resumesAt));
       await step.do('next run', () => syncDeps.launch(this.env, { user, account, month }, r.nextId!));
       return r;
+    }
+    if (event.payload.audit) {
+      const year = event.payload.audit;
+      return step.do('audit', { retries: { limit: 0, delay: '1 second' }, timeout: '10 minutes' }, () => auditIndex(this.env, user, account, year));
     }
     if (event.payload.index) {
       const index = event.payload.index;

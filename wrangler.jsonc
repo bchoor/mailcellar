@@ -24,7 +24,9 @@
     "BASIN_WAREHOUSE": "87a4f50952b4b2ce00cab6c2680e63ae_mailcellar",
     "BASIN_BUCKET": "mailcellar",
     // The account whose analytics and plan the quota meter reads: secrets CF_ANALYTICS_TOKEN and CF_BILLING_TOKEN.
-    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae"
+    "CF_ACCOUNT_ID": "87a4f50952b4b2ce00cab6c2680e63ae",
+    // Who may use the end-to-end test switch (PUT /api/admin/test-limit).
+    "ADMIN_EMAILS": "bchoor@gmail.com"
   },
   "durable_objects": {
     "bindings": [
@@ -40,6 +42,9 @@
   "workflows": [{ "name": "mailcellar-sync", "binding": "SYNC", "class_name": "SyncWorkflow" }],
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
   "observability": { "enabled": true },
+  // Workers Paid (2026-10-25): runs estimate their CPU at a third of 30 s, and estimates have run
+  // low before, so the cap is 2 minutes. Remove if the account goes back to Free (WORKERS_PLAN).
+  "limits": { "cpu_ms": 120000 },
   // hysnappy compiles WebAssembly at run time, which Workers forbid; see the shim.
   "alias": { "hysnappy": "./apps/worker/src/shims/hysnappy.ts" },
   // wrangler dev keeps localhost as the request's origin (not the route's host), so the

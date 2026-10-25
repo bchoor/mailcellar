@@ -19,6 +19,7 @@ export class GmailError extends Error {
 export interface MinimalMessage {
   id: string;
   sizeEstimate: number;
+  labelIds?: string[];
 }
 
 /** One message as messages.get returns it with format=raw. */

@@ -6,8 +6,8 @@ export type SyncPhase =
   | 'backfill'
   /** Backfill finished; new mail is copied on each sync. */
   | 'live'
-  /** Stopped for the day at the free tier's write limit; resumes after 00:00 UTC. */
-  | 'paused'
+  /** Waiting for a daily limit to reset (resumesAt); copying is not paused, it is waiting. */
+  | 'waiting'
   /** Stopped on an error that needs the person (for example, access was removed). */
   | 'error';
 
@@ -113,6 +113,11 @@ export interface SyncParams {
   park?: boolean;
   /** Pause the user's backfill (as the person's pause). */
   pause?: boolean;
+  /**
+   * Instead of syncing, compare the search index with Gmail's month lists for this year: the
+   * answer names the indexed messages no month lists, and listed ones the index lacks. Reads only.
+   */
+  audit?: string;
   /** Build the search index for this month from Basin, once the month has landed there. */
   index?: string;
   /** Where an index build resumes: rows of the month already done. */

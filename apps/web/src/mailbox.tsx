@@ -3,21 +3,14 @@
 import { type Crumb, NavGroup } from '@columenlabs/lumen-ui';
 import type { ConnectedAccount } from '@mailcellar/schema';
 import { useParams } from '@tanstack/react-router';
-import {
-  CalendarClockIcon,
-  FilterIcon,
-  GlobeIcon,
-  LayoutDashboardIcon,
-  NewspaperIcon,
-  SearchIcon,
-  SettingsIcon,
-  TagIcon,
-  UsersIcon,
-} from 'lucide-react';
+import { FilterIcon, LayoutDashboardIcon, NewspaperIcon, PanelsTopLeftIcon, SearchIcon, SettingsIcon } from 'lucide-react';
 import { useMe } from './auth';
 
 /** A mailbox's pages, as paths under /m/:id. '' is its Overview. */
-export const MAILBOX_PAGES = ['', 'messages', 'senders', 'domains', 'labels', 'time', 'gmail/filters', 'gmail/subscriptions'] as const;
+export const MAILBOX_PAGES = ['', 'messages', 'panes', 'gmail/filters', 'gmail/subscriptions'] as const;
+
+/** Pages that became a Panes tab; their old addresses open that tab. */
+export const PANE_PAGES = ['senders', 'domains', 'labels', 'time'] as const;
 
 export const mailboxPath = (id: string, page = '') => `/m/${id}${page ? `/${page}` : ''}`;
 
@@ -42,10 +35,7 @@ export function MailboxNav() {
             items={[
               { title: 'Overview', to: to(), icon: LayoutDashboardIcon, exact: true },
               { title: 'Messages', to: to('messages'), icon: SearchIcon },
-              { title: 'Senders', to: to('senders'), icon: UsersIcon },
-              { title: 'Domains', to: to('domains'), icon: GlobeIcon },
-              { title: 'Labels', to: to('labels'), icon: TagIcon },
-              { title: 'Time', to: to('time'), icon: CalendarClockIcon },
+              { title: 'Panes', to: to('panes'), icon: PanelsTopLeftIcon },
               // Read live from Gmail; separate from Settings ▸ Accounts, which connects mailboxes.
               {
                 title: 'Gmail settings',

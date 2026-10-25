@@ -1,6 +1,6 @@
 // The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
 // mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
-import { type FilterToken, LumenLayout, LumenSavedWidget, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
+import { type FilterToken, LumenLayout, type LumenTab, LumenTabs, LumenSavedWidget, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
@@ -9,7 +9,7 @@ import {
   type ArchiveRows,
   type ArchiveView,
   type DomainRow,
-  type LabelColors,
+  type GmailLabels,
   type LabelRow,
   MESSAGE_PAGE_SIZES,
   type MessageFilter,
@@ -18,7 +18,8 @@ import {
   type MonthRow,
   type SenderRow,
 } from '@mailcellar/schema';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate, useSearch } from '@tanstack/react-router';
 import {
   AtSignIcon,
   CalendarClockIcon,
@@ -27,15 +28,20 @@ import {
   type LucideIcon,
   HardDriveIcon,
   InboxIcon,
+  InfoIcon,
   MailIcon,
   MailOpenIcon,
+  MailsIcon,
+  MessagesSquareIcon,
   PaperclipIcon,
   SearchIcon,
   TagIcon,
   UserIcon,
+  UsersIcon,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
+import { MessageDrawer } from './message-drawer';
 import { daySpan, localDay, type Period, periodOf, periodSpan, periods } from './period';
 
 // Sizes stay exact here and round only when shown, so a total matches the sum of its rows.
@@ -111,11 +117,34 @@ function useArchive<V extends ArchiveView>(view: V, q = '') {
   });
 }
 
-// Labels are IDs on a message; the Labels rollup names them.
+/**
+ * The mailbox's labels as Gmail has them now, read live, so a label made or renamed since the
+ * last sync shows its name, not its ID. Reading them also renames the index's labels, so the
+ * Labels rollup is read again once they arrive.
+ */
+function useGmailLabels() {
+  const id = useMailbox().account?.id ?? null;
+  const client = useQueryClient();
+  return useQuery({
+    queryKey: ['gmail-labels', id],
+    queryFn: async (): Promise<GmailLabels> => {
+      if (!id) return {};
+      const res = await fetch(`/api/accounts/${id}/labels`);
+      // Gmail unreachable: the index's names stand in.
+      if (!res.ok) return {};
+      const body: GmailLabels = await res.json();
+      client.invalidateQueries({ queryKey: ['archive', id, 'labels'] });
+      return body;
+    },
+  });
+}
+
+// Labels are IDs on a message; Gmail names them, then the Labels rollup.
 function useLabelNames() {
   const labels = useArchive('labels');
+  const gmail = useGmailLabels().data ?? {};
   const names = new Map((labels.data ?? []).map((l) => [l.id, labelName(l)]));
-  return (ids: string[]) => ids.map((id) => names.get(id) ?? id);
+  return (ids: string[]) => ids.map((id) => (gmail[id] ? labelName(gmail[id]) : (names.get(id) ?? id)));
 }
 
 /** Gmail's inbox tabs: a message is in one, Primary when it carries none of the other four. */
@@ -123,28 +152,46 @@ const CATEGORIES = ['Promotions', 'Social', 'Updates', 'Forums'] as const;
 const CATEGORY_IDS = CATEGORIES.map((c) => `CATEGORY_${c.toUpperCase()}`);
 const categoryOf = (ids: string[]) => CATEGORIES.find((c) => ids.includes(`CATEGORY_${c.toUpperCase()}`)) ?? 'Primary';
 
+/** The open tab, kept in the address (?tab=) so refresh and links keep it; the first tab when none or unknown. */
+function useTab<V extends string>(tabs: LumenTab<V>[]): [V, (v: V) => void] {
+  const raw = useSearch({ strict: false, select: (s: { tab?: unknown }) => s.tab });
+  const navigate = useNavigate();
+  const value = tabs.find((t) => t.value === raw)?.value ?? tabs[0].value;
+  const set = (v: V) => void navigate({ to: '.', search: v === tabs[0].value ? {} : { tab: v }, replace: true });
+  return [value, set];
+}
+
+/** Messages' tabs: every message, then Gmail's inbox tabs. */
+const MESSAGE_TABS: LumenTab<'all' | 'primary' | 'promotions' | 'social' | 'updates' | 'forums'>[] = [
+  { value: 'all', label: 'All', icon: MailsIcon },
+  { value: 'primary', label: 'Primary', icon: InboxIcon },
+  { value: 'promotions', label: 'Promotions', icon: TagIcon },
+  { value: 'social', label: 'Social', icon: UsersIcon },
+  { value: 'updates', label: 'Updates', icon: InfoIcon },
+  { value: 'forums', label: 'Forums', icon: MessagesSquareIcon },
+];
+
 /** A message's own labels (the person's, not Gmail's built-in ones), each with its Gmail colours. */
 function useUserLabels() {
-  const id = useMailbox().account?.id ?? null;
   const labels = useArchive('labels');
-  const colors = useQuery({
-    queryKey: ['label-colors', id],
-    queryFn: async (): Promise<LabelColors> => {
-      if (!id) return {};
-      const res = await fetch(`/api/accounts/${id}/label-colors`);
-      // No colours is fine: the chips show plain.
-      return res.ok ? res.json() : {};
-    },
-    staleTime: Infinity,
-  });
+  const gmail = useGmailLabels().data ?? {};
   const mine = new Map((labels.data ?? []).filter((l) => l.type === 'user').map((l) => [l.id, l.name]));
-  return (ids: string[]): Chip[] => ids.filter((x) => mine.has(x)).map((x) => ({ name: mine.get(x)!, ...colors.data?.[x] }));
+  for (const [id, l] of Object.entries(gmail)) if (l.type === 'user') mine.set(id, l.name);
+  return (ids: string[]): Chip[] => [
+    ...FOLDERS.filter((f) => ids.includes(f.id)).map(({ id: _, ...c }) => c),
+    ...ids.filter((x) => mine.has(x)).map((x) => ({ name: mine.get(x)!, bg: gmail[x]?.bg, fg: gmail[x]?.fg })),
+  ];
 }
-interface Chip {
+export interface Chip {
   name: string;
   bg?: string;
   fg?: string;
 }
+/** Gmail's Spam and Trash, shown as chips before the person's labels, in Gmail's colours. */
+const FOLDERS: (Chip & { id: string })[] = [
+  { id: 'SPAM', name: 'Spam', bg: '#fb4c2f', fg: '#ffffff' },
+  { id: 'TRASH', name: 'Trash', bg: '#999999', fg: '#ffffff' },
+];
 
 /** Label chips in their Gmail colours; past two, a +n with the rest on hover. */
 function Chips({ chips }: { chips: Chip[] }) {
@@ -274,7 +321,11 @@ const MESSAGES: ViewDomain<MessageView> = {
       ),
     },
     { key: 'category', label: 'Category', icon: InboxIcon, value: (r) => r.category, format: 'text', filterable: true, groupable: true },
-    { key: 'is', label: 'Read', icon: MailOpenIcon, value: (r) => (r.unread ? 'Unread' : 'Read'), format: 'text', filterable: true, groupable: true },
+    {
+      key: 'is', label: 'Read', icon: MailOpenIcon, value: (r) => (r.unread ? 'Unread' : 'Read'), format: 'text', filterable: true, groupable: true,
+      // is:spam and is:trash, as in Gmail, offered when the page has such mail.
+      values: (r) => [r.unread ? 'Unread' : 'Read', ...FOLDERS.filter((f) => r.labels.includes(f.id)).map((f) => f.name)],
+    },
     { key: 'period', label: 'Period', icon: CalendarClockIcon, value: (r) => r.period, format: 'text', filterable: true, groupable: true },
     { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.chips.map((c) => c.name).join(', '), values: (r) => r.chips.map((c) => c.name), format: 'text', filterable: true, groupable: true, render: (r) => <Chips chips={r.chips} /> },
     { key: 'size_kb', label: 'Size (KB)', icon: HardDriveIcon, value: (r) => Math.max(1, r.size / KB), format: 'rounded', aggregate: 'sum', filterable: true },
@@ -373,6 +424,7 @@ function toFilters(tokens: FilterToken[], list: Period[], tz: string): MessageFi
       const unread = values.some((v) => v.toLowerCase() === 'unread');
       const read = values.some((v) => v.toLowerCase() === 'read');
       if (unread !== read) out.push({ key: 'label', values: ['UNREAD'], not: read !== not });
+      for (const f of FOLDERS) if (values.some((v) => v.toLowerCase() === f.name.toLowerCase())) out.push({ key: 'label', values: [f.id], not });
     } else if (key === 'category') {
       // Categories are exclusive: Primary is having none of the other four.
       const picked = CATEGORIES.filter((c) => values.some((v) => v.toLowerCase() === c.toLowerCase())).map((c) => `CATEGORY_${c.toUpperCase()}`);
@@ -401,26 +453,44 @@ export function MessagesPage() {
   const { timeZone } = usePrefs();
   const labelNames = useLabelNames();
   const userLabels = useUserLabels();
+  const [tab, setTab] = useTab(MESSAGE_TABS);
+  // Each tab's count from the rollups (the same counts Labels and Time show); none until they load.
+  const months = useArchive('months');
+  const labelRows = useArchive('labels');
+  const tabCounts = useMemo(() => {
+    if (!months.data || !labelRows.data) return MESSAGE_TABS;
+    const all = months.data.reduce((t, m) => t + m.n, 0);
+    const of = (v: string) => labelRows.data?.find((l) => l.id === `CATEGORY_${v.toUpperCase()}`)?.n ?? 0;
+    const cats = CATEGORIES.reduce((t, c) => t + of(c), 0);
+    const n = (v: string) => (v === 'all' ? all : v === 'primary' ? Math.max(0, all - cats) : of(v));
+    return MESSAGE_TABS.map((t) => ({ ...t, after: <span className="text-xs text-muted-foreground tabular-nums">{count(n(t.value))}</span> }));
+  }, [months.data, labelRows.data]);
   const [tokens, setTokens] = useState<FilterToken[]>([]);
   const [size, setSize] = useState(50);
   // Page n starts after cursors[n]; each page read adds the next one's.
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [page, setPage] = useState(0);
+  // The server sorts by date only (its index is on time): newest first unless the header says oldest.
+  const [asc, setAsc] = useState(false);
   const list = useMemo(() => periods(Date.now(), timeZone), [timeZone]);
-  const filters = useMemo(() => toFilters(tokens, list, timeZone), [tokens, list, timeZone]);
+  // A category tab is one more chip the server applies, ANDed with the person's.
+  const filters = useMemo(
+    () => toFilters(tab === 'all' ? tokens : [{ key: 'category', value: tab } as FilterToken, ...tokens], list, timeZone),
+    [tab, tokens, list, timeZone],
+  );
   const key = JSON.stringify(filters);
   // A new filter or page size starts again from the newest.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: resets when the filter or size changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resets when the filter, size or sort changes.
   useEffect(() => {
     setCursors([null]);
     setPage(0);
-  }, [key, size, id]);
+  }, [key, size, id, asc]);
   const cursor = cursors[page] ?? null;
   const messages = useQuery({
-    queryKey: ['messages', id, key, size, cursor],
+    queryKey: ['messages', id, key, size, cursor, asc],
     queryFn: async (): Promise<MessagePage | null> => {
       if (!id) return null;
-      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}) });
+      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}), ...(asc ? { asc: '1' } : {}) });
       const res = await fetch(`/api/accounts/${id}/messages?${qs}`);
       if (!res.ok) throw new Error(`Couldn't load messages (${res.status})`);
       return res.json();
@@ -436,6 +506,16 @@ export function MessagesPage() {
   const [config, setConfig] = useState(() =>
     view('Messages', { columns: ['date', 'from', 'subject', 'category', 'label', 'size_kb', 'attachments'], sort: { key: 'date', desc: true } }),
   );
+  // A category tab holds one category, so its column says nothing there; the saved view keeps it for All.
+  const byCategory = tab !== 'all' && config.columns.includes('category');
+  const shown = byCategory ? { ...config, columns: config.columns.filter((c) => c !== 'category') } : config;
+  const at = config.columns.indexOf('category');
+  const onConfig = (next: typeof config) =>
+    setConfig(
+      byCategory && !next.columns.includes('category')
+        ? { ...next, columns: [...next.columns.slice(0, at), 'category', ...next.columns.slice(at)] }
+        : next,
+    );
   const rows = (data?.rows ?? []).map((m) => ({
     ...m,
     labelNames: labelNames(m.labels),
@@ -448,9 +528,12 @@ export function MessagesPage() {
   }));
   const loaded = !!data && !messages.isPlaceholderData;
   const crumbs = useMailboxCrumbs('Messages');
+  // A row click opens the message in the drawer.
+  const [opened, setOpened] = useState<MessageView | null>(null);
   if (loaded && !rows.length && !filters.length && page === 0) return <EmptyPage title="Messages" />;
+  const intro = <LumenTabs tabs={tabCounts} value={tab} onChange={setTab} />;
   const noMatch = loaded && !rows.length && (
-    <EmptyState icon={SearchIcon} title="No mail matches these filters">
+    <EmptyState icon={SearchIcon} title={tokens.length ? 'No mail matches these filters' : 'No mail in this tab'}>
       {data?.partial ? 'None in the mail searched so far. Next page keeps searching.' : 'Text search looks at the subject, the sender and the first lines of each message.'}
     </EmptyState>
   );
@@ -465,15 +548,18 @@ export function MessagesPage() {
       .filter(Boolean)
       .join(' · ');
   return (
+    <>
     <LumenLayout
       crumbs={crumbs}
       meta={meta ? <span className="text-xs text-muted-foreground">{meta}</span> : undefined}
+      intro={intro}
       domain={MESSAGES}
-      config={config}
+      config={shown}
       rows={rows}
       load={load}
-      onConfigChange={setConfig}
+      onConfigChange={onConfig}
       rowTitle={(r) => r.subject}
+      onOpen={setOpened}
       state={noMatch || undefined}
       onTokens={setTokens}
       paging={{
@@ -484,15 +570,20 @@ export function MessagesPage() {
         onPage: (p) => setPage(Math.max(0, Math.min(p, cursors.length - 1))),
         onSize: setSize,
         sizes: MESSAGE_PAGE_SIZES,
+        sorts: ['date'],
+        onSort: (s) => setAsc(s?.key === 'date' && !s.desc),
       }}
     />
+    {id && <MessageDrawer account={id} row={opened} chips={opened?.chips ?? []} rows={data?.rows ?? []} onClose={() => setOpened(null)} />}
+    </>
   );
 }
 
 function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
-  title, source, domain, initial, rowTitle,
+  title, source, domain, initial, rowTitle, intro,
 }: {
   title: string;
+  intro: ReactNode;
   source: V;
   domain: ViewDomain<ArchiveRows[V]>;
   initial: Record<string, unknown>;
@@ -501,11 +592,12 @@ function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
   const query = useArchive(source);
   const load = useLumenLoad(query);
   const [config, setConfig] = useState(() => view(title, initial));
-  const crumbs = useMailboxCrumbs(title);
-  if (isEmpty(query)) return <EmptyPage title={title} />;
+  const crumbs = useMailboxCrumbs('Panes', title);
+  if (isEmpty(query)) return <EmptyPage title="Panes" />;
   return (
     <LumenLayout
       crumbs={crumbs}
+      intro={intro}
       domain={domain}
       config={config}
       rows={query.data ?? []}
@@ -516,30 +608,30 @@ function RollupPage<V extends 'senders' | 'domains' | 'labels' | 'months'>({
   );
 }
 
-export const SendersPage = () => (
+const SendersPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Senders" source="senders" domain={SENDERS} rowTitle={(r) => r.addr}
+    title="Senders" source="senders" domain={SENDERS} rowTitle={(r) => r.addr} intro={intro}
     initial={{ columns: ['from', 'name', 'n', 'size_mb', 'first', 'last'], sort: { key: 'n', desc: true } }}
   />
 );
 
-export const DomainsPage = () => (
+const DomainsPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Domains" source="domains" domain={DOMAINS} rowTitle={(r) => r.domain}
+    title="Domains" source="domains" domain={DOMAINS} rowTitle={(r) => r.domain} intro={intro}
     initial={{ columns: ['domain', 'n', 'size_mb'], sort: { key: 'n', desc: true } }}
   />
 );
 
-export const LabelsPage = () => (
+const LabelsPane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Labels" source="labels" domain={LABELS} rowTitle={labelName}
+    title="Labels" source="labels" domain={LABELS} rowTitle={labelName} intro={intro}
     initial={{ columns: ['label', 'type', 'n', 'size_mb'], sort: { key: 'n', desc: true } }}
   />
 );
 
-export const TimePage = () => (
+const TimePane = ({ intro }: { intro: ReactNode }) => (
   <RollupPage
-    title="Time" source="months" domain={MONTHS} rowTitle={(r) => monthName(r.month)}
+    title="Time" source="months" domain={MONTHS} rowTitle={(r) => monthName(r.month)} intro={intro}
     initial={{
       shape: 'group',
       group: { fields: ['year'], default: 'year' },
@@ -549,3 +641,18 @@ export const TimePage = () => (
     }}
   />
 );
+
+/** Panes: the mailbox rolled up by sender, domain, label and month, one tab each. */
+export const PANE_TABS: LumenTab<'senders' | 'domains' | 'labels' | 'time'>[] = [
+  { value: 'senders', label: 'Senders', icon: UsersIcon },
+  { value: 'domains', label: 'Domains', icon: GlobeIcon },
+  { value: 'labels', label: 'Labels', icon: TagIcon },
+  { value: 'time', label: 'Time', icon: CalendarClockIcon },
+];
+const PANES = { senders: SendersPane, domains: DomainsPane, labels: LabelsPane, time: TimePane };
+
+export function PanesPage() {
+  const [tab, setTab] = useTab(PANE_TABS);
+  const Pane = PANES[tab];
+  return <Pane key={tab} intro={<LumenTabs tabs={PANE_TABS} value={tab} onChange={setTab} />} />;
+}
