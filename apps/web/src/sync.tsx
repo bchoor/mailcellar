@@ -198,9 +198,11 @@ export function mailboxCounts(months: MonthCoverage[]): { gmail: number; copied:
     searchable += m.indexed;
     if (m.gmail === null) continue;
     gmail += m.gmail;
-    copied += Math.min(m.copied, m.gmail);
+    copied += m.copied;
   }
-  return { gmail, copied, searchable };
+  // Capped on the total, not by month: Gmail files a few messages near a month's end under the
+  // next month, so their dated month runs one over and the next one under.
+  return { gmail, copied: Math.min(copied, gmail), searchable };
 }
 
 /**
