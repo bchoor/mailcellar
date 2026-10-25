@@ -934,6 +934,28 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
+   * Months the status still shows indexing, less those whose index is built: an ingest touches
+   * every month its messages fall in, which can be one the run isn't building, and only the run's
+   * own month is cleared when it ends. Such a month kept the watchdog alarm on. A month still to
+   * index has no indexed_at (landing clears it). For the watchdog only: one row read a month.
+   */
+  async pruneIndexing(): Promise<string[]> {
+    const book = this.status();
+    const cursor = this.ctx.storage.sql.exec<{ month: string }>(
+      `SELECT month FROM basin_months WHERE indexed_at IS NULL AND month IN (${book.indexing.map(() => '?').join(',')})`,
+      ...book.indexing,
+    );
+    const pending = new Set(cursor.toArray().map((r) => r.month));
+    this.count({ do_rows_read: cursor.rowsRead });
+    if (pending.size < book.indexing.length) {
+      book.indexing = book.indexing.filter((m) => pending.has(m));
+      if (!book.indexing.length) book.indexWait = null;
+      this.count({ do_rows_written: this.saveStatus() });
+    }
+    return book.indexing;
+  }
+
+  /**
    * Indexing `month` waits for the account's daily DO write limit (`label`) until `resumesAt`.
    * Copying goes on; the page shows indexing as waiting. The next index chunk clears it.
    */
@@ -1729,7 +1751,10 @@ export class MailboxDO extends DurableObject<Env> {
         if (!paused && (status === 'running' || status === 'waiting' || !!sync?.lanes?.length)) busy.push(`${a.id}:sync ${status}`);
         else if (!paused && (await mailbox.hasQueued())) busy.push(`${a.id}:queued`);
         if (!!census && census.month !== null && !census.error && !(census.resumesAt && Date.parse(census.resumesAt) > Date.now())) busy.push(`${a.id}:census ${census.month}`);
-        if (v.index.status !== 'idle') busy.push(`${a.id}:index ${v.index.status}`);
+        if (v.index.status === 'indexing') {
+          const months = await mailbox.pruneIndexing();
+          if (months.length) busy.push(`${a.id}:index ${months.join(' ')}`);
+        } else if (v.index.status !== 'idle') busy.push(`${a.id}:index ${v.index.status}`);
       } catch (e) {
         console.error('watchdog', a.id, e);
         busy.push(`${a.id}:error`);
