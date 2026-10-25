@@ -1692,6 +1692,7 @@ export class MailboxDO extends DurableObject<Env> {
     const sync = this.schedule('gmail-sync')!;
     const slot = sync.last ? nextRun(sync, new Date(sync.last.at)) : this.syncDue != null ? new Date(this.syncDue) : null;
     const due = !!slot && Date.now() >= slot.getTime() - 1000;
+    console.log('gmail-sync', JSON.stringify({ on: sync.on, every: sync.every, tz: sync.tz, last: sync.last, slot: slot?.toISOString() ?? null, due, paused: this.pausedBy() }));
     this.watching = await this.recover(user);
     const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
     if (due && ids.length && sync.on) {
