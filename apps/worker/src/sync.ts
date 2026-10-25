@@ -439,7 +439,9 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   await mailbox.indexStarted(month);
   const target = await syncDeps.basin(env, user);
   if (!target) return { indexed: 0, next: from, resumesAt: new Date(Date.now() + 5 * 60_000).toISOString() };
-  const rows = (await target.monthRows(account, month)).sort((a, b) => a.id.localeCompare(b.id));
+  // Gmail's month decides what the month holds: listed on the first run, kept in R2 for the rest.
+  const listed = from === 0 ? await listMonth(env, user, account, month) : await readListed(env, user, account, month);
+  const rows = (await target.monthRows(account, month, listed ?? undefined)).sort((a, b) => a.id.localeCompare(b.id));
   const quota = accountQuota(env);
   let at = from;
   let indexed = 0;
@@ -466,8 +468,11 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
     at += chunk.length;
   }
   if (at < rows.length) return { indexed, next: at, resumesAt: null };
-  const inBasin = new Set(rows.map((r) => r.id)).size;
-  console.log(JSON.stringify({ indexedMonth: { month, inBasin, rows: rows.length } }));
+  const ids = new Set(rows.map((r) => r.id));
+  // Counted against Gmail's list: mail Gmail no longer has stays indexed but isn't owed.
+  const inBasin = listed ? [...listed].filter((id) => ids.has(id)).length : ids.size;
+  console.log(JSON.stringify({ indexedMonth: { month, inBasin, rows: rows.length, listed: listed?.size ?? null } }));
+  if (listed && inBasin < listed.size) await forgetMissing(env, user, account, month, [...listed].filter((id) => !ids.has(id)));
   await mailbox.markIndexed(month, inBasin);
   // Senders, domains and labels once backfill is done, not once a month.
   // (Senders, domains and labels left with no mail after unindexMonth keep their rows until mail returns.)
@@ -482,6 +487,57 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
     }
   }
   return { indexed, next: null, resumesAt: null };
+}
+
+/** Gmail list calls an index run may spend listing its month (500 IDs a call). */
+const LIST_CALLS = 30;
+
+/**
+ * The IDs Gmail lists for a month, saved to R2 for the index runs after this one. Null when
+ * Gmail didn't answer or the month is too big to list in one run: the month then counts its
+ * own rows, as before.
+ */
+async function listMonth(env: Env, user: UserId, account: string, month: string): Promise<Set<string> | null> {
+  try {
+    const refreshToken = await env.MAILBOX.getByName(mailboxName(user)).accountToken(account);
+    if (!refreshToken) return null;
+    const token = await accessToken(env, refreshToken);
+    const ids: string[] = [];
+    let pageToken: string | undefined;
+    for (let calls = 0; ; calls++) {
+      if (calls === LIST_CALLS) return null;
+      const page = await listPage(token, pageToken, 500, monthQuery(month));
+      ids.push(...page.ids);
+      if (!page.next) break;
+      pageToken = page.next;
+    }
+    await env.ARCHIVE.put(r2Keys.listed(user, account, month), JSON.stringify(ids));
+    await accountQuota(env).charge({ classA: 1 });
+    return new Set(ids);
+  } catch (e) {
+    if (!(e instanceof GmailError) && !retryable(e)) throw e;
+    console.log(JSON.stringify({ listMonth: { month, error: String(e).slice(0, 160) } }));
+    return null;
+  }
+}
+
+async function readListed(env: Env, user: UserId, account: string, month: string): Promise<Set<string> | null> {
+  const obj = await env.ARCHIVE.get(r2Keys.listed(user, account, month));
+  return obj ? new Set((await obj.json()) as string[]) : null;
+}
+
+/**
+ * Gmail lists these IDs for the month but Basin hasn't got them: take them out of the month's
+ * landed-IDs file, so copying the month again fetches them.
+ */
+async function forgetMissing(env: Env, user: UserId, account: string, month: string, missing: string[]): Promise<void> {
+  console.log(JSON.stringify({ monthGap: { account, month, missing } }));
+  const key = r2Keys.copied(user, account, month);
+  const obj = await env.ARCHIVE.get(key);
+  if (!obj) return;
+  const gone = new Set(missing);
+  const ids = ((await obj.json()) as string[]).filter((id) => !gone.has(id));
+  await env.ARCHIVE.put(key, JSON.stringify(ids));
 }
 
 /** Outside requests a census run may make (one is the token refresh). */

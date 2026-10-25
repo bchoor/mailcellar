@@ -383,7 +383,7 @@ async function endListing(env: Env, user: UserId, account: string, p: LaneProgre
   // Both: the file has only what lanes landed, not what a stopped lane or the old engine put in Basin.
   if (p.prior) {
     const target = await syncDeps.basin(env, user);
-    if (target) for (const r of await target.monthRows(account, p.month)) skip.add(r.id);
+    if (target) for (const r of await target.monthRows(account, p.month, new Set(p.all))) skip.add(r.id);
   }
   const huge = new Set(p.huge);
   const big = new Set([...p.huge, ...p.medium]);

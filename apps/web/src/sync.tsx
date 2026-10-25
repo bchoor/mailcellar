@@ -175,7 +175,26 @@ function rateTile(s: SyncSummary, state: StageState): { value: string; caption: 
   return { value: `${fmt(Math.round(s.ratePerMin))} / min`, caption: 'last 10 minutes' };
 }
 
-const pct = (s: SyncSummary) => (s.total ? Math.min(100, Math.round((s.copied / s.total) * 1000) / 10) : 0);
+/**
+ * A mailbox's numbers, the same on every screen: Gmail's count (the census, by month), what
+ * MailCellar has of it (a month never counts more than Gmail lists), and what search has (the
+ * Messages total, which also keeps mail since deleted in Gmail).
+ */
+export function mailboxCounts(months: MonthCoverage[]): { gmail: number; copied: number; searchable: number } {
+  let gmail = 0;
+  let copied = 0;
+  let searchable = 0;
+  for (const m of months) {
+    searchable += m.indexed;
+    if (m.gmail === null) continue;
+    gmail += m.gmail;
+    copied += Math.min(m.copied, m.gmail);
+  }
+  return { gmail, copied, searchable };
+}
+
+/** Copied of Gmail's count, to a tenth; 100 only when every message is copied. */
+const pct = (c: { gmail: number; copied: number }) => (c.gmail ? (c.copied >= c.gmail ? 100 : Math.min(99.9, Math.floor((c.copied / c.gmail) * 1000) / 10)) : 0);
 
 /** A Sync panel's heading: the stage, its state as a badge, and why. */
 function StageHead({ title, state, fallback }: { title: string; state: StageState; fallback?: string | null }) {
@@ -204,6 +223,7 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
   const { data: cov } = useQuery(useCoverage(id));
+  const counts = mailboxCounts(cov?.months ?? []);
   const queued = cov?.months.filter(busyMonth) ?? [];
   const toCopy = queued.reduce((n, m) => n + left(m), 0);
   const rate = rateTile(s, copy);
@@ -217,11 +237,11 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        {s.total !== null ? (
+        {counts.gmail ? (
           <div className="grid w-full min-w-0 grid-cols-[1fr_auto] items-center gap-3 text-sm sm:w-auto sm:flex-1">
-            <Progress value={pct(s)} className="h-2" />
+            <Progress value={pct(counts)} className="h-2" />
             <span className="tabular-nums text-muted-foreground">
-              {fmt(s.copied)} of {fmt(s.total)} in Gmail · {pct(s)}%
+              {fmt(counts.copied)} of {fmt(counts.gmail)} in Gmail · {pct(counts)}%
             </span>
           </div>
         ) : (
@@ -265,7 +285,7 @@ function AccountSync({ id, sync: s, basin, copy, index, meters }: { id: string; 
           <div className="flex min-w-0 flex-col gap-3">
             <StageHead title="Indexing" state={index} />
             <TileRow className="flex-1">
-              <Tile className="lg:flex-1" label="Searchable" value={`${Math.floor((indexed / inBasin) * 1000) / 10}%`} caption={`${fmt(indexed)} of ${fmt(inBasin)}`} />
+              <Tile className="lg:flex-1" label="Searchable" value={fmt(counts.searchable)} caption={inBasin ? `${Math.floor((indexed / inBasin) * 1000) / 10}% of copied mail` : 'nothing copied yet'} />
               <Tile className="lg:flex-1" label="Queued for indexing" value={fmt(unindexed)} caption={toIndex.length ? `in ${months(toIndex.length)}` : 'nothing queued'} />
               <Tile
                 className="lg:flex-1"
@@ -322,17 +342,24 @@ const facts = (id: string, email: string, copying: string[]) => (c: AccountCover
     .map((m) => ({
       row: id,
       period: m.month,
-      have: m.copied,
+      have: m.gmail === null ? m.copied : Math.min(m.copied, m.gmail),
       expected: m.gmail ?? 0,
       state: monthState(m, copying),
-      note: [indexing(m) ? `${fmt(m.indexed)} of ${fmt(m.inBasin)} searchable` : null, m.error ? `Failed: ${shortError(m.error)}` : null].filter(Boolean).join(' · ') || undefined,
+      note:
+        [
+          m.gmail !== null && m.copied < m.gmail && m.copied > 0 && !busyMonth(m) ? `${fmt(m.gmail - m.copied)} missing` : null,
+          indexing(m) ? `${fmt(m.indexed)} of ${fmt(m.inBasin)} searchable` : null,
+          m.error ? `Failed: ${shortError(m.error)}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ') || undefined,
     })),
   rows: [{ row: id, label: email }],
   current: c.current,
 });
 
 /** The map's words for its states. */
-const STATE_LABELS = { running: 'Copying' } as const;
+const STATE_LABELS = { running: 'Copying', high: 'Almost (95–99%)' } as const;
 
 const busyMonth = (m: MonthCoverage) => m.state === 'queued' || m.state === 'running';
 
@@ -804,7 +831,7 @@ function AllMailboxesMap({ accounts, picked, onPick }: { accounts: SyncOverview[
 }
 
 /** Every mailbox, one line each: tap one to show it in the cards below. */
-function MailboxList({ accounts, picked, onPick }: { accounts: SyncOverview['accounts']; picked: string; onPick: (email: string) => void }) {
+function MailboxList({ accounts, picked, onPick }: { accounts: AccountStatus[]; picked: string; onPick: (email: string) => void }) {
   return (
     <ul className="flex flex-col gap-1 text-sm">
       {accounts.map((a) => (
@@ -818,7 +845,7 @@ function MailboxList({ accounts, picked, onPick }: { accounts: SyncOverview['acc
             <span className="min-w-0 flex-1 truncate text-left font-medium">{a.email}</span>
             <Badge variant={badge(a.sync).variant}>{badge(a.sync).label}</Badge>
             <span className="hidden text-muted-foreground sm:inline">{freshness(a.sync)}</span>
-            <span className="w-14 text-right tabular-nums text-muted-foreground">{a.sync.total ? `${pct(a.sync)}%` : '—'}</span>
+            <span className="w-14 text-right tabular-nums text-muted-foreground">{mailboxCounts(a.months).gmail ? `${pct(mailboxCounts(a.months))}%` : '—'}</span>
           </Button>
         </li>
       ))}
@@ -929,8 +956,7 @@ export function SyncStatus() {
   const { data } = useSync();
   if (!data?.accounts.length) return null;
   const syncs = data.accounts.map((a) => a.sync);
-  const total = syncs.reduce((n, s) => n + (s.total ?? 0), 0);
-  const copied = syncs.reduce((n, s) => n + s.copied, 0);
+  const { gmail: total, copied } = mailboxCounts(data.accounts.flatMap((a) => a.months));
   const value = !data.basin
     ? 'Waiting for Basin'
     : data.paused

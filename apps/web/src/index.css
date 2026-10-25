@@ -13,13 +13,25 @@
   --cov-run: #2563eb; --cov-run-soft: #c3d3f8;
   --cov-index: #7c3aed; --cov-index-soft: #ddd0fb;
   --gap: #d3c6b8; --gap-soft: #f3eee8;
+  --cov-part: #d97706;
 }
 :root[data-app="mailcellar"].dark, [data-app="mailcellar"] .dark {
   --cov-full: #3fb950; --cov-high: #2e7d45; --cov-low: #1b3d27;
   --cov-run: #4c8dff; --cov-run-soft: #1d3360;
   --cov-index: #a78bfa; --cov-index-soft: #3a2b66;
   --gap: #4d433a; --gap-soft: #29231e;
+  --cov-part: #e3a008;
 }
+
+/*
+ * Green is Complete only. A month short of its Gmail count is amber, and never fills past 85%,
+ * so 1,885 of 1,886 can't read as done. (Cells name their level last in aria-label.)
+ */
+[data-app="mailcellar"] [data-cell]:is([aria-label$=": 95–99%"], [aria-label$=": Under 95%"]) { --tw-ring-color: var(--cov-part); }
+[data-app="mailcellar"] [data-cell]:is([aria-label$=": 95–99%"], [aria-label$=": Under 95%"]) > span { background-color: var(--cov-part); max-width: 85%; }
+[data-app="mailcellar"] [class*="var(--cov-full)_0_80%"], [data-app="mailcellar"] [class*="var(--cov-full)_0_40%"] { --tw-ring-color: var(--cov-part); }
+[data-app="mailcellar"] [class*="var(--cov-full)_0_80%"] { background-image: linear-gradient(90deg, var(--cov-part) 0 80%, transparent 80%); }
+[data-app="mailcellar"] [class*="var(--cov-full)_0_40%"] { background-image: linear-gradient(90deg, var(--cov-part) 0 40%, transparent 40%); }
 
 /* A mailbox section is headed by its address: keep it as typed, not in capitals. */
 .mailbox-nav [data-sidebar="group-label"] { text-transform: none; letter-spacing: normal; }
