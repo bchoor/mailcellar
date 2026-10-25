@@ -5,11 +5,10 @@
 // raw file; the DO paces Gmail from memory (a token bucket, as msgvault does). Once a lane is
 // done, the account's committer lands the month and checks it against Gmail's list.
 import { mailboxName, monthQuery, paidNow, r2Keys, type IndexedMessage, type SyncPart, type UserId } from '@mailcellar/schema';
-import type { BasinRow } from './basin';
 import type { Env } from './env';
 import { b64urlBytes, batchGet, getRaw, GmailError, listPage, type Gone, type RawMessage } from './gmail';
 import { accountQuota } from './quota';
-import { accountMailbox, copiedRow, indexedFromBasin, INDEX_ROWS, launchLanes, nextReset, syncDeps } from './sync';
+import { accountMailbox, copiedRow, INDEX_ROWS, launchLanes, nextReset, syncDeps } from './sync';
 
 /** Raw mail bigger than this is fetched alone; between MEDIUM and this, MEDIUM_BATCH at a time. */
 export const HUGE = 2 * 1024 * 1024;
@@ -47,7 +46,7 @@ export const LANE_SPEND = () => ({ classA: LANE_CALLS() + 5, classB: 5, bytes: L
 
 /** A month's lane, as its R2 progress file holds it. */
 export interface LaneProgress {
-  /** The run that owns the lane now; empty once the month is all copied and staged. */
+  /** The run that owns the lane now; empty once the month is all copied. */
   runId: string;
   /** The run before it, which handed over: a retry of that run hands over again. */
   prev: string | null;
@@ -84,7 +83,7 @@ export interface LaneProgress {
   error: string | null;
   /**
    * The lane was taken off its month (stopped, unqueued or failed). The file stays so the
-   * committer settles what it staged: its IDs go to the month's landed-IDs file and the month is
+   * committer settles what it copied: its IDs go to the month's landed-IDs file and the month is
    * indexed, without landing it.
    */
   ended?: boolean;
@@ -432,12 +431,10 @@ export interface Committer {
 
 /** A committer that hasn't checked in for this long has died, and a lane starts a new one. */
 export const COMMITTER_STALE_MS = 3 * 60_000;
-/** How often the committer looks for staged rows. */
+/** How often the committer looks for months to land. */
 export const COMMIT_EVERY_MS = 60_000;
 /** Checks with nothing to do before the committer stops (a lane starts it again). */
 export const COMMITTER_IDLE = 3;
-/** Staged bytes one commit takes: 8 MB is about 2,000 messages; Paid takes 32 MB so it keeps up with ~2,500 a minute. */
-export const COMMIT_BYTES = () => (paidNow() ? 32 : 8) * 1024 * 1024;
 
 /** Start the account's committer unless one is checking in. Only one starts, however many lanes ask. */
 export async function ensureCommitter(env: Env, user: UserId, account: string): Promise<string | null> {
@@ -463,50 +460,17 @@ export interface CommitResult {
   waitMs: number;
 }
 
-/**
- * One check of the account's committer: index rows lanes staged before 2026-10-25 (lanes now
- * index as they copy), then land each month whose lane is done and has nothing staged left.
- */
-export async function runCommit(env: Env, user: UserId, account: string, runId: string, maxBytes = COMMIT_BYTES()): Promise<CommitResult> {
+/** One check of the account's committer: land each month whose lane is done. */
+export async function runCommit(env: Env, user: UserId, account: string, runId: string): Promise<CommitResult> {
   const key = r2Keys.committer(user, account);
   const obj = await env.ARCHIVE.get(key);
   const c = obj ? ((await obj.json()) as Committer) : null;
   if (!obj || !c || c.runId !== runId) return { committed: 0, landed: [], more: false, nextId: null, waitMs: 0 };
   const quota = accountQuota(env);
-  const listed = await env.ARCHIVE.list({ prefix: r2Keys.stagedPrefix(user, account) });
-  const take: string[] = [];
-  let bytes = 0;
-  for (const o of listed.objects) {
-    if (take.length && bytes + o.size > maxBytes) break;
-    take.push(o.key);
-    bytes += o.size;
-  }
-  let committed = 0;
-  let classA = 1;
+  let classA = 0;
   let classB = 1;
   c.error = null;
-  if (take.length)
-    try {
-      const rows: BasinRow[] = [];
-      for (const k of take) {
-        const staged = await env.ARCHIVE.get(k);
-        classB++;
-        if (staged) rows.push(...((await staged.json()) as BasinRow[]));
-      }
-      if (rows.length) {
-        const full = await quota.reserve({ do_rows_written: rows.length * INDEX_ROWS, do_rows_read: rows.length * 2 });
-        if (full) throw new Error(`waiting for the daily limit (${full.label})`);
-        const ing = await accountMailbox(env, user, account).ingest(rows.map(indexedFromBasin), false);
-        await quota.add({ do_rows_written: ing.rowsWritten, do_rows_read: rows.length * 2 });
-      }
-      await env.ARCHIVE.delete(take);
-      committed = rows.length;
-    } catch (e) {
-      // The rows stay staged; the next check indexes them.
-      c.error = `The mailbox didn't take the staged rows (${String(e).slice(0, 160)}).`;
-    }
 
-  // Land months whose lane is done and has nothing staged left.
   const landed: string[] = [];
   const lanes = await env.ARCHIVE.list({ prefix: r2Keys.lanes(user, account) });
   classA += 2;
@@ -516,8 +480,6 @@ export async function runCommit(env: Env, user: UserId, account: string, runId: 
     if (!lane) continue;
     const p = (await lane.json()) as LaneProgress;
     if (p.runId || (p.list && !p.ended)) continue;
-    const left = await env.ARCHIVE.list({ prefix: r2Keys.stagedPrefix(user, account, p.month), limit: 1 });
-    if (left.objects.length) continue;
     if (p.ended) await settleMonth(env, user, account, p);
     else {
       await landMonth(env, user, account, p);
@@ -526,19 +488,17 @@ export async function runCommit(env: Env, user: UserId, account: string, runId: 
   }
   await quota.charge({ classA: classA + 2, classB });
 
-  const busy = take.length > 0 || landed.length > 0 || lanes.objects.length > 0;
+  const busy = landed.length > 0 || lanes.objects.length > 0;
   c.idle = busy ? 0 : c.idle + 1;
   if (c.idle >= COMMITTER_IDLE) {
     await env.ARCHIVE.delete(key);
-    return { committed, landed, more: false, nextId: null, waitMs: 0 };
+    return { committed: 0, landed, more: false, nextId: null, waitMs: 0 };
   }
   const next = `${account}-commit-${Date.now().toString(36)}`;
   const saved = await env.ARCHIVE.put(key, JSON.stringify({ ...c, runId: next, at: new Date().toISOString() }), { onlyIf: { etagMatches: obj.etag } });
-  if (!saved) return { committed, landed, more: false, nextId: null, waitMs: 0 };
-  // More staged than one commit takes: commit again at once; else look again in a minute.
-  const behind = listed.truncated || take.length < listed.objects.length;
-  console.log(JSON.stringify({ commit: { account, committed, landed, behind, error: c.error } }));
-  return { committed, landed, more: true, nextId: next, waitMs: behind && !c.error ? 0 : c.error ? 5 * COMMIT_EVERY_MS : COMMIT_EVERY_MS };
+  if (!saved) return { committed: 0, landed, more: false, nextId: null, waitMs: 0 };
+  console.log(JSON.stringify({ commit: { account, landed } }));
+  return { committed: 0, landed, more: true, nextId: next, waitMs: COMMIT_EVERY_MS };
 }
 
 /**

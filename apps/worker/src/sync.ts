@@ -1,5 +1,5 @@
 // The sync Workflow: copies new mail of one Gmail account into MailCellar, 500 messages a run,
-// and routes the other runs: backfill lanes and the Basin committer (copy.ts), index builds,
+// and routes the other runs: backfill lanes and the committer that lands months (copy.ts), index checks,
 // the census.
 // Spike S7 found that a Workflow run is one Worker invocation, so Workers Free's caps of
 // 50 outside requests and 1,000 Cloudflare calls cover the whole run. A run therefore does
@@ -8,12 +8,10 @@
 // where its raw bytes are, straight to the account's DO: the mailbox is the record (2026-10-25).
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES, paidNow } from '@mailcellar/schema';
-import { basinCheck, catalogTarget, type BasinRow, type BasinTarget } from './basin';
 import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
 import { runCommit, runLane } from './copy';
 import { runImport } from './import';
-import { locateCheck, runLocateChain } from './locate';
 import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, GmailError, indexRow, labels, listPage, packBySize, profile, type RawMessage } from './gmail';
 
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
@@ -106,15 +104,11 @@ const resumePhase = (s: SyncState): SyncState['phase'] =>
     ? s.pageToken !== null || s.pending.length || s.historyId === null || s.part ? 'backfill' : 'live'
     : s.phase;
 
-/** Basin is the system of record, so no sync starts until it can be written. */
-export class BasinNotReady extends Error {}
-
 /**
  * Start (or restart) syncing an account. The new run takes over: a run already going finds
  * another run ID in the sync state and stops at its next save.
  */
 export async function startSync(env: Env, user: UserId, account: string): Promise<string> {
-  if (!env.BASIN_TOKEN) throw new BasinNotReady('Basin has no write token yet');
   const mailbox = accountMailbox(env, user, account);
   const now = new Date().toISOString();
   const state: SyncState = (await mailbox.syncState()) ?? {
@@ -138,14 +132,11 @@ export interface RunOptions {
   batchBytes: number;
   /** CPU budget, in estimated ms; RUN_CPU_MS unless a test sets another. */
   cpuMs?: number;
-  /** Where Basin rows go; the R2 Data Catalog unless a test supplies another. */
-  basin?: (env: Env, user: UserId) => Promise<BasinTarget | null>;
 }
 
-/** Where Basin rows go, how a sync starts, and how a run's Workflow stands. Tests swap in stand-ins. */
+/** How a sync starts, and how a run's Workflow stands. Tests swap in stand-ins. */
 export const syncDeps: {
   runStatus: (env: Env, runId: string) => Promise<string | null>;
-  basin: (env: Env, user: UserId) => Promise<BasinTarget | null>;
   start: (env: Env, user: UserId, account: string) => Promise<string>;
   census: (env: Env, user: UserId, account: string, mode: CensusState['mode']) => Promise<string>;
   /** Start a Workflow run: a lane or an index build. */
@@ -158,7 +149,6 @@ export const syncDeps: {
       return null;
     }
   },
-  basin: catalogTarget,
   start: (env, user, account) => startSync(env, user, account),
   census: (env, user, account, mode) => startCensus(env, user, account, mode),
   // From the account's alarm, not from the caller: a run started by a run counts as nested in it (MailboxDO.launchLater).
@@ -168,8 +158,25 @@ export const syncDeps: {
 /** What a run may add to the backfill's spend, checked against the cap before it starts: RUN_SIZE messages of up to 100 KB. */
 export const RUN_SPEND = { classA: RUN_COST.r2_class_a!, classB: RUN_COST.r2_class_b!, bytes: RUN_SIZE * 100 * 1024 };
 
-/** The mailbox's row for a Basin row: rows staged before 2026-10-25, and the locate runs. */
-export function indexedFromBasin(r: Pick<BasinRow, 'id' | 'thread_id' | 'ts' | 'from_addr' | 'from_name' | 'subject' | 'snippet' | 'size' | 'attachments' | 'labels'> & Partial<Pick<BasinRow, 'raw_key' | 'raw_offset' | 'raw_len'>>): IndexedMessage {
+/** A row the live sync staged before 2026-10-25 (gzipped JSON in its queue), with the columns indexing reads. */
+interface StagedRow {
+  id: string;
+  thread_id: string;
+  ts: string;
+  from_addr: string;
+  from_name: string;
+  subject: string;
+  snippet: string;
+  size: number;
+  attachments: number;
+  labels: string[];
+  raw_key?: string;
+  raw_offset?: number | null;
+  raw_len?: number | null;
+}
+
+/** The mailbox's row for a staged row. */
+function indexedFromStaged(r: StagedRow): IndexedMessage {
   return {
     id: r.id, threadId: r.thread_id, ts: Date.parse(r.ts), fromAddr: r.from_addr, fromName: r.from_name,
     subject: r.subject, snippet: r.snippet, size: Number(r.size), attachments: Number(r.attachments), labels: r.labels,
@@ -184,7 +191,7 @@ export function copiedRow(m: RawMessage, raw: Uint8Array, rawKey: string, at?: {
 
 /**
  * Start lanes for queued backfill months, up to MAX_LANES at once, and restart lanes that
- * stopped. Each lane copies one month to R2 and Basin (copy.ts), then takes the next queued month.
+ * stopped. Each lane copies one month to raw files and the mailbox (copy.ts), then takes the next queued month.
  */
 export async function launchLanes(env: Env, user: UserId, account: string): Promise<number> {
   if (await env.MAILBOX.getByName(mailboxName(user)).backfillPaused()) return 0;
@@ -195,8 +202,7 @@ export async function launchLanes(env: Env, user: UserId, account: string): Prom
 
 /**
  * One run of the account's own sync: new mail since the last run, and it hands queued backfill
- * months to lanes (copy.ts). Mail goes to R2 and its rows to Basin first; new mail is indexed as
- * soon as Basin has it.
+ * months to lanes (copy.ts). Mail goes to raw files and its rows straight into the mailbox.
  */
 export async function runBatch(
   env: Env,
@@ -352,7 +358,7 @@ export async function runBatch(
     for (const key of drained) {
       r2b++;
       const obj = await env.ARCHIVE.get(key);
-      if (obj) queued.push(...(await gunzipJson<BasinRow[]>(obj.body)).map(indexedFromBasin));
+      if (obj) queued.push(...(await gunzipJson<StagedRow[]>(obj.body)).map(indexedFromStaged));
     }
     const batch = [...queued, ...rows];
     if (batch.length) rowsWritten = (await mailbox.ingest(batch)).rowsWritten;
@@ -452,7 +458,7 @@ async function readListed(env: Env, user: UserId, account: string, month: string
 }
 
 /**
- * Gmail lists these IDs for the month but Basin hasn't got them: take them out of the month's
+ * Gmail lists these IDs for the month but the mailbox hasn't got them: take them out of the month's
  * landed-IDs file, so copying the month again fetches them.
  */
 async function forgetMissing(env: Env, user: UserId, account: string, month: string, missing: string[]): Promise<void> {
@@ -588,7 +594,6 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
 
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
   async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<unknown> {
-    if (event.payload.check && !event.payload.locate) return step.do('basin check', { retries: { limit: 0, delay: '1 second' } }, () => basinCheck(this.env));
     const { names } = event.payload;
     if (names) return step.do('names', () => accountQuota(this.env).setNames(names));
     const user = asUserId(event.payload.user);
@@ -603,7 +608,7 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     if (event.payload.commit) {
       const r = await step.do('commit', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runCommit(this.env, user, account, runId));
       if (!r.more || !r.nextId) return r;
-      if (r.waitMs) await step.sleep('wait for more staged rows', r.waitMs);
+      if (r.waitMs) await step.sleep('wait for months to land', r.waitMs);
       await step.do('next run', () => syncDeps.launch(this.env, { user, account, commit: true }, r.nextId!));
       return r;
     }
@@ -630,11 +635,6 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     if (event.payload.index) {
       const index = event.payload.index;
       return (await step.do('index', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runIndex(this.env, user, account, index))).indexed;
-    }
-    if (event.payload.locate) {
-      if (event.payload.check) return step.do('locate check', { retries: { limit: 0, delay: '1 second' }, timeout: '10 minutes' }, () => locateCheck(this.env, user, account));
-      const months = event.payload.locate;
-      return step.do('locate', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runLocateChain(this.env, user, account, months, runId));
     }
     if (event.payload.census) {
       const counted = await step.do('count', { retries: { limit: 1, delay: '1 minute' }, timeout: '10 minutes' }, () => runCensus(this.env, user, account, runId));

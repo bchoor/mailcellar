@@ -19,10 +19,10 @@
   },
   "vars": {
     "APP_VERSION": "dev",
-    // The R2 bucket that holds the raw files and Basin; must match r2_buckets below.
-    "BASIN_BUCKET": "mailcellar"
+    // The R2 bucket that holds the raw files; must match r2_buckets below.
+    "ARCHIVE_BUCKET": "mailcellar"
     // Set per deployment (docs/setup.md), not here: CF_ACCOUNT_ID, ACCESS_TEAM_DOMAIN, ACCESS_AUD,
-    // ADMIN_EMAILS; secrets GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASIN_TOKEN, CF_ANALYTICS_TOKEN,
+    // ADMIN_EMAILS; secrets GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, CF_ANALYTICS_TOKEN,
     // CF_BILLING_TOKEN.
   },
   "durable_objects": {
@@ -42,8 +42,6 @@
   // Workers Paid (2026-10-25): runs estimate their CPU at a third of 30 s, and estimates have run
   // low before, so the cap is 2 minutes. Remove if the account goes back to Free (WORKERS_PLAN).
   "limits": { "cpu_ms": 120000 },
-  // hysnappy compiles WebAssembly at run time, which Workers forbid; see the shim.
-  "alias": { "hysnappy": "./apps/worker/src/shims/hysnappy.ts" },
   // wrangler dev keeps localhost as the request's origin (not the route's host), so the
   // Google sign-in redirect matches the client's http://localhost:8787 callback.
   "dev": { "port": 8787, "host": "localhost:8787" }

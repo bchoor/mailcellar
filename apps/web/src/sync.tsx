@@ -4,7 +4,7 @@
 // preset, then Start backfill; picked queued months can be taken back out.
 // Everything shown is what the sync state says now; nothing is estimated.
 import {
-  ErrorLine, IconButton, LumenCoverageMap, LumenTokenizedFilter, useIsMobile, useLumenFilter, LumenLayout, NoteLine, StatusItem, Tile, TileRow,
+  ErrorLine, IconButton, LumenCoverageMap, LumenTokenizedFilter, useIsMobile, useLumenFilter, LumenLayout, StatusItem, Tile, TileRow,
   type CoverageData, type CoverageFact, type CoveragePick, type FilterField, type FilterToken, type ScheduleRun,
 } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
@@ -16,7 +16,7 @@ import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-gr
 import { addMonths, monthRange, type AccountCoverage, type BackfillStatus, type MonthCoverage, type SyncOverview, type SyncSummary, type AccountStatus, type QuotaMeter, quotaStop } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearch } from '@tanstack/react-router';
-import { CalendarRangeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarRangeIcon, MailIcon, HourglassIcon, ListChecksIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 import { EmptyState } from './archive';
 import { useQuota } from './quota';
@@ -58,7 +58,6 @@ const monthName = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleDateStr
 
 const REFUSED: Record<string, string> = {
   paused: 'Backfill is paused',
-  basin_not_ready: 'Waiting for Basin write access',
   not_found: 'This account was removed',
 };
 
@@ -66,7 +65,7 @@ const REFUSED: Record<string, string> = {
 async function syncNow(id: string): Promise<{ ok: boolean; detail: string }> {
   const res = await fetch(`/api/accounts/${id}/sync`, { method: 'POST' });
   if (!res.ok) {
-    // The Worker names why it refused: paused, Basin not ready, or no such account.
+    // The Worker names why it refused: paused, or no such account.
     const error = ((await res.json().catch(() => ({}))) as { error?: string }).error;
     return { ok: false, detail: (error && REFUSED[error]) ?? `Not started (${res.status})` };
   }
@@ -244,7 +243,7 @@ const months = (n: number) => `${fmt(n)} month${n === 1 ? '' : 's'}`;
 /** What Sync now does, for its tooltip. Matches syncAccount and runBatch in the Worker. */
 const SYNC_NOW_HELP = [
   'Copies mail that reached Gmail since the last sync.',
-  'Saves each message as a raw file and a row in Basin.',
+  'Saves each message as a raw file and indexes it in the mailbox.',
   "Makes new mail searchable at once if today's DO writes have room. If not, indexing does it later.",
   'Starts copying queued months, up to 3 at a time. It never queues months.',
   'Skips Spam and Trash.',
@@ -265,7 +264,7 @@ function SyncNowHelp() {
   );
 }
 
-function AccountSync({ id, archive = false, sync: s, basin, copy, index, meters, sizes = [], doHours = [] }: { id: string; archive?: boolean; sync: SyncSummary; basin: boolean; copy: StageState; index: StageState; meters: QuotaMeter[]; sizes?: AccountStatus['sizes']; doHours?: { at: string; written: number }[] }) {
+function AccountSync({ id, archive = false, sync: s, copy, index, meters, sizes = [], doHours = [] }: { id: string; archive?: boolean; sync: SyncSummary; copy: StageState; index: StageState; meters: QuotaMeter[]; sizes?: AccountStatus['sizes']; doHours?: { at: string; written: number }[] }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
@@ -274,7 +273,7 @@ function AccountSync({ id, archive = false, sync: s, basin, copy, index, meters,
   const queued = cov?.months.filter(busyMonth) ?? [];
   const toCopy = queued.reduce((n, m) => n + left(m), 0);
   const rate = rateTile(s, copy);
-  // Copied to Basin and not yet searchable: what indexing has left.
+  // Copied and not yet searchable: what indexing has left.
   const inBasin = cov?.months.reduce((n, m) => n + m.inBasin, 0) ?? 0;
   const toIndex = cov?.months.filter(indexing) ?? [];
   const unindexed = toIndex.reduce((n, m) => n + m.inBasin - m.indexed, 0);
@@ -300,7 +299,7 @@ function AccountSync({ id, archive = false, sync: s, basin, copy, index, meters,
               <Button
               variant="outline"
               size="sm"
-              disabled={busy || !basin || s.status === 'running'}
+              disabled={busy || s.status === 'running'}
               onClick={async () => {
                 setBusy(true);
                 try {
@@ -379,7 +378,7 @@ function useCoverage(id: string) {
 }
 
 /**
- * A month copied to Basin whose search index is still being built from it. The server's index
+ * A copied month whose search index is still being checked. The server's index
  * state decides (a month marked indexed is done, whatever its count); counts only without one.
  */
 const indexing = (m: MonthCoverage) => (m.indexState !== undefined && m.indexState !== null ? m.indexState !== 'done' : m.landed && m.indexed < m.inBasin);
@@ -459,7 +458,6 @@ async function queueBackfill(id: string, months: string[], label: string): Promi
   const res = await fetch(`/api/accounts/${id}/backfill`, { method: 'POST', body: JSON.stringify({ months, label }) });
   if (res.ok) return null;
   const { error } = (await res.json().catch(() => ({}))) as { error?: string };
-  if (error === 'basin_not_ready') return 'Waiting for Basin write access';
   return `Not queued (${error ?? res.status})`;
 }
 
@@ -477,7 +475,7 @@ function censusHint(c: AccountCoverage | undefined): string | null {
  * One account's coverage map: pick months (tap one, then another for the range; a year; or a quick pick), then
  * Start backfill, or Remove from queue for queued ones. Nothing starts from a pick alone.
  */
-function AccountCoverageMap({ id, email, archive = false, basin, rate, copying }: { id: string; email: string; archive?: boolean; basin: boolean; rate: number | null; copying: string[] }) {
+function AccountCoverageMap({ id, email, archive = false, rate, copying }: { id: string; email: string; archive?: boolean; rate: number | null; copying: string[] }) {
   const client = useQueryClient();
   const source = useCoverage(id);
   const { data } = useQuery(source);
@@ -512,7 +510,7 @@ function AccountCoverageMap({ id, email, archive = false, basin, rate, copying }
         unit="messages"
         summary={['complete', 'counts']}
         // An archive imports the whole file: no months to pick.
-        select={basin && !archive ? 'backfill' : undefined}
+        select={!archive ? 'backfill' : undefined}
         selectable={(_row, key) => {
           const m = month(key);
           return !!m && m.gmail !== null && copyable(m)! > m.copied && !busyMonth(m);
@@ -707,7 +705,7 @@ function Backfills({ id, rate, copying }: { id: string; rate: number | null; cop
   const failed = months.filter((m) => m.state === 'failed');
   const busy = [...now, ...next];
   const toCopy = busy.reduce((n, m) => n + left(m), 0);
-  // Months copied to Basin whose search index is queued, building, or waiting for the DO write limit.
+  // Copied months whose search index is queued, building, or waiting for the DO write limit.
   const inCopy = new Set([...held, ...next, ...failed].map((m) => m.month));
   const indexJobs = months.filter((m) => !inCopy.has(m.month) && (m.indexState === 'indexing' || m.indexState === 'waiting' || m.indexState === 'queued' || (!m.indexState && indexing(m))));
   const each = rate && now.length ? rate / now.length : null;
@@ -936,18 +934,6 @@ export function BackfillPage() {
       meta={data && <Badge variant="secondary">{running ? `${running} copying` : 'Not copying'}</Badge>}
       cards={[
         ...(query.error ? [{ id: 'error', title: 'Backfill', icon: HourglassIcon, kind: 'widget' as const, link: false as const, w: 6, children: <ErrorLine error={query.error} /> }] : []),
-        ...(data && !data.basin
-          ? [{
-              id: 'basin', title: 'Basin', icon: DatabaseIcon, kind: 'widget' as const, link: false as const, w: 6,
-              children: (
-                <NoteLine
-                  icon={DatabaseIcon}
-                  title="Waiting for Basin write access"
-                  note="Basin keeps every copied message. No sync starts until MailCellar can write to it."
-                />
-              ),
-            }]
-          : []),
         ...(data && data.accounts.length === 0
           ? [{
               id: 'none', title: 'Backfill', icon: HourglassIcon, kind: 'widget' as const, link: false as const, w: 6,
@@ -971,14 +957,14 @@ export function BackfillPage() {
                 tools: <RefreshTool keys={[BACKFILL_KEY]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountSync key={a.id} id={a.id} archive={a.kind === 'archive'} sync={a.sync} basin={data.basin} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} />;
+                  return <AccountSync key={a.id} id={a.id} archive={a.kind === 'archive'} sync={a.sync} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} />;
                 },
               },
               {
                 id: 'map', title: 'By month', kind: 'own' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountCoverageMap key={a.id} id={a.id} email={a.email} archive={a.kind === 'archive'} basin={data.basin} rate={a.sync.ratePerMin} copying={a.sync.months} />;
+                  return <AccountCoverageMap key={a.id} id={a.id} email={a.email} archive={a.kind === 'archive'} rate={a.sync.ratePerMin} copying={a.sync.months} />;
                 },
               },
               {
@@ -1002,10 +988,8 @@ export function SyncStatus() {
   if (!data?.accounts.length) return null;
   const syncs = data.accounts.map((a) => a.sync);
   const { gmail: total, copied } = mailboxCounts(data.accounts.flatMap((a) => a.months));
-  const value = !data.basin
-    ? 'Waiting for Basin'
-    : data.paused
-      ? copyState(data, undefined).label
+  const value = data.paused
+    ? copyState(data, undefined).label
     : syncs.some((s) => s.status === 'stopped')
       ? 'Stopped'
       : syncs.every((s) => s.phase === 'live')
@@ -1017,7 +1001,7 @@ export function SyncStatus() {
             : syncs.some((s) => s.phase === 'waiting')
               ? syncs.every((s) => s.phase !== 'waiting' || doHeld(s)) ? 'Indexing waiting' : 'Copying waiting'
               : 'Not running';
-  const ok = !data.basin || syncs.some((s) => s.status === 'stopped') ? false : syncs.every((s) => s.phase === 'live') ? true : null;
+  const ok = syncs.some((s) => s.status === 'stopped') ? false : syncs.every((s) => s.phase === 'live') ? true : null;
   return (
     <Link to="/backfill" className="hover:underline">
       <StatusItem label="Backfill" value={value} ok={ok} />

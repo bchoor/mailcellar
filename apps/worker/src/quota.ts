@@ -264,7 +264,7 @@ export async function readSpend(env: Env): Promise<SpendUse> {
         ops: r2OperationsAdaptiveGroups(limit: 1000, filter: {datetime_geq: $since, bucketName: $bucket}) { dimensions { actionType } sum { requests } }
         stored: r2StorageAdaptiveGroups(limit: 10, filter: {date_geq: $day, bucketName: $bucket}, orderBy: [date_DESC]) { dimensions { date } max { payloadSize metadataSize } }
       } } }`,
-      variables: { a: env.CF_ACCOUNT_ID, since: SPEND.since, day: SPEND.since.slice(0, 10), bucket: env.BASIN_BUCKET },
+      variables: { a: env.CF_ACCOUNT_ID, since: SPEND.since, day: SPEND.since.slice(0, 10), bucket: env.ARCHIVE_BUCKET },
     }),
   });
   if (!res.ok) throw new Error(`Cloudflare analytics answered HTTP ${res.status}.`);

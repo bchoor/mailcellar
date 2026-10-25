@@ -28,9 +28,9 @@ export interface SyncState {
   historyId: string | null;
   startedAt: string;
   updatedAt: string;
-  /** Batches copied but not yet committed to Basin (R2 keys of staged rows), oldest first. */
+  /** Rows the live sync queued before 2026-10-25 (raw-file keys), oldest first; runs index them. */
   basinQueue: string[];
-  /** The user's Basin table exists. */
+  /** Unused since Basin was removed (2026-10-25); kept so saved states still parse. */
   basinReady: boolean;
   /** When a paused sync resumes. */
   resumesAt: string | null;
@@ -90,8 +90,6 @@ export interface SyncPart {
 export interface SyncParams {
   user: string;
   account: string;
-  /** Instead of syncing, write one made-up row to the Basin check table (basin.ts, basinCheck). */
-  check?: boolean;
   /** Instead of syncing, count the account's messages by month (the census). */
   census?: boolean;
   /**
@@ -102,7 +100,7 @@ export interface SyncParams {
   names?: Record<string, string>;
   /** Copy this backfill month: one lane of a parallel backfill (its progress is an R2 file, r2Keys.lane). */
   month?: string;
-  /** Commit what the account's lanes staged to Basin, and land the months that are all there. */
+  /** Land the account's months whose lanes are done. */
   commit?: boolean;
   /**
    * Copy one month as a test: queue it and resume backfill, only if no other month of any of the
@@ -122,11 +120,6 @@ export interface SyncParams {
   index?: string;
   /** Unused since copying indexes as it goes (2026-10-25); kept so runs queued before then still parse. */
   from?: number;
-  /**
-   * Instead of syncing, move where each copied message is from Basin into the mailbox (2026-10-25):
-   * these months, a few a run. With `check`, report messages that still have no location instead.
-   */
-  locate?: string[];
   /** Instead of syncing, queue every past month with mail not yet copied, and resume backfill. */
   missing?: boolean;
   /** Import an archive's uploaded mbox: one run of the chain (import.ts). */
@@ -187,9 +180,8 @@ export function syncSummary(s: SyncState | null, now = Date.now()): SyncSummary 
   };
 }
 
-/** GET /api/sync: each account's sync, and whether Basin (the system of record) can be written yet. */
+/** GET /api/sync: each account's sync. */
 export interface SyncOverview {
-  basin: boolean;
   /** The person paused backfill: nothing copies until they resume (PUT /api/backfill/paused). */
   paused: boolean;
   /** Who paused it: the person, or the backfill's spend cap (SPEND in quota.ts). */

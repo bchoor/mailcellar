@@ -38,7 +38,7 @@ export const r2Keys = {
     if (!SAFE_ID.test(account) || !/^[0-9a-f]{1,16}$/.test(gmailId)) throw new Error('invalid raw key');
     return `u/${user}/a/${account}/raw/${gmailId}.eml`;
   },
-  /** A batch of Basin rows waiting to be committed (gzipped JSON). */
+  /** A batch of rows the live sync queued before 2026-10-25 (gzipped JSON); the next run indexes it. */
   basinQueue: (user: UserId, account: string, batch: string) => {
     if (!SAFE_ID.test(account) || !SAFE_ID.test(batch)) throw new Error('invalid queue key');
     return `u/${user}/a/${account}/basin-queue/${batch}.json.gz`;
@@ -46,23 +46,15 @@ export const r2Keys = {
   /** One lane's progress copying a month (JSON): the copy path keeps its state here, not in a Durable Object. */
   lane: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}lanes/${safeMonth(month)}.json`,
   lanes: (user: UserId, account: string) => `${accountPrefix(user, account)}lanes/`,
-  /** One Gmail batch of raw mail, the messages end to end; Basin keeps each one's offset and length. */
+  /** One Gmail batch of raw mail, the messages end to end; the mailbox keeps each one's offset and length. */
   pack: (user: UserId, account: string, month: string, name: string) => {
     if (!SAFE_ID.test(name)) throw new Error('invalid pack name');
     return `${accountPrefix(user, account)}packs/${safeMonth(month)}/${name}.raw`;
   },
-  /** Basin rows a lane run copied, waiting for the account's committer (JSON). */
-  staged: (user: UserId, account: string, month: string, run: string) => {
-    if (!SAFE_ID.test(run)) throw new Error('invalid staged name');
-    return `${accountPrefix(user, account)}staged/${safeMonth(month)}_${run}.json`;
-  },
-  stagedPrefix: (user: UserId, account: string, month?: string) => `${accountPrefix(user, account)}staged/${month ? `${safeMonth(month)}_` : ''}`,
-  /** The message IDs a month has in Basin, written when it lands: what copying it again skips. */
+  /** The message IDs a month has copied, written when it lands: what copying it again skips. */
   copied: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}copied/${safeMonth(month)}.json`,
-  /** The message IDs Gmail lists for a month, saved when its index is built: what the month counts as in Basin. */
+  /** The message IDs Gmail lists for a month, saved when its index is built: what the month counts as copied. */
   listed: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}listed/${safeMonth(month)}.json`,
-  /** Where each of a month's messages is in the raw files (JSON), built from Basin the first time one is opened. */
-  locations: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}locations/${safeMonth(month)}.json`,
   /** An archive's mbox file, uploaded in parts (R2 multipart upload), and each part's etag once sent. */
   upload: (user: UserId, account: string) => `${accountPrefix(user, account)}upload.mbox`,
   uploadPart: (user: UserId, account: string, n: number) => `${accountPrefix(user, account)}upload-parts/${String(n).padStart(5, '0')}.json`,
@@ -71,23 +63,15 @@ export const r2Keys = {
   importState: (user: UserId, account: string) => `${accountPrefix(user, account)}import.json`,
   /** Where each message starts in the mbox and its month, as one import run found them (JSON). */
   importScan: (user: UserId, account: string, n: number) => `${accountPrefix(user, account)}import-scan/${n}.json`,
-  /** Messages of the mbox end to end, as imported; Basin keeps each one's offset and length. */
+  /** Messages of the mbox end to end, as imported; the mailbox keeps each one's offset and length. */
   importPack: (user: UserId, account: string, n: number) => `${accountPrefix(user, account)}packs/import/${n}.raw`,
-  /** Basin rows an import run copied, until they are appended to Basin (JSON). */
-  importStaged: (user: UserId, account: string, name: string) => {
-    if (!SAFE_ID.test(name)) throw new Error('invalid staged name');
-    return `${accountPrefix(user, account)}import-staged/${name}.json`;
-  },
-  /** Which run is the account's Basin committer, and when it last checked in. */
+  /** Which run is the account's committer (it lands months), and when it last checked in. */
   committer: (user: UserId, account: string) => `${accountPrefix(user, account)}committer.json`,
   attachment: (user: UserId, sha256: string) => {
     if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error('invalid sha256');
     return `u/${user}/att/${sha256}`;
   },
 };
-
-/** Basin Catalog namespace for the user's Iceberg tables. */
-export const basinNamespace = (user: UserId) => `u_${user}`;
 
 /** Response of GET /api/health. */
 export interface Health {
