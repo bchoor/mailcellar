@@ -1,5 +1,43 @@
 [
   {
+    "tag": "v0.0.11",
+    "sha": "79f69a325ca09548f9afd781c3d95d332db2563f",
+    "published_at": "2026-10-25T19:24:58Z",
+    "takeaways": [
+      {
+        "text": "**Import mail from an mbox file**: In Settings ▸ Accounts ▸ Add mbox archive, you can upload an mbox file from your browser and have its mail imported with no Gmail link, then follow progress on the Backfill page.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Reconnect a failed Gmail account**: In Settings ▸ Accounts, an account whose Google connection has failed now shows a Reconnect button that signs you in again and keeps all the mail already copied.",
+        "types": [
+          "feature",
+          "improvement"
+        ]
+      },
+      {
+        "text": "**Messages Gmail won't hand over no longer leave months stuck on \"Almost\"**: On the Backfill page, a month where Gmail lists a message but refuses to return it now counts as complete and shows a note like \"1 Gmail won't give\".",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Copied counts now include new mail**: On the Backfill page, the copied count for a month that is already indexed now includes mail picked up by new-mail sync, so it matches the Searchable count.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Overview history by month for newer mailboxes**: On the Overview page, the history chart is titled \"Messages per month\" and buckets by month when your mail spans under two years.",
+        "types": [
+          "improvement"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.10",
     "sha": "0bff98b55c9b80fcab3ab2a59524571057cca74f",
     "published_at": "2026-10-25T03:47:33Z",
