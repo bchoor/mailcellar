@@ -8,11 +8,8 @@ export interface Env {
   /** The account's free-tier meters, one object for every user (quota.ts). */
   QUOTA: DurableObjectNamespace<QuotaDO>;
   ARCHIVE: R2Bucket;
-  /** Basin (R2 Data Catalog): the bucket and the write token (a Worker secret). The catalog URI and warehouse default from CF_ACCOUNT_ID and the bucket. */
-  BASIN_CATALOG_URI?: string;
-  BASIN_WAREHOUSE?: string;
-  BASIN_BUCKET: string;
-  BASIN_TOKEN?: string;
+  /** The ARCHIVE bucket's name, for its storage and request figures on the Usage page (quota.ts). */
+  ARCHIVE_BUCKET: string;
   /** Copies one Gmail account, a batch a run (sync.ts). */
   SYNC: Workflow<SyncParams>;
   APP_VERSION: string;

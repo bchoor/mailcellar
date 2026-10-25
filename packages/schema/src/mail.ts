@@ -1,6 +1,6 @@
 // Shapes of indexed mail, shared by the sync path, the mailbox DO and the app.
 // The DO keeps only what the archive pages need (S4: 635 bytes a message);
-// bodies and headers live in R2 and, from phase 2, in Basin.
+// bodies and headers live in raw files (R2 objects).
 import type { GmailId } from './index';
 
 /** One message as the mailbox DO indexes it. */
@@ -52,47 +52,6 @@ export function domainOf(addr: string): string {
 
 /** Calendar month of a message, UTC, as YYYY-MM: the Time page groups on it. */
 export const monthOf = (ts: number) => new Date(ts).toISOString().slice(0, 7);
-
-/**
- * Basin Catalog (Iceberg) tables, one set per user under basinNamespace(user).
- * The system of record; written by the sync Workflow with icebird in phase 2.
- */
-export const BASIN_TABLES = {
-  messages: {
-    partitionBy: { column: 'ts', transform: 'month' },
-    columns: [
-      { name: 'id', type: 'string', required: true },
-      { name: 'thread_id', type: 'string', required: true },
-      { name: 'ts', type: 'timestamptz', required: true },
-      { name: 'from_addr', type: 'string', required: true },
-      { name: 'from_name', type: 'string' },
-      { name: 'to_addrs', type: 'list<string>' },
-      { name: 'cc_addrs', type: 'list<string>' },
-      { name: 'subject', type: 'string' },
-      { name: 'snippet', type: 'string' },
-      { name: 'body_text', type: 'string' },
-      { name: 'labels', type: 'list<string>' },
-      { name: 'size', type: 'long', required: true },
-      { name: 'attachments', type: 'int', required: true },
-      { name: 'raw_key', type: 'string', required: true },
-      { name: 'synced_at', type: 'timestamptz', required: true },
-      // Added 2026-10-24: raw mail is packed, many messages to a file; a message is these bytes of raw_key.
-      { name: 'raw_offset', type: 'long' },
-      { name: 'raw_len', type: 'long' },
-    ],
-  },
-  attachments: {
-    partitionBy: null,
-    columns: [
-      { name: 'message_id', type: 'string', required: true },
-      { name: 'sha256', type: 'string', required: true },
-      { name: 'filename', type: 'string' },
-      { name: 'mime_type', type: 'string' },
-      { name: 'size', type: 'long', required: true },
-      { name: 'r2_key', type: 'string', required: true },
-    ],
-  },
-} as const;
 
 /** The archive pages and the rows each one reads, newest or biggest first. */
 export interface MonthRow { month: string; n: number; bytes: number }
@@ -163,7 +122,7 @@ export interface MessagePage {
   total: number | null;
   /** The page stopped at the scan budget before it filled: Next keeps searching. */
   partial: boolean;
-  /** Months copied to Basin whose mail is not in this index yet (not shown here). */
+  /** Months copied whose mail is not in this index yet (not shown here). */
   unindexed: number;
   /** The orders this mailbox can serve now; a page asked in another comes by date. */
   sorts: MessageSort[];

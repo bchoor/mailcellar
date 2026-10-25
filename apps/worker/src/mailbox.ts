@@ -54,7 +54,7 @@ import {
   MESSAGE_SORTS,
 } from '@mailcellar/schema';
 import type { Env } from './env';
-import { accountMailbox, accessToken, BasinNotReady, INDEX_CHUNK, INDEX_ROWS, launchLanes, RUN_COST, runDied, syncDeps } from './sync';
+import { accountMailbox, accessToken, INDEX_CHUNK, INDEX_ROWS, launchLanes, RUN_COST, runDied, syncDeps } from './sync';
 import { BUCKET, endLaneFile, FLIGHT, freshLane, readLane, rememberCopied, saveLane } from './copy';
 import { GmailError } from './gmail';
 import { keepImporting, type ArchiveRecord } from './import';
@@ -485,7 +485,7 @@ export class MailboxDO extends DurableObject<Env> {
       : sql.exec(`DELETE FROM meta WHERE key = 'backfill_paused'`);
     this.pausedKept = undefined;
     if (rowsWritten) this.count({ do_rows_written: rowsWritten });
-    if (paused || !this.env.BASIN_TOKEN) return true;
+    if (paused) return true;
     await this.watch();
     for (const { id } of sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray()) {
       try {
@@ -844,60 +844,6 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
-   * Fill in where copied messages are, from Basin's rows (the locate runs, 2026-10-25). Messages
-   * that already have a location are left as they are. Returns the IDs the mailbox has no row for.
-   */
-  async setLocations(rows: { id: string; key: string; offset: number | null; len: number | null }[]): Promise<{ set: number; absent: string[] }> {
-    const sql = this.ctx.storage.sql;
-    return this.ctx.storage.transactionSync(() => {
-      let set = 0;
-      let written = 0;
-      let read = 0;
-      const absent: string[] = [];
-      for (const r of rows) {
-        const cur = sql.exec(`UPDATE messages SET raw_key = ?, raw_offset = ?, raw_len = ? WHERE id = ? AND raw_key IS NULL`, r.key, r.offset, r.len, r.id);
-        written += cur.rowsWritten;
-        read += cur.rowsRead;
-        if (cur.rowsWritten) set++;
-        else {
-          const has = sql.exec(`SELECT 1 FROM messages WHERE id = ?`, r.id);
-          if (!has.toArray().length) absent.push(r.id);
-          read += has.rowsRead;
-        }
-      }
-      this.count({ do_rows_written: written, do_rows_read: read });
-      return { set, absent };
-    });
-  }
-
-  /** Messages with no raw location yet, by month, and a few of their IDs: the locate check. Reads every message once. */
-  async unlocated(): Promise<{ total: number; unlocated: number; months: Record<string, number>; sample: string[] }> {
-    const cursor = this.ctx.storage.sql.exec<{ id: string; ts: number; raw_key: string | null }>(`SELECT id, ts, raw_key FROM messages`);
-    let total = 0;
-    const months: Record<string, number> = {};
-    const sample: string[] = [];
-    for (const r of cursor) {
-      total++;
-      if (r.raw_key) continue;
-      const m = monthOf(r.ts);
-      months[m] = (months[m] ?? 0) + 1;
-      if (sample.length < 20) sample.push(r.id);
-    }
-    this.count({ do_rows_read: cursor.rowsRead });
-    return { total, unlocated: Object.values(months).reduce((t, n) => t + n, 0), months, sample };
-  }
-
-  /** One message's location per month, for the locate check to read back from the raw files. */
-  async locatedSample(): Promise<{ month: string; id: string; key: string; offset: number; len: number }[]> {
-    const cursor = this.ctx.storage.sql.exec<{ month: string; id: string; raw_key: string; raw_offset: number | null; raw_len: number | null }>(
-      `SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS month, id, raw_key, raw_offset, raw_len FROM messages WHERE raw_key IS NOT NULL GROUP BY month`,
-    );
-    const out = cursor.toArray().map((r) => ({ month: r.month, id: r.id, key: r.raw_key, offset: r.raw_offset ?? -1, len: r.raw_len ?? -1 }));
-    this.count({ do_rows_read: cursor.rowsRead });
-    return out;
-  }
-
-  /**
    * A month's backfill has landed in Basin: the month is done, its index can be built, and what
    * the lane copied is added to the month and the account's sync. A few rows, once a month.
    */
@@ -1072,26 +1018,6 @@ export class MailboxDO extends DurableObject<Env> {
     if (!book.indexing.includes(month)) book.indexing.push(month);
     book.indexWait = { resumesAt, label };
     this.count({ do_rows_written: this.saveStatus() });
-  }
-
-  /**
-   * Basin commits one at a time per account: concurrent commits to one Iceberg table conflict
-   * and retry, which costs a run's few outside requests. Take the turn for `ms`, unless another
-   * run holds it. Returns whether `owner` has it.
-   */
-  async commitTurn(owner: string, ms: number): Promise<boolean> {
-    return this.ctx.storage.transactionSync(() => {
-      const lease = this.meta<{ owner: string; until: number }>('commit_turn');
-      if (lease && lease.owner !== owner && lease.until > Date.now()) return false;
-      this.putMeta('commit_turn', { owner, until: Date.now() + ms });
-      return true;
-    });
-  }
-
-  async endCommitTurn(owner: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => {
-      if (this.meta<{ owner: string }>('commit_turn')?.owner === owner) this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = 'commit_turn'`);
-    });
   }
 
   /** Record the mailbox's labels, so the Labels page can name them. Counts are kept. */
@@ -1935,7 +1861,7 @@ export class MailboxDO extends DurableObject<Env> {
       ...s,
       last: last ? (JSON.parse(last.value) as ScheduleRun) : null,
       next: hasAccount ? (nextRun(s, new Date())?.toISOString() ?? null) : null,
-      waiting: !hasAccount ? 'Add a Gmail account in Settings ▸ Accounts first' : !this.env.BASIN_TOKEN ? 'Waiting for Basin write access' : null,
+      waiting: !hasAccount ? 'Add a Gmail account in Settings ▸ Accounts first' : null,
     };
   }
 
@@ -2051,7 +1977,6 @@ export class MailboxDO extends DurableObject<Env> {
     if (due && ids.length && sync.on) {
       let run: ScheduleRun;
       if (this.isPaused()) run = { at: new Date().toISOString(), ok: true, detail: 'Backfill paused' };
-      else if (!this.env.BASIN_TOKEN) run = { at: new Date().toISOString(), ok: false, detail: 'Waiting for Basin write access' };
       else {
         let started = 0;
         let failed = 0;
@@ -2093,7 +2018,6 @@ export class MailboxDO extends DurableObject<Env> {
     const pausedBy = this.pausedBy();
     const paused = pausedBy !== null;
     return {
-      basin: !!this.env.BASIN_TOKEN,
       paused,
       pausedBy,
       accounts: user
@@ -2126,12 +2050,8 @@ export class MailboxDO extends DurableObject<Env> {
     const ownWork = state.phase !== 'live' || state.pending.length > 0 || state.basinQueue.length > 0;
     if (state.lanes?.length) await launchLanes(this.env, user, account);
     if ((ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) || (await this.pauseLifted(state))) {
-      try {
-        await syncDeps.start(this.env, user, account);
-        return await accountMailbox(this.env, user, account).syncView();
-      } catch (e) {
-        if (!(e instanceof BasinNotReady)) throw e;
-      }
+      await syncDeps.start(this.env, user, account);
+      return await accountMailbox(this.env, user, account).syncView();
     }
     return state;
   }
@@ -2180,7 +2100,7 @@ export class MailboxDO extends DurableObject<Env> {
       : accounts.some((a) => a.copy.status === 'copying' || a.index.status === 'indexing') ? 'running'
       : waits.length ? 'index_waiting'
       : 'idle';
-    return { basin: !!this.env.BASIN_TOKEN, paused, pausedBy, state, resumesAt: state === 'index_waiting' ? waits[0] : null, accounts };
+    return { paused, pausedBy, state, resumesAt: state === 'index_waiting' ? waits[0] : null, accounts };
   }
 
   /** The daily limit indexing would wait for, asked of the quota at most every 5 minutes. */
@@ -2224,7 +2144,7 @@ export class MailboxDO extends DurableObject<Env> {
    * Start syncing an account unless a run is going or waiting to resume. Sync now (`manual`)
    * also restarts a sync that stopped on an error; the schedule leaves those for the person.
    */
-  async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' | 'paused' }> {
+  async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'paused' }> {
     const user = this.userId();
     if (!user || !this.isGmail(account)) return { error: 'not_found' };
     if (this.isPaused()) return { error: 'paused' };
@@ -2233,12 +2153,7 @@ export class MailboxDO extends DurableObject<Env> {
     const dead = status === 'running' && (await runDied(this.env, state!.runId));
     const lifted = status === 'waiting' && (await this.pauseLifted(state!));
     if ((status === 'running' && !dead) || (status === 'waiting' && !lifted) || (status === 'stopped' && !manual)) return { status };
-    try {
-      await syncDeps.start(this.env, user, account);
-    } catch (e) {
-      if (e instanceof BasinNotReady) return { error: 'basin_not_ready' };
-      throw e;
-    }
+    await syncDeps.start(this.env, user, account);
     await this.watch();
     return { status: 'started' };
   }
@@ -2257,10 +2172,9 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /** Queue months to copy for an account, and start its sync if none is going. */
-  async backfill(account: string, months: string[], label: string): Promise<{ job: number | null; status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' | 'paused' }> {
+  async backfill(account: string, months: string[], label: string): Promise<{ job: number | null; status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'paused' }> {
     const user = this.userId();
     if (!user || !this.isGmail(account)) return { error: 'not_found' };
-    if (!this.env.BASIN_TOKEN) return { error: 'basin_not_ready' };
     const job = await accountMailbox(this.env, user, account).queueMonths(months, label);
     // Paused: the months wait in the queue and start when the person resumes.
     if (this.isPaused()) return { job, status: 'idle' };
@@ -2335,7 +2249,7 @@ export class MailboxDO extends DurableObject<Env> {
     if (!user || !this.isGmail(account)) return null;
     const changed = await accountMailbox(this.env, user, account).changeJob(job, action);
     if (changed === null) return null;
-    if (action === 'retry' && changed && this.env.BASIN_TOKEN && !this.isPaused()) await this.syncAccount(account, true);
+    if (action === 'retry' && changed && !this.isPaused()) await this.syncAccount(account, true);
     return { changed };
   }
 

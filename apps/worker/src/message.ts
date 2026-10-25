@@ -1,111 +1,21 @@
 // One message opened from the Messages page. Its mailbox row says which raw file holds it and at
 // which bytes (one keyed DO read); only those bytes are read, then parsed here. No Gmail call.
-// Until its location has moved from Basin into the mailbox (locate.ts, 2026-10-25), a message
-// is found through Basin as before.
-import { basinNamespace, mailboxName, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
-import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
-import { restCatalogLoadTable } from 'icebird';
+import { mailboxName, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
 import PostalMime, { type Address, type Attachment, type Email } from 'postal-mime';
-import { basinCatalog, MESSAGES_TABLE, monthFiles, r2Resolver, type TableMetadata } from './basin';
 import type { Env } from './env';
 
 /** Inline images past this many bytes, all told, stay as cid: links rather than data URLs. */
 const INLINE_MAX = 4 * 1024 * 1024;
 
-/**
- * Where every message of one account's month is in the raw files: the pack files once each, and
- * per message ID its pack and, inside it, offset and length (-1 for a file of its own).
- */
-interface Locations {
-  packs: string[];
-  at: Record<string, [number, number, number]>;
-}
-
-// Months already read, for this isolate: an open after the first reads no file to find its message.
-const months = new Map<string, Locations>();
-
-/** Every message of the month from its Basin rows; null when Basin has no table yet. */
-async function fromBasin(env: Env, user: UserId, account: string, month: string): Promise<Locations | null> {
-  if (!env.BASIN_TOKEN) return null;
-  let metadata;
-  try {
-    ({ metadata } = await restCatalogLoadTable(await basinCatalog(env), { namespace: basinNamespace(user), table: MESSAGES_TABLE }));
-  } catch (e) {
-    if (/404|not ?found|NoSuch/i.test(String(e))) return null;
-    throw e;
-  }
-  const resolver = r2Resolver(env.ARCHIVE, env.BASIN_BUCKET);
-  const files = await monthFiles(metadata as TableMetadata, resolver, month);
-  const loc: Locations = { packs: [], at: {} };
-  const pack = new Map<string, number>();
-  await Promise.all(
-    files.map(async (f) => {
-      const file = await resolver.reader(f.path, f.size);
-      const meta = await parquetMetadataAsync(file);
-      // Files written before raw_offset and raw_len were added hold whole-file messages only.
-      const has = new Set(meta.schema.map((c) => c.name));
-      const rows = (await parquetReadObjects({
-        file,
-        metadata: meta,
-        columns: ['account', 'id', 'raw_key', 'raw_offset', 'raw_len'].filter((c) => has.has(c)),
-        filter: { account: { $eq: account } },
-      })) as { id: string; raw_key: string; raw_offset?: bigint | number | null; raw_len?: bigint | number | null }[];
-      for (const r of rows) {
-        if (!r.raw_key) continue;
-        let p = pack.get(r.raw_key);
-        if (p === undefined) pack.set(r.raw_key, (p = loc.packs.push(r.raw_key) - 1));
-        loc.at[r.id] = [p, r.raw_offset == null ? -1 : Number(r.raw_offset), r.raw_len == null ? -1 : Number(r.raw_len)];
-      }
-    }),
-  );
-  return loc;
-}
-
-/**
- * The month's locations: this isolate's copy, else its raw file, else read from Basin once and
- * saved as a raw file (one object write a month; no Durable Object read or write). `fresh` reads
- * Basin again, for a message copied after the file was saved.
- */
-async function monthLocations(env: Env, user: UserId, account: string, month: string, fresh = false): Promise<Locations | null> {
-  const name = `${user}/${account}/${month}`;
-  const key = r2Keys.locations(user, account, month);
-  let loc = fresh ? undefined : months.get(name);
-  if (!loc && !fresh) {
-    const obj = await env.ARCHIVE.get(key);
-    if (obj) loc = (await obj.json()) as Locations;
-  }
-  if (!loc) {
-    const built = await fromBasin(env, user, account, month);
-    if (!built) return null;
-    loc = built;
-    if (loc.packs.length) await env.ARCHIVE.put(key, JSON.stringify(loc), { httpMetadata: { contentType: 'application/json' } });
-  }
-  months.set(name, loc);
-  if (months.size > 24) months.delete(months.keys().next().value!);
-  return loc;
-}
-
-/** Warm a month before any of its messages is opened (the Messages page asks for the months it shows). */
-export async function warmMonth(env: Env, user: UserId, account: string, month: string): Promise<number> {
-  return Object.keys((await monthLocations(env, user, account, month))?.at ?? {}).length;
-}
-
-/** Where the message's bytes are: whole of `key`, or `len` bytes at `offset`. */
-async function locate(env: Env, user: UserId, account: string, id: string, month: string): Promise<{ key: string; offset: number; len: number }> {
-  const own = await env.MAILBOX.getByName(mailboxName(user, account)).location(id);
-  if (own) return own;
-  let loc = await monthLocations(env, user, account, month);
-  if (loc && !loc.at[id]) loc = await monthLocations(env, user, account, month, true);
-  const at = loc?.at[id];
-  // Mail the live sync copied before Basin rows carried an offset sits in a file of its own.
-  if (!loc || !at) return { key: r2Keys.raw(user, account, id), offset: -1, len: -1 };
-  return { key: loc.packs[at[0]], offset: at[1], len: at[2] };
+/** Where the message's bytes are: whole of `key`, or `len` bytes at `offset`. Mail with no location sits in a file of its own. */
+async function locate(env: Env, user: UserId, account: string, id: string): Promise<{ key: string; offset: number; len: number }> {
+  return (await env.MAILBOX.getByName(mailboxName(user, account)).location(id)) ?? { key: r2Keys.raw(user, account, id), offset: -1, len: -1 };
 }
 
 /** The message's own bytes, or null when no raw file holds it. */
-async function rawBytes(env: Env, user: UserId, account: string, id: string, month: string): Promise<Uint8Array | null> {
-  const at = await locate(env, user, account, id, month);
-  // Basin's own rows point inside this person's prefix; anything else is refused.
+async function rawBytes(env: Env, user: UserId, account: string, id: string): Promise<Uint8Array | null> {
+  const at = await locate(env, user, account, id);
+  // Locations point inside this person's prefix; anything else is refused.
   if (!at.key.startsWith(r2Keys.prefix(user))) return null;
   const obj = await env.ARCHIVE.get(at.key, at.offset >= 0 && at.len >= 0 ? { range: { offset: at.offset, length: at.len } } : undefined);
   if (!obj) return null;
@@ -147,7 +57,7 @@ function inlineImages(mail: Email): string | null {
 
 /** GET /api/accounts/:id/messages/:mid?month=: the message, parsed; null when no raw file holds it. */
 export async function openMessage(env: Env, user: UserId, account: string, id: string, month: string): Promise<MessageDetail | null> {
-  const raw = await rawBytes(env, user, account, id, month);
+  const raw = await rawBytes(env, user, account, id);
   if (!raw) return null;
   const mail = await parse(raw);
   const from = addresses(mail.from ? [mail.from] : undefined)[0] ?? null;
@@ -172,7 +82,7 @@ const VIEWABLE = /^(image\/(png|jpe?g|gif|webp|avif|bmp)|application\/pdf|text\/
  * `view=1` a viewable type comes as itself (for the preview), still unable to run on this site.
  */
 export async function attachment(env: Env, user: UserId, account: string, id: string, month: string, index: number, view = false): Promise<Response | null> {
-  const raw = await rawBytes(env, user, account, id, month);
+  const raw = await rawBytes(env, user, account, id);
   if (!raw) return null;
   const a = (await parse(raw)).attachments[index];
   if (!a) return null;
