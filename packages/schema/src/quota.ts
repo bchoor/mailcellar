@@ -70,11 +70,14 @@ export const quotaStop = (metric: QuotaMetric) => QUOTA_STOPS[metric] ?? QUOTA_S
 
 /**
  * The Workers plan the run budgets are sized for (CPU, outside requests, batch sizes). The
- * account went to Workers Paid on 2026-10-25. Going back to Free: set 'free' and remove
- * `limits` from wrangler.jsonc, or runs die at Free's 50 outside requests.
+ * account went to Workers Paid on 2026-10-25 and goes back to Free on 2026-10-27 or 28
+ * (Bikram), so Paid's budgets end at the earlier one, 2026-10-27 00:00 PT, on their own.
+ * After that, remove `limits` from wrangler.jsonc: Free can't take it.
  */
 export const WORKERS_PLAN: QuotaPlan = 'paid';
-export const PAID = WORKERS_PLAN === 'paid';
+export const PAID_ENDS = Date.parse('2026-10-27T07:00:00Z');
+/** Whether Paid's budgets apply now. Read at each use, so a long-lived isolate switches too. */
+export const paidNow = (now = Date.now()) => WORKERS_PLAN === 'paid' && now < PAID_ENDS;
 
 /**
  * Paid bills DO writes past 50M a month instead of stopping, so indexing keeps under this a day
@@ -193,6 +196,8 @@ export interface QuotaOverview {
   planReadAt: string | null;
   /** Why the plan couldn't be read, if it couldn't. */
   planError: string | null;
+  /** When the Workers Paid subscription's current period ends, as billing last said; null on Free. */
+  paidPeriodEnd?: string | null;
   /** When Cloudflare's figures were read; null when they couldn't be (then only MailCellar's own count shows). */
   readAt: string | null;
   /** Why Cloudflare's figures couldn't be read, if they couldn't. */
@@ -272,6 +277,8 @@ export interface SpendOverview {
   stop: number;
   spent: number;
   use: SpendUse;
+  /** Of `spent`, what Paid bills past its included Workers requests and DO and D1 rows. */
+  overage?: number;
   /** When Cloudflare's own figures were last read; null before (then only MailCellar's count). */
   readAt: string | null;
 }

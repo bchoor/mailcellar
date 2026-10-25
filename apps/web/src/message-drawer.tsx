@@ -70,8 +70,21 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-export function MessageDrawer({ account, row, chips, onClose }: { account: string; row: MessageRow | null; chips: Chip[]; onClose: () => void }) {
+// Months whose message locations this page has asked the Worker to find, once a visit.
+const warmed = new Set<string>();
+
+export function MessageDrawer({ account, row, chips, rows, onClose }: { account: string; row: MessageRow | null; chips: Chip[]; rows: MessageRow[]; onClose: () => void }) {
   const { timeZone } = usePrefs();
+  // The months on screen are found ahead of a click, so opening a message reads only its bytes.
+  const shown = [...new Set(rows.map((r) => monthOf(r.ts)))].join(',');
+  useEffect(() => {
+    // At most six a page: each month is read from Basin once, then kept as a raw file.
+    for (const m of shown ? shown.split(',').slice(0, 6) : []) {
+      if (warmed.has(`${account}/${m}`)) continue;
+      warmed.add(`${account}/${m}`);
+      fetch(`/api/accounts/${account}/messages/locations?month=${m}`).catch(() => warmed.delete(`${account}/${m}`));
+    }
+  }, [account, shown]);
   const [images, setImages] = useState(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: each message opens with images blocked.
   useEffect(() => setImages(false), [row?.id]);

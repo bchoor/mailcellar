@@ -1,8 +1,8 @@
-import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, messageFilters, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
+import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, MESSAGE_GROUPS, MESSAGE_SORTS, messageFilters, type MessageGroupBy, type MessageSort, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
-import { attachment, openMessage } from './message';
+import { attachment, openMessage, warmMonth } from './message';
 import { accountQuota } from './quota';
 import { accountMailbox } from './sync';
 
@@ -153,6 +153,13 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
   }
   // One message, opened from the Messages page: read from its raw file, not from Gmail. The month
   // (YYYY-MM, UTC) says which of Basin's partitions holds its row.
+  // Where a month's messages are in the raw files, found before one is opened, so the open is quick.
+  const warm = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/locations$/);
+  if (warm && request.method === 'GET') {
+    const month = url.searchParams.get('month') ?? '';
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return Response.json({ error: 'bad_month' }, { status: 400, headers: noStore });
+    return Response.json({ messages: await warmMonth(env, who.user, warm[1], month) }, { headers: noStore });
+  }
   const opened = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/([0-9a-f]{1,16})(?:\/attachments\/(\d{1,4}))?$/);
   if (opened && request.method === 'GET') {
     const month = url.searchParams.get('month') ?? '';
@@ -162,6 +169,16 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     const detail = await openMessage(env, who.user, id, mid, month);
     // A message never changes once copied: the app keeps it for the day.
     return detail ? Response.json(detail, { headers: { 'cache-control': 'private, max-age=86400' } }) : Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+  }
+  // One page of an account's Messages groups (Group by), from the rollups.
+  const grouped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/groups$/);
+  if (grouped && request.method === 'GET') {
+    if (!(await mailbox.accountToken(grouped[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    const by = url.searchParams.get('by') ?? '';
+    const filters = messageFilters(url.searchParams.get('f'));
+    if (!filters || !(MESSAGE_GROUPS as readonly string[]).includes(by)) return Response.json({ error: 'bad_group' }, { status: 400, headers: noStore });
+    const body = await accountMailbox(env, who.user, grouped[1]).messageGroups(by as MessageGroupBy, filters.length > 0, url.searchParams.get('after'));
+    return Response.json(body, { headers: noStore });
   }
   // One page of an account's messages under the Messages page's filters.
   const paged = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages$/);
@@ -175,6 +192,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
       url.searchParams.get('cursor'),
       (MESSAGE_PAGE_SIZES as readonly number[]).includes(size) ? size : 50,
       url.searchParams.get('asc') === '1',
+      (MESSAGE_SORTS as readonly string[]).includes(url.searchParams.get('sort') ?? '') ? (url.searchParams.get('sort') as MessageSort) : 'date',
     );
     return Response.json(page, { headers: noStore });
   }

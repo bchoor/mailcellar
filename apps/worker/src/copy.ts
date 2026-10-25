@@ -5,7 +5,7 @@
 // DO only paces Gmail from memory (a token bucket, as msgvault does). Lanes stage Basin rows;
 // one committer per account appends them to Basin about once a minute, and lands each month
 // once all of it is there. The month's search index is built from Basin after that.
-import { mailboxName, monthQuery, PAID, r2Keys, type SyncPart, type UserId } from '@mailcellar/schema';
+import { mailboxName, monthQuery, paidNow, r2Keys, type SyncPart, type UserId } from '@mailcellar/schema';
 import type { BasinRow } from './basin';
 import type { Env } from './env';
 import { b64urlBytes, batchGet, getRaw, GmailError, listPage, type RawMessage } from './gmail';
@@ -27,13 +27,13 @@ export const WAVE = 1;
 /** Batches in flight at once across an account's lanes (25 gets each; msgvault keeps 10 going). */
 export const FLIGHT = 2;
 /** Outside requests a lane run makes at most (Workers Free stops a run at 50, Paid at 10,000). */
-export const LANE_CALLS = PAID ? 200 : 40;
+export const LANE_CALLS = () => (paidNow() ? 200 : 40);
 /**
  * CPU a lane run may spend, in estimated ms. Free stops a run at about 2 s; without gzip a
  * message measured 0.3 to 0.6 ms locally (1.7 ms with a 500 KB attachment), so the estimate
  * is that times 2.5 and the budget under half the cap. Tune both from production CPU times.
  */
-export const LANE_CPU_MS = PAID ? 10_000 : 900;
+export const LANE_CPU_MS = () => (paidNow() ? 10_000 : 900);
 /** Basin rows a run holds before staging them (a row carries up to 32 KB of body text; memory is 128 MB). */
 export const STAGE_ROW_BYTES = 16 * 1024 * 1024;
 export const copyCpuMs = (bytes: number) => 0.8 + (bytes / 1024) * 0.01;
@@ -46,7 +46,7 @@ export const BUCKET = { cap: 250, rate: 200, min: 25, step: 25, calmMs: 10_000 }
 /** Gmail quota units a message costs (messages.get). */
 export const UNITS = 5;
 /** A lane run's worst case, checked against the spend cap before it starts: every call a full batch of raw mail. */
-export const LANE_SPEND = { classA: LANE_CALLS + 5, classB: 5, bytes: LANE_CALLS * SMALL_BATCH * MEDIUM };
+export const LANE_SPEND = () => ({ classA: LANE_CALLS() + 5, classB: 5, bytes: LANE_CALLS() * SMALL_BATCH * MEDIUM });
 
 /** A month's lane, as its R2 progress file holds it. */
 export interface LaneProgress {
@@ -197,7 +197,7 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
   };
   if (await owner.backfillPaused()) return stop('paused');
   const quota = accountQuota(env);
-  if (await quota.overBudget(LANE_SPEND)) return stop('budget');
+  if (await quota.overBudget(LANE_SPEND())) return stop('budget');
 
   const stats: LaneStats = { month, copied: 0, bytes: 0, calls: 0, cpuEstMs: 0, wallMs: 0, gmailMs: 0, waitMs: 0, throttled: 0, turnedAway: 0 };
   const turn = (units: number, throttled: boolean) =>
@@ -206,8 +206,8 @@ export async function runLane(env: Env, user: UserId, account: string, month: st
   if (first.error) return failLane(env, user, account, p, first.error);
   if (!first.active) return endUnqueued(env, user, account, p);
   const token = first.token!;
-  const callBudget = opts.calls ?? LANE_CALLS;
-  const cpuBudget = opts.cpuMs ?? LANE_CPU_MS;
+  const callBudget = opts.calls ?? LANE_CALLS();
+  const cpuBudget = opts.cpuMs ?? LANE_CPU_MS();
   const rows: BasinRow[] = [];
   let rowBytes = 0;
   const syncedAt = new Date().toISOString();
@@ -440,7 +440,7 @@ export const COMMIT_EVERY_MS = 60_000;
 /** Checks with nothing to do before the committer stops (a lane starts it again). */
 export const COMMITTER_IDLE = 3;
 /** Staged bytes one commit takes: 8 MB is about 2,000 messages; Paid takes 32 MB so it keeps up with ~2,500 a minute. */
-export const COMMIT_BYTES = (PAID ? 32 : 8) * 1024 * 1024;
+export const COMMIT_BYTES = () => (paidNow() ? 32 : 8) * 1024 * 1024;
 
 /** Start the account's committer unless one is checking in. Only one starts, however many lanes ask. */
 export async function ensureCommitter(env: Env, user: UserId, account: string): Promise<string | null> {
@@ -470,7 +470,7 @@ export interface CommitResult {
  * One check of the account's committer: append what the lanes staged to Basin (one append, up
  * to COMMIT_BYTES), then land each month whose lane is done and has nothing staged left.
  */
-export async function runCommit(env: Env, user: UserId, account: string, runId: string, maxBytes = COMMIT_BYTES): Promise<CommitResult> {
+export async function runCommit(env: Env, user: UserId, account: string, runId: string, maxBytes = COMMIT_BYTES()): Promise<CommitResult> {
   const key = r2Keys.committer(user, account);
   const obj = await env.ARCHIVE.get(key);
   const c = obj ? ((await obj.json()) as Committer) : null;

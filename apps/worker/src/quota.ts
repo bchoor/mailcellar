@@ -3,7 +3,7 @@
 // batch used after. It reads Cloudflare's analytics for the whole account (every project on
 // it) at most every 5 minutes, and adds what MailCellar has counted since.
 import { DurableObject } from 'cloudflare:workers';
-import { PAID_DAILY_GUARD, SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, quotaStop, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, type LevelMetric } from '@mailcellar/schema';
+import { PAID_DAILY_GUARD, paidNow, SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, quotaStop, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, type LevelMetric } from '@mailcellar/schema';
 import type { Env } from './env';
 
 export type QuotaUse = Partial<Record<QuotaMetric, number>>;
@@ -195,7 +195,7 @@ export async function readCloudflare(env: Env, plan: QuotaPlan, now = new Date()
 }
 
 /** The plan is cached this long: it is read only when a backfill or a page asks for the limits, never on a timer. */
-export const PLAN_READ_MS = 24 * 3_600_000;
+export const PLAN_READ_MS = 3_600_000;
 
 interface Subscription {
   state?: string;
@@ -210,22 +210,26 @@ interface Subscription {
  * account is on Free. The period is R2's subscription's, else any active one's; usage is billed
  * on it. With no subscription there is no period, and monthly meters count the calendar month.
  */
-export async function readPlan(env: Env, now = new Date()): Promise<{ plan: QuotaPlan; billing: BillingPeriod | null }> {
+export async function readPlan(env: Env, now = new Date()): Promise<{ plan: QuotaPlan; billing: BillingPeriod | null; paidEnd: string | null }> {
   if (!env.CF_BILLING_TOKEN) throw new Error('No Cloudflare billing token is set, so the plan is taken as Workers Free.');
   const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/subscriptions`, {
     headers: { authorization: `Bearer ${env.CF_BILLING_TOKEN}` },
   });
   if (!res.ok) throw new Error(`Cloudflare billing answered HTTP ${res.status}, so the plan is taken as Workers Free.`);
   const body = (await res.json()) as { result?: Subscription[] };
-  const active = (body.result ?? []).filter((s) => s.state !== 'Cancelled');
+  // A cancelled subscription still runs until its period ends.
+  const active = (body.result ?? []).filter(
+    (s) => s.state !== 'Cancelled' || (!!s.current_period_end && now.getTime() < Date.parse(s.current_period_end)),
+  );
   const name = (s: Subscription) => `${s.rate_plan?.id ?? ''} ${s.rate_plan?.public_name ?? ''}`;
-  const workers = active.some((s) => /workers/i.test(name(s)) && !/free/i.test(name(s)));
+  const workers = active.find((s) => /workers/i.test(name(s)) && !/free/i.test(name(s)));
   const running = active.filter(
     (s) => s.current_period_start && s.current_period_end && Date.parse(s.current_period_start) <= now.getTime() && now.getTime() < Date.parse(s.current_period_end),
   );
   const sub = running.find((s) => /r2/i.test(name(s))) ?? running[0];
   const billing = sub ? { start: new Date(sub.current_period_start!).toISOString(), end: new Date(sub.current_period_end!).toISOString() } : null;
-  return { plan: workers ? 'paid' : 'free', billing };
+  const paidEnd = workers?.current_period_end ? new Date(workers.current_period_end).toISOString() : null;
+  return { plan: workers ? 'paid' : 'free', billing, paidEnd };
 }
 
 /**
@@ -334,7 +338,19 @@ export class QuotaDO extends DurableObject<Env> {
     const use = await this.spendUse();
     // The test switch can only lower the stop, never raise it.
     const stop = Math.min(SPEND.stop, this.testLimit()?.spendStop ?? SPEND.stop);
-    return { since: SPEND.since, cap: SPEND.cap, stop, spent: spendCost(use), use, readAt: this.spendCf?.at ? new Date(this.spendCf.at).toISOString() : null };
+    const overage = this.overage();
+    return { since: SPEND.since, cap: SPEND.cap, stop, spent: spendCost(use) + overage, use, overage, readAt: this.spendCf?.at ? new Date(this.spendCf.at).toISOString() : null };
+  }
+
+  /**
+   * On Paid, dollars billed past the month's included Workers requests, DO and D1 rows (account
+   * wide). They count toward the spend guard with the backfill's R2; R2 is counted above.
+   */
+  private overage(now = new Date()): number {
+    if (this.plan !== 'paid') return 0;
+    return metrics
+      .filter((m) => m !== 'r2_class_a' && m !== 'r2_class_b')
+      .reduce((t, m) => t + (quotaCost(this.limits[m], this.used(m, now).used) ?? 0), 0);
   }
 
   /** The end-to-end test switch while it lasts (TEST_MS from when it was set), else null. */
@@ -378,9 +394,9 @@ export class QuotaDO extends DurableObject<Env> {
     `);
   }
 
-  /** The plan last read from Cloudflare; Free until one is read. */
+  /** The plan last read from Cloudflare; Free until one is read, and from PAID_ENDS whatever billing says. */
   private get plan(): QuotaPlan {
-    return this.meta('plan') === 'paid' ? 'paid' : 'free';
+    return this.meta('plan') === 'paid' && paidNow() ? 'paid' : 'free';
   }
 
   private get limits() {
@@ -407,8 +423,10 @@ export class QuotaDO extends DurableObject<Env> {
     if (tried && !ended && now.getTime() - Date.parse(tried) < PLAN_READ_MS) return;
     this.setMeta('plan_tried_at', now.toISOString());
     try {
-      const { plan, billing } = await quotaDeps.readPlan(this.env, now);
+      const { plan, billing, paidEnd } = await quotaDeps.readPlan(this.env, now);
+      console.log('plan', plan, 'workers paid period ends', paidEnd);
       this.setMeta('plan', plan);
+      this.setMeta('paid_end', paidEnd);
       this.setMeta('billing', billing && JSON.stringify(billing));
       this.setMeta('plan_read_at', now.toISOString());
       this.setMeta('plan_error', null);
@@ -565,6 +583,7 @@ export class QuotaDO extends DurableObject<Env> {
       plan: this.plan,
       planReadAt: this.meta('plan_read_at'),
       planError: this.meta('plan_error'),
+      paidPeriodEnd: this.meta('paid_end'),
       readAt: this.meta('read_at'),
       readError: this.meta('read_error'),
       day: now.toISOString().slice(0, 10),
