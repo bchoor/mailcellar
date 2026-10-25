@@ -2,18 +2,15 @@
 
 You need a Cloudflare account, a domain on Cloudflare, a Google Cloud project, and [Bun](https://bun.sh). Examples use `mail.example.com`; use your own domain.
 
-## 1. R2 bucket and Basin
+## 1. R2 bucket
 
 ```bash
 bun install
 bunx wrangler login
 bunx wrangler r2 bucket create mailcellar
-bunx wrangler r2 bucket catalog enable mailcellar
 ```
 
-Another bucket name works too: set it in `wrangler.jsonc` as both `r2_buckets[0].bucket_name` and `vars.BASIN_BUCKET`.
-
-Create an API token for Basin (My Profile ▸ API Tokens) with **Workers R2 Data Catalog: Edit** and **Workers R2 Storage: Edit** on your account. It becomes the `BASIN_TOKEN` secret.
+Another bucket name works too: set it in `wrangler.jsonc` as both `r2_buckets[0].bucket_name` and `vars.ARCHIVE_BUCKET`.
 
 ## 2. Plan
 
@@ -56,7 +53,6 @@ bunx wrangler secret put ACCESS_TEAM_DOMAIN
 bunx wrangler secret put ACCESS_AUD
 bunx wrangler secret put GOOGLE_CLIENT_ID
 bunx wrangler secret put GOOGLE_CLIENT_SECRET
-bunx wrangler secret put BASIN_TOKEN
 ```
 
 Optional:
@@ -64,7 +60,6 @@ Optional:
 - `ADMIN_EMAILS`: comma-separated emails allowed the end-to-end test switch.
 - `CF_ANALYTICS_TOKEN`: a token with Account Analytics, Workers Scripts and Workflows read. The Usage page reads the account's usage with it.
 - `CF_BILLING_TOKEN`: a token with Billing Read. The Usage page reads the plan with it.
-- `BASIN_CATALOG_URI` and `BASIN_WAREHOUSE`: only if your catalog isn't at the default for `CF_ACCOUNT_ID` and the bucket.
 
 Plain variables set in the dashboard work too: `keep_vars` keeps them across deploys.
 
