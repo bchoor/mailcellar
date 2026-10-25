@@ -127,7 +127,7 @@ export function AddArchive() {
         ) : (
           <>
             <span className="font-medium">Choose an mbox file</span>
-            <span className="text-muted-foreground">or drop it here · up to 50 GB</span>
+            <span className="text-muted-foreground">or drop it here · any size</span>
           </>
         )}
         <input type="file" className="sr-only" onChange={(e) => {
