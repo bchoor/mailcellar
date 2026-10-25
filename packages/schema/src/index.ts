@@ -63,6 +63,21 @@ export const r2Keys = {
   listed: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}listed/${safeMonth(month)}.json`,
   /** Where each of a month's messages is in the raw files (JSON), built from Basin the first time one is opened. */
   locations: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}locations/${safeMonth(month)}.json`,
+  /** An archive's mbox file, uploaded in parts (R2 multipart upload), and each part's etag once sent. */
+  upload: (user: UserId, account: string) => `${accountPrefix(user, account)}upload.mbox`,
+  uploadPart: (user: UserId, account: string, n: number) => `${accountPrefix(user, account)}upload-parts/${String(n).padStart(5, '0')}.json`,
+  uploadParts: (user: UserId, account: string) => `${accountPrefix(user, account)}upload-parts/`,
+  /** The archive import's progress (JSON): like a lane's, it keeps the copy path's state out of the Durable Object. */
+  importState: (user: UserId, account: string) => `${accountPrefix(user, account)}import.json`,
+  /** Where each message starts in the mbox and its month, as one import run found them (JSON). */
+  importScan: (user: UserId, account: string, n: number) => `${accountPrefix(user, account)}import-scan/${n}.json`,
+  /** Messages of the mbox end to end, as imported; Basin keeps each one's offset and length. */
+  importPack: (user: UserId, account: string, n: number) => `${accountPrefix(user, account)}packs/import/${n}.raw`,
+  /** Basin rows an import run copied, until they are appended to Basin (JSON). */
+  importStaged: (user: UserId, account: string, name: string) => {
+    if (!SAFE_ID.test(name)) throw new Error('invalid staged name');
+    return `${accountPrefix(user, account)}import-staged/${name}.json`;
+  },
   /** Which run is the account's Basin committer, and when it last checked in. */
   committer: (user: UserId, account: string) => `${accountPrefix(user, account)}committer.json`,
   attachment: (user: UserId, sha256: string) => {

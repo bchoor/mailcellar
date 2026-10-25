@@ -3,6 +3,7 @@ import {
   ARCHIVE_LIMIT,
   GMAIL_SCOPES,
   type ConnectedAccount,
+  type ArchiveImport,
   type Me,
   domainOf,
   ftsRowid,
@@ -56,6 +57,7 @@ import type { Env } from './env';
 import { accountMailbox, accessToken, BasinNotReady, INDEX_CHUNK, INDEX_ROWS, launchLanes, RUN_COST, runDied, syncDeps } from './sync';
 import { BUCKET, endLaneFile, FLIGHT, freshLane, readLane, rememberCopied, saveLane } from './copy';
 import { GmailError } from './gmail';
+import { keepImporting, type ArchiveRecord } from './import';
 import { accountQuota } from './quota';
 
 /**
@@ -147,6 +149,10 @@ export const MIGRATIONS: readonly string[] = [
   `UPDATE basin_months SET copied = (SELECT n FROM months WHERE months.month = basin_months.month)
    WHERE month >= '2026-09' AND indexed_at IS NOT NULL
      AND copied < (SELECT n FROM months WHERE months.month = basin_months.month);`,
+  // 14: archive mailboxes (2026-10-25): mail imported from an uploaded mbox file, with no Gmail
+  // link. `archive` holds the file and how far its upload and import are (JSON); no refresh token.
+  `ALTER TABLE accounts ADD COLUMN kind TEXT NOT NULL DEFAULT 'gmail';
+   ALTER TABLE accounts ADD COLUMN archive TEXT;`,
 ];
 
 /** Gmail labels whose mail MailCellar doesn't keep: the index never takes it in. */
@@ -1106,6 +1112,124 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /** Record Gmail's count for a month. */
+  /**
+   * An archive's import has read its whole file: each month's message count stands in for Gmail's
+   * (the census), and every month with mail is queued as one job, so the map and the Backfills
+   * list show the import like a backfill. Returns the job.
+   */
+  async importPlan(label: string, months: Record<string, number>, total: number): Promise<number> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const at = new Date().toISOString();
+      let written = 0;
+      for (const [month, n] of Object.entries(months))
+        written += sql.exec(
+          `INSERT INTO gmail_months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
+          month, n, at,
+        ).rowsWritten;
+      const job = sql.exec<{ id: number }>(`INSERT INTO jobs (created_at, label) VALUES (?, ?) RETURNING id`, at, label).toArray()[0].id;
+      for (const month of Object.keys(months)) written += sql.exec(`INSERT INTO job_months (job, month, state) VALUES (?, ?, 'queued')`, job, month).rowsWritten;
+      const sync: SyncState = {
+        phase: 'backfill', runId: 'import', total, copied: 0, bytes: 0, pending: [], pageToken: null, historyId: null,
+        startedAt: at, updatedAt: at, basinQueue: [], basinReady: true, resumesAt: null, error: null, lanes: [],
+      };
+      written += this.putMeta('sync', { ...sync, recent: withRecent(sync, at) });
+      this.changedMonths();
+      written += 1 + this.changed(Object.keys(months), [job]);
+      this.count({ do_rows_written: written });
+      return job;
+    });
+  }
+
+  /**
+   * One import run's progress: what it copied to Basin each month, and the months it is in now.
+   * One call a run (a few rows), like a lane's turn; the import's own state is a raw file.
+   */
+  async importProgress(p: { job: number; copied: Record<string, number>; bytes: number; months: string[]; error: string | null }): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      let written = 0;
+      let added = 0;
+      for (const [month, n] of Object.entries(p.copied)) {
+        added += n;
+        written += sql.exec(
+          `INSERT INTO basin_months (month, copied) VALUES (?, ?) ON CONFLICT (month) DO UPDATE SET copied = copied + excluded.copied`,
+          month, n,
+        ).rowsWritten;
+      }
+      const running = p.months.filter((m) => !(m in p.copied)).concat(Object.keys(p.copied));
+      for (const month of new Set(running))
+        written += sql.exec(`UPDATE job_months SET state = 'running' WHERE job = ? AND month = ? AND state = 'queued'`, p.job, month).rowsWritten;
+      const main = this.meta<SyncState>('sync');
+      if (main) {
+        const at = new Date().toISOString();
+        const next: SyncState = { ...main, copied: main.copied + added, bytes: main.bytes + p.bytes, updatedAt: at, lanes: p.months, error: p.error };
+        written += this.putMeta('sync', { ...next, recent: withRecent(next, at) });
+      }
+      this.sample(Date.now());
+      written += this.changed(new Set([...running, ...Object.keys(p.copied)]), [p.job]);
+      this.count({ do_rows_written: written });
+    });
+  }
+
+  /** The import copied the whole file: every month lands (its index is built next), and copying shows done. */
+  async importLand(job: number, months: string[]): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      const at = new Date().toISOString();
+      let written = 0;
+      for (const month of months)
+        written += sql.exec(
+          `INSERT INTO basin_months (month, copied, landed_at) VALUES (?, 0, ?) ON CONFLICT (month) DO UPDATE SET landed_at = excluded.landed_at, indexed_at = NULL`,
+          month, at,
+        ).rowsWritten;
+      written += sql.exec(`UPDATE job_months SET state = 'done', error = NULL, finished_at = ? WHERE job = ? AND state IN ('queued', 'running')`, at, job).rowsWritten;
+      const main = this.meta<SyncState>('sync');
+      if (main) written += this.putMeta('sync', { ...main, phase: 'live', lanes: [], updatedAt: at, error: null });
+      this.changedMonths();
+      written += this.changed(months, [job]);
+      this.count({ do_rows_written: written });
+    });
+  }
+
+  /**
+   * The import is searchable: a month the file held a message twice in counts it once (its index
+   * did), so the month isn't shown short. Messages too big to import still count as missing.
+   */
+  async importSettle(tooBig: Record<string, number>): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      const rows = sql.exec<{ month: string; n: number; copied: number }>(
+        `SELECT g.month, g.n, b.copied FROM gmail_months g JOIN basin_months b ON b.month = g.month WHERE b.indexed_at IS NOT NULL`,
+      ).toArray();
+      let written = 0;
+      const changed: string[] = [];
+      for (const r of rows) {
+        const n = r.copied + (tooBig[r.month] ?? 0);
+        if (n >= r.n) continue;
+        written += sql.exec(`UPDATE gmail_months SET n = ? WHERE month = ?`, n, r.month).rowsWritten;
+        changed.push(r.month);
+      }
+      if (changed.length) written += this.changed(changed);
+      this.count({ do_rows_read: rows.length * 2, do_rows_written: written });
+    });
+  }
+
+  /** The import stopped on an error that needs the person: the page shows it. */
+  async importFailed(error: string): Promise<void> {
+    const main = this.meta<SyncState>('sync');
+    if (main) this.count({ do_rows_written: this.putMeta('sync', { ...main, phase: 'error', lanes: [], error, updatedAt: new Date().toISOString() }) });
+  }
+
+  /** The labels the index holds, by ID, with their names: an archive's Labels (it has no Gmail to ask). */
+  async labelMap(): Promise<GmailLabels> {
+    const cursor = this.ctx.storage.sql.exec<{ id: string; name: string; type: string }>(`SELECT id, name, type FROM labels`);
+    const out: GmailLabels = {};
+    for (const l of cursor) out[l.id] = { name: l.name, type: l.type === 'system' ? 'system' : 'user' };
+    this.count({ do_rows_read: cursor.rowsRead });
+    return out;
+  }
+
   async putMonthCount(month: string, n: number): Promise<void> {
     const { rowsWritten } = this.ctx.storage.sql.exec(
       `INSERT INTO gmail_months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
@@ -1756,6 +1880,16 @@ export class MailboxDO extends DurableObject<Env> {
       try {
         const mailbox = accountMailbox(this.env, user, a.id);
         const v = await mailbox.statusView();
+        // An archive has no Gmail: its import restarts where it stood if its run died.
+        if (a.kind === 'archive') {
+          const importing = await keepImporting(this.env, user, a.id);
+          if (importing) busy.push(`${a.id}:import ${importing}`);
+          if (v.index.status === 'indexing') {
+            const months = await mailbox.pruneIndexing();
+            if (months.length) busy.push(`${a.id}:index ${months.join(' ')}`);
+          }
+          continue;
+        }
         const sync = await this.keepRunning(user, a.id, v.sync, paused);
         const census = (await this.keepCounting(user, a.id, v.census, slot)) ?? v.census;
         const status = syncStatus(sync);
@@ -1813,7 +1947,7 @@ export class MailboxDO extends DurableObject<Env> {
       }
     this.watching = busy.length > 0;
     console.log('gmail-sync', JSON.stringify({ on: sync.on, every: sync.every, tz: sync.tz, last: sync.last, slot: slot?.toISOString() ?? null, due, paused: this.pausedBy(), busy }));
-    const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
+    const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts WHERE kind = 'gmail'`).toArray().map((a) => a.id);
     if (due && ids.length && sync.on) {
       let run: ScheduleRun;
       if (this.isPaused()) run = { at: new Date().toISOString(), ok: true, detail: 'Backfill paused' };
@@ -1926,7 +2060,8 @@ export class MailboxDO extends DurableObject<Env> {
             return {
               ...a,
               sync,
-              copy: paused ? { status: 'paused', pausedBy: pausedBy! } : { status: sync.status === 'running' ? 'copying' : 'idle' },
+              // An archive's import was started by its upload and doesn't wait for the backfill's pause.
+              copy: paused && a.kind !== 'archive' ? { status: 'paused', pausedBy: pausedBy! } : { status: sync.status === 'running' ? 'copying' : 'idle' },
               index,
               months: v.months,
               census: censusView(census),
@@ -1991,7 +2126,7 @@ export class MailboxDO extends DurableObject<Env> {
    */
   async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' | 'paused' }> {
     const user = this.userId();
-    if (!user || !this.hasAccount(account)) return { error: 'not_found' };
+    if (!user || !this.isGmail(account)) return { error: 'not_found' };
     if (this.isPaused()) return { error: 'paused' };
     const state = await accountMailbox(this.env, user, account).syncState();
     const status = syncStatus(state);
@@ -2024,7 +2159,7 @@ export class MailboxDO extends DurableObject<Env> {
   /** Queue months to copy for an account, and start its sync if none is going. */
   async backfill(account: string, months: string[], label: string): Promise<{ job: number | null; status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'basin_not_ready' | 'paused' }> {
     const user = this.userId();
-    if (!user || !this.hasAccount(account)) return { error: 'not_found' };
+    if (!user || !this.isGmail(account)) return { error: 'not_found' };
     if (!this.env.BASIN_TOKEN) return { error: 'basin_not_ready' };
     const job = await accountMailbox(this.env, user, account).queueMonths(months, label);
     // Paused: the months wait in the queue and start when the person resumes.
@@ -2042,7 +2177,7 @@ export class MailboxDO extends DurableObject<Env> {
    */
   async backfillMissing(account: string): Promise<{ months: string[]; job?: number | null; error?: string }> {
     const user = this.userId();
-    if (!user || !this.hasAccount(account)) return { months: [], error: 'not_found' };
+    if (!user || !this.isGmail(account)) return { months: [], error: 'not_found' };
     const now = monthNow();
     const months = (await accountMailbox(this.env, user, account).coverageMonths())
       .filter((m) => m.month < now && m.gmail !== null && m.gmail - (m.unavailable ?? 0) > m.copied)
@@ -2064,8 +2199,8 @@ export class MailboxDO extends DurableObject<Env> {
    */
   async trial(account: string, month: string, park = false): Promise<{ started: boolean; active: { account: string; months: string[] }[]; job?: number | null; parked?: string[] }> {
     const user = this.userId();
-    if (!user || !this.hasAccount(account) || !/^\d{4}-\d{2}$/.test(month)) return { started: false, active: [] };
-    const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts`).toArray().map((a) => a.id);
+    if (!user || !this.isGmail(account) || !/^\d{4}-\d{2}$/.test(month)) return { started: false, active: [] };
+    const ids = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM accounts WHERE kind = 'gmail'`).toArray().map((a) => a.id);
     const active = [];
     for (const id of ids) {
       // The test month itself may already be queued (or part copied): that's the month that runs.
@@ -2097,7 +2232,7 @@ export class MailboxDO extends DurableObject<Env> {
   /** Cancel or retry a backfill job; a retry starts the sync if none is going. Null: no such account or job. */
   async jobAction(account: string, job: number, action: 'cancel' | 'retry'): Promise<{ changed: number } | null> {
     const user = this.userId();
-    if (!user || !this.hasAccount(account)) return null;
+    if (!user || !this.isGmail(account)) return null;
     const changed = await accountMailbox(this.env, user, account).changeJob(job, action);
     if (changed === null) return null;
     if (action === 'retry' && changed && this.env.BASIN_TOKEN && !this.isPaused()) await this.syncAccount(account, true);
@@ -2107,7 +2242,7 @@ export class MailboxDO extends DurableObject<Env> {
   /** Take months out of an account's queue, or all when `months` is null. Null: not this user's account. */
   async unqueue(account: string, months: string[] | null): Promise<{ changed: number } | null> {
     const user = this.userId();
-    if (!user || !this.hasAccount(account)) return null;
+    if (!user || !this.isGmail(account)) return null;
     return { changed: await accountMailbox(this.env, user, account).unqueueMonths(months) };
   }
 
@@ -2115,11 +2250,69 @@ export class MailboxDO extends DurableObject<Env> {
     return this.accountList().some((a) => a.id === id);
   }
 
-  /** The person's accounts (id, email), kept in memory once read: connect and disconnect are the only writers. */
-  private accountsKept: { id: string; email: string }[] | null = null;
-  private accountList(): { id: string; email: string }[] {
-    this.accountsKept ??= this.ctx.storage.sql.exec<{ id: string; email: string }>(`SELECT id, email FROM accounts ORDER BY added_at`).toArray();
+  /** A Gmail account (not an archive): the only kind that syncs, counts and backfills from Gmail. */
+  private isGmail(id: string): boolean {
+    return this.accountList().some((a) => a.id === id && a.kind === 'gmail');
+  }
+
+  /** Whether `id` is one of this person's mailboxes, Gmail or archive: what the archive pages check. */
+  async hasMailbox(id: string): Promise<boolean> {
+    return this.hasAccount(id);
+  }
+
+  async accountKind(id: string): Promise<'gmail' | 'archive' | null> {
+    return this.accountList().find((a) => a.id === id)?.kind ?? null;
+  }
+
+  /** The person's mailboxes (id, name, kind), kept in memory once read: adding and removing are the only writers. */
+  private accountsKept: { id: string; email: string; kind: 'gmail' | 'archive' }[] | null = null;
+  private accountList(): { id: string; email: string; kind: 'gmail' | 'archive' }[] {
+    this.accountsKept ??= this.ctx.storage.sql
+      .exec<{ id: string; email: string; kind: 'gmail' | 'archive' }>(`SELECT id, email, kind FROM accounts ORDER BY added_at`)
+      .toArray();
     return this.accountsKept;
+  }
+
+  /** Add an archive mailbox for an mbox file whose upload has just begun. */
+  async addArchive(id: string, name: string, record: ArchiveRecord): Promise<void> {
+    const at = new Date().toISOString();
+    const { rowsWritten } = this.ctx.storage.sql.exec(
+      `INSERT INTO accounts (id, email, refresh_token, scopes, added_at, tested_at, test_error, kind, archive) VALUES (?, ?, '', '', ?, ?, NULL, 'archive', ?)`,
+      id, name, at, at, JSON.stringify(record),
+    );
+    this.accountsKept = null;
+    this.count({ do_rows_written: rowsWritten });
+  }
+
+  /** An archive's file and upload, as saved; null for a Gmail account or none. */
+  async archiveRecord(id: string): Promise<ArchiveRecord | null> {
+    const row = this.ctx.storage.sql.exec<{ archive: string | null }>(`SELECT archive FROM accounts WHERE id = ? AND kind = 'archive'`, id).toArray()[0];
+    return row?.archive ? (JSON.parse(row.archive) as ArchiveRecord) : null;
+  }
+
+  /** Change an archive's record (its status, say). Returns it as saved, or null for no such archive. */
+  async setArchive(id: string, change: Partial<ArchiveRecord>): Promise<ArchiveRecord | null> {
+    const current = await this.archiveRecord(id);
+    if (!current) return null;
+    const next = { ...current, ...change };
+    const { rowsWritten } = this.ctx.storage.sql.exec(`UPDATE accounts SET archive = ? WHERE id = ?`, JSON.stringify(next), id);
+    this.count({ do_rows_written: rowsWritten });
+    // The import runs on its own; the watchdog restarts it if its run dies.
+    if (change.status === 'importing') {
+      this.watching = true;
+      await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
+    }
+    return next;
+  }
+
+  /** Remove an archive mailbox. Returns its record, so the Worker can drop an unfinished upload. */
+  async removeArchive(id: string): Promise<ArchiveRecord | null> {
+    const record = await this.archiveRecord(id);
+    if (!record) return null;
+    this.ctx.storage.sql.exec(`DELETE FROM accounts WHERE id = ?`, id);
+    this.accountsKept = null;
+    this.count({ do_rows_written: 1 });
+    return record;
   }
 
   /** Save a change to one schedule; an unknown schedule or a change it can't take is refused. */
@@ -2203,18 +2396,31 @@ export class MailboxDO extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     // Mailboxes from before schedules ran have no alarm yet; the first visit sets it.
     if ((await this.ctx.storage.getAlarm()) === null) await this.armSync();
-    const accounts = sql
-      .exec<{ id: string; email: string; scopes: string; added_at: string; tested_at: string; test_error: string | null }>(
-        `SELECT id, email, scopes, added_at, tested_at, test_error FROM accounts ORDER BY added_at`,
+    const user = this.userId();
+    const rows = sql
+      .exec<{ id: string; email: string; scopes: string; added_at: string; tested_at: string; test_error: string | null; kind: 'gmail' | 'archive'; archive: string | null }>(
+        `SELECT id, email, scopes, added_at, tested_at, test_error, kind, archive FROM accounts ORDER BY added_at`,
       )
-      .toArray()
+      .toArray();
+    // An archive's import count is its mailbox's: one call each, only while it imports.
+    const imported = new Map<string, number>();
+    for (const a of rows)
+      if (a.kind === 'archive' && user && a.archive && (JSON.parse(a.archive) as ArchiveRecord).status !== 'uploading')
+        imported.set(a.id, (await accountMailbox(this.env, user, a.id).syncState())?.copied ?? 0);
+    const accounts = rows
       .map((a): ConnectedAccount => {
+        if (a.kind === 'archive') {
+          const r = JSON.parse(a.archive ?? '{}') as ArchiveRecord;
+          const archive: ArchiveImport = { file: r.file, bytes: r.bytes, messages: r.messages, imported: imported.get(a.id) ?? 0, status: r.status, error: r.error };
+          return { id: a.id, email: a.email, addedAt: a.added_at, read: true, modify: false, test: { at: a.tested_at, ok: true, detail: null, error: null }, kind: 'archive', archive };
+        }
         const scopes = a.scopes.split(' ');
         const modify = scopes.includes(GMAIL_SCOPES.modify);
         const read = modify || scopes.includes(GMAIL_SCOPES.readonly);
         return {
           id: a.id,
           email: a.email,
+          kind: 'gmail',
           addedAt: a.added_at,
           read,
           modify,
