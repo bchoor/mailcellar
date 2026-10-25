@@ -1,6 +1,6 @@
 // The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
 // mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
-import { type FilterToken, LumenLayout, type LumenTab, LumenTabs, LumenSavedWidget, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
+import { type FilterToken, LumenLayout, type LumenTab, LumenTabs, LumenSavedWidget, type ServerGroups, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
@@ -11,14 +11,17 @@ import {
   type DomainRow,
   type GmailLabels,
   type LabelRow,
+  MESSAGE_GROUPS,
   MESSAGE_PAGE_SIZES,
   type MessageFilter,
+  type MessageGroups,
   type MessagePage,
   type MessageRow,
+  type MessageSort,
   type MonthRow,
   type SenderRow,
 } from '@mailcellar/schema';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import {
   AtSignIcon,
@@ -295,6 +298,8 @@ function Clip({ text, w }: { text: string; w: string }) {
 type MessageView = MessageRow & { labelNames: string[]; chips: Chip[]; unread: boolean; important: boolean; category: string; period: string; day: string };
 const MESSAGES: ViewDomain<MessageView> = {
   id: 'messages',
+  // The server pages and groups these rows; a pivot would cover one page only.
+  pivotNote: 'Pivot is off: the server pages these rows.',
   rowKey: (r) => r.id,
   text: (r) => [r.subject, r.fromAddr, r.fromName],
   fields: [
@@ -408,6 +413,9 @@ export function OverviewPage() {
   );
 }
 
+/** The Messages column each server order sorts. */
+const SORT_COLUMN: Record<MessageSort, string> = { date: 'date', from: 'from', size: 'size_kb' };
+
 /** The Messages page's chips as the server's filters; a chip it can't apply is left out. */
 function toFilters(tokens: FilterToken[], list: Period[], tz: string): MessageFilter[] {
   const byKey = new Map<string, FilterToken[]>();
@@ -448,6 +456,115 @@ function toFilters(tokens: FilterToken[], list: Period[], tz: string): MessageFi
   return out;
 }
 
+/** The group fields the server groups by (Period is grouped here, from the periods list). */
+const SERVER_GROUPS: readonly string[] = MESSAGE_GROUPS;
+
+/** Periods as exclusive spans, newest first: This week is the week before Yesterday, and so on. */
+function periodGroups(list: Period[]): { key: string; filter: MessageFilter }[] {
+  const out: { key: string; filter: MessageFilter }[] = [];
+  let end = Number.MAX_SAFE_INTEGER;
+  for (const p of list) {
+    const to = Math.min(p.to, end);
+    if (to <= p.from) continue;
+    out.push({ key: p.label, filter: { key: 'range', values: [`${p.from}..${to}`] } });
+    end = Math.min(end, p.from);
+  }
+  return out;
+}
+
+/**
+ * Messages grouped by the server: the picked field's groups (from the rollups, more on asking),
+ * and each open group's rows, a page at a time in the page's order. Null when not grouped.
+ */
+function useServerGroups(
+  id: string | null,
+  filters: MessageFilter[],
+  sort: { by: MessageSort; asc: boolean },
+  list: Period[],
+  toView: (m: MessageRow) => MessageView,
+): { groups: ServerGroups; grouped: boolean } {
+  const client = useQueryClient();
+  const [by, setBy] = useState<string | null>(null);
+  const key = JSON.stringify(filters);
+  const server = !!by && SERVER_GROUPS.includes(by);
+  const lists = useInfiniteQuery({
+    queryKey: ['message-groups', id, by, key],
+    enabled: !!id && server,
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam }): Promise<MessageGroups> => {
+      const qs = new URLSearchParams({ by: by!, ...(filters.length ? { f: key } : {}), ...(pageParam ? { after: pageParam } : {}) });
+      const res = await fetch(`/api/accounts/${id}/messages/groups?${qs}`);
+      if (!res.ok) throw new Error(`Couldn't load groups (${res.status})`);
+      return res.json();
+    },
+    getNextPageParam: (last) => last.next,
+  });
+  const found: { key: string; n: number | null; filter: MessageFilter }[] | null = !by
+    ? null
+    : server
+      ? (lists.data?.pages.flatMap((p) => p.groups) ?? null)
+      : by === 'period'
+        ? periodGroups(list).map((g) => ({ ...g, n: null }))
+        : null;
+  // Which groups are open, and how many pages each has asked for; the first opens by itself.
+  const [open, setOpen] = useState<Map<string, number> | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new grouping, filter or order starts closed.
+  useEffect(() => setOpen(null), [by, key, id, sort.by, sort.asc]);
+  const opened = open ?? new Map(found?.length ? [[found[0].key, 1]] : []);
+  const shown = (found ?? []).filter((g) => opened.has(g.key));
+  const pages = useQueries({
+    queries: shown.flatMap((g) =>
+      Array.from({ length: opened.get(g.key)! }, (_, i) => ({
+        queryKey: ['message-group-rows', id, by, key, g.key, sort.by, sort.asc, i],
+        queryFn: async (): Promise<MessagePage> => {
+          // Page i starts where page i-1 ended (already loaded: Show more asks only after it shows).
+          const prev = i ? client.getQueryData<MessagePage>(['message-group-rows', id, by, key, g.key, sort.by, sort.asc, i - 1]) : null;
+          const f = JSON.stringify([...filters, g.filter]);
+          const qs = new URLSearchParams({ size: '50', f, ...(prev?.next ? { cursor: prev.next } : {}), ...(sort.asc ? { asc: '1' } : {}), ...(sort.by !== 'date' ? { sort: sort.by } : {}) });
+          const res = await fetch(`/api/accounts/${id}/messages?${qs}`);
+          if (!res.ok) throw new Error(`Couldn't load messages (${res.status})`);
+          return res.json();
+        },
+        enabled: !!id,
+        staleTime: 60_000,
+      })),
+    ),
+  });
+  let at = 0;
+  const rowsOf = new Map<string, { rows: MessageView[]; next: boolean; loading: boolean }>();
+  for (const g of shown) {
+    const mine = pages.slice(at, at + opened.get(g.key)!);
+    at += mine.length;
+    const last = mine[mine.length - 1];
+    rowsOf.set(g.key, {
+      rows: mine.flatMap((p) => p.data?.rows ?? []).map(toView),
+      next: !!last?.data?.next,
+      loading: mine.some((p) => p.isPending),
+    });
+  }
+  const groups: ServerGroups = {
+    onGroup: setBy,
+    list: found?.map((g) => {
+      const r = rowsOf.get(g.key);
+      return {
+        key: g.key,
+        n: g.n,
+        open: opened.has(g.key),
+        rows: r?.rows ?? [],
+        loading: r?.loading,
+        more: r?.next && !r.loading ? () => setOpen(new Map(opened).set(g.key, opened.get(g.key)! + 1)) : undefined,
+      };
+    }) ?? null,
+    more: server && lists.hasNextPage ? () => void lists.fetchNextPage() : undefined,
+    onToggle: (k) => {
+      const next = new Map(opened);
+      next.has(k) ? next.delete(k) : next.set(k, 1);
+      setOpen(next);
+    },
+  };
+  return { groups, grouped: !!found };
+}
+
 export function MessagesPage() {
   const id = useMailbox().account?.id ?? null;
   const { timeZone } = usePrefs();
@@ -470,8 +587,9 @@ export function MessagesPage() {
   // Page n starts after cursors[n]; each page read adds the next one's.
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [page, setPage] = useState(0);
-  // The server sorts by date only (its index is on time): newest first unless the header says oldest.
-  const [asc, setAsc] = useState(false);
+  // The server sorts by the columns it has an index for (Date, Sender, Size): newest first by default.
+  const [sort, setSort] = useState<{ by: MessageSort; asc: boolean }>({ by: 'date', asc: false });
+  const asc = sort.asc;
   const list = useMemo(() => periods(Date.now(), timeZone), [timeZone]);
   // A category tab is one more chip the server applies, ANDed with the person's.
   const filters = useMemo(
@@ -484,13 +602,26 @@ export function MessagesPage() {
   useEffect(() => {
     setCursors([null]);
     setPage(0);
-  }, [key, size, id, asc]);
+  }, [key, size, id, sort.by, asc]);
   const cursor = cursors[page] ?? null;
+  const toView = (m: MessageRow): MessageView => ({
+    ...m,
+    labelNames: labelNames(m.labels),
+    chips: userLabels(m.labels),
+    unread: m.labels.includes('UNREAD'),
+    important: m.labels.includes('IMPORTANT'),
+    category: categoryOf(m.labels),
+    period: periodOf(list, m.ts),
+    day: localDay(m.ts, timeZone),
+  });
+  const { groups, grouped } = useServerGroups(id, filters, sort, list, toView);
   const messages = useQuery({
-    queryKey: ['messages', id, key, size, cursor, asc],
+    // Grouped, each open group loads its own rows instead.
+    enabled: !grouped,
+    queryKey: ['messages', id, key, size, cursor, sort.by, asc],
     queryFn: async (): Promise<MessagePage | null> => {
       if (!id) return null;
-      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}), ...(asc ? { asc: '1' } : {}) });
+      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}), ...(asc ? { asc: '1' } : {}), ...(sort.by !== 'date' ? { sort: sort.by } : {}) });
       const res = await fetch(`/api/accounts/${id}/messages?${qs}`);
       if (!res.ok) throw new Error(`Couldn't load messages (${res.status})`);
       return res.json();
@@ -498,6 +629,13 @@ export function MessagesPage() {
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === id && prevQuery?.queryKey[2] === key ? prev : undefined),
   });
   const data = messages.data;
+  // The orders the server serves, kept while grouped (no flat page loads then).
+  const [sorts, setSorts] = useState('date');
+  const sortsNow = data?.sorts.join(',');
+  useEffect(() => {
+    if (sortsNow) setSorts(sortsNow);
+  }, [sortsNow]);
+  const serverSorts = useMemo(() => sorts.split(',').map((x) => SORT_COLUMN[x as MessageSort]), [sorts]);
   useEffect(() => {
     if (!data || messages.isPlaceholderData) return;
     setCursors((c) => (c[page + 1] === data.next ? c : [...c.slice(0, page + 1), data.next]));
@@ -508,7 +646,9 @@ export function MessagesPage() {
   );
   // A category tab holds one category, so its column says nothing there; the saved view keeps it for All.
   const byCategory = tab !== 'all' && config.columns.includes('category');
-  const shown = byCategory ? { ...config, columns: config.columns.filter((c) => c !== 'category') } : config;
+  // A Pivot shape shows as a table: the server pages these rows.
+  const flat = config.shape === 'pivot' ? { ...config, shape: 'table' as const } : config;
+  const shown = byCategory ? { ...flat, columns: flat.columns.filter((c) => c !== 'category') } : flat;
   const at = config.columns.indexOf('category');
   const onConfig = (next: typeof config) =>
     setConfig(
@@ -516,16 +656,7 @@ export function MessagesPage() {
         ? { ...next, columns: [...next.columns.slice(0, at), 'category', ...next.columns.slice(at)] }
         : next,
     );
-  const rows = (data?.rows ?? []).map((m) => ({
-    ...m,
-    labelNames: labelNames(m.labels),
-    chips: userLabels(m.labels),
-    unread: m.labels.includes('UNREAD'),
-    important: m.labels.includes('IMPORTANT'),
-    category: categoryOf(m.labels),
-    period: periodOf(list, m.ts),
-    day: localDay(m.ts, timeZone),
-  }));
+  const rows = (data?.rows ?? []).map(toView);
   const loaded = !!data && !messages.isPlaceholderData;
   const crumbs = useMailboxCrumbs('Messages');
   // A row click opens the message in the drawer.
@@ -570,8 +701,15 @@ export function MessagesPage() {
         onPage: (p) => setPage(Math.max(0, Math.min(p, cursors.length - 1))),
         onSize: setSize,
         sizes: MESSAGE_PAGE_SIZES,
-        sorts: ['date'],
-        onSort: (s) => setAsc(s?.key === 'date' && !s.desc),
+        // Sender and Size sort once their indexes are built; until then only Date does.
+        sorts: serverSorts,
+        groups,
+        onSort: (s) => {
+          const by = (Object.keys(SORT_COLUMN) as MessageSort[]).find((x) => SORT_COLUMN[x] === s?.key) ?? 'date';
+          const next = !!s && !s.desc;
+          // Told on every render that holds a sort, not only on a click: keep the same object then.
+          setSort((c) => (c.by === by && c.asc === next ? c : { by, asc: next }));
+        },
       }}
     />
     {id && <MessageDrawer account={id} row={opened} chips={opened?.chips ?? []} rows={data?.rows ?? []} onClose={() => setOpened(null)} />}
