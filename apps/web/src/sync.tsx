@@ -13,9 +13,9 @@ import { Progress } from '@columenlabs/lumen-ui/ui/progress';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
 import { addMonths, monthRange, type AccountCoverage, type BackfillStatus, type MonthCoverage, type SyncOverview, type SyncSummary, type AccountStatus, type QuotaMeter, quotaStop } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
+import { Link, useSearch } from '@tanstack/react-router';
 import { CalendarRangeIcon, ChevronDownIcon, GaugeIcon, MailIcon, DatabaseIcon, HourglassIcon, ListChecksIcon, ListTodoIcon, ListXIcon, Loader2Icon, PauseIcon, PlayIcon, RefreshCwIcon } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { EmptyState } from './archive';
 import { AccountLimits, AccountLimitsTools, useQuota } from './quota';
 
@@ -716,13 +716,19 @@ function MailboxesMap({ accounts }: { accounts: SyncOverview['accounts'] }) {
   // A phone's name column fits the address or the status, not both: it keeps the address.
   const mobile = useIsMobile();
   // The picked mailbox is the card's Mailbox chip: the card's colour shares it with the cards below.
-  const filter = useLumenFilter(accounts, MAILBOX_FIELDS, { initial: [{ key: 'mailbox', value: accounts[0].email }] });
+  // A mailbox's name links to this page with ?mailbox=, which picks it.
+  const asked = (useSearch({ strict: false }) as { mailbox?: string }).mailbox;
+  const filter = useLumenFilter(accounts, MAILBOX_FIELDS, { initial: [{ key: 'mailbox', value: asked ?? accounts[0].email }] });
   const picked = accounts.find((a) => a.email === filter.tokens.find((t) => t.key === 'mailbox')?.value);
   const pick = (email: string) => filter.setTokens([...filter.tokens.filter((t) => t.key !== 'mailbox'), { key: 'mailbox', value: email }]);
+  useEffect(() => {
+    if (asked && asked !== picked?.email) pick(asked);
+  }, [asked]);
+  const href = picked ? CSS.escape(`mailbox=${encodeURIComponent(picked.email)}`) : null;
   return (
     <div data-mailboxes className="min-w-0">
-      {/* The picked row's blocks carry the map's picked outline. */}
-      {picked && <style>{`[data-mailboxes] [data-cell^="${picked.id}|"]{outline:2px solid var(--color-foreground);outline-offset:1px}`}</style>}
+      {/* The picked mailbox's name is shaded, like a picked row in a list. */}
+      {href && <style>{`[data-mailboxes] span:has(> span > a[href*="${href}"]){background:color-mix(in oklab,var(--color-primary) 10%,transparent);border-radius:6px}[data-mailboxes] a[href*="${href}"]{color:var(--color-primary)}`}</style>}
       <LumenCoverageMap
       source={{
         ...backfillQuery,
@@ -744,7 +750,10 @@ function MailboxesMap({ accounts }: { accounts: SyncOverview['accounts'] }) {
       title="Mailboxes"
       stateLabels={STATE_LABELS}
       icon={MailIcon}
-      rows={{ title: 'Mailbox' }}
+      rows={{ title: 'Mailbox', link: (row) => {
+        const a = accounts.find((x) => x.id === row);
+        return a && { to: '/backfill', search: { mailbox: a.email } };
+      } }}
       block="year"
       zoom={['month', 'quarter', 'year']}
       unit="messages"
@@ -757,7 +766,7 @@ function MailboxesMap({ accounts }: { accounts: SyncOverview['accounts'] }) {
       }}
       filter={<LumenTokenizedFilter filter={filter} placeholder="Mailbox" label="Mailbox" />}
       filterCount={filter.tokens.length}
-      hint={accounts.length > 1 ? 'Tap a row to show that mailbox below.' : undefined}
+      hint={accounts.length > 1 ? 'Tap a mailbox to show it below.' : undefined}
       />
     </div>
   );
