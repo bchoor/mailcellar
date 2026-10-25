@@ -12,6 +12,18 @@ const metrics = QUOTA_METRICS;
 type Limits = ReturnType<typeof quotaLimits>;
 /** Cloudflare's figures are read again after this. */
 export const CF_READ_MS = 5 * 60_000;
+/** How long the end-to-end test switch lasts once set. */
+export const TEST_MS = 30 * 60_000;
+
+/** The control review's test switch: a low DO-write stop with a near reset, and a lower spend stop. */
+export interface TestLimit {
+  /** DO rows written today past which indexing waits, until resetAt; null leaves the real stop. */
+  doStop: number | null;
+  resetAt: string;
+  /** Dollars; null leaves SPEND.stop. Never above it. */
+  spendStop: number | null;
+  expiresAt: string;
+}
 /** The UTC day a meter's period started: today, or the billing period's first day. */
 const periodKey = (limits: Limits, metric: QuotaMetric, now: Date, billing: BillingPeriod | null) => quotaStart(limits[metric].period, now, billing);
 
@@ -315,12 +327,44 @@ export class QuotaDO extends DurableObject<Env> {
   async overBudget(next: Partial<SpendUse>): Promise<SpendOverview | null> {
     const s = await this.spend();
     const after = s.spent + spendCost({ ...NO_USE, ...next });
-    return after > SPEND.stop ? s : null;
+    return after > s.stop ? s : null;
   }
 
   async spend(): Promise<SpendOverview> {
     const use = await this.spendUse();
-    return { since: SPEND.since, cap: SPEND.cap, stop: SPEND.stop, spent: spendCost(use), use, readAt: this.spendCf?.at ? new Date(this.spendCf.at).toISOString() : null };
+    // The test switch can only lower the stop, never raise it.
+    const stop = Math.min(SPEND.stop, this.testLimit()?.spendStop ?? SPEND.stop);
+    return { since: SPEND.since, cap: SPEND.cap, stop, spent: spendCost(use), use, readAt: this.spendCf?.at ? new Date(this.spendCf.at).toISOString() : null };
+  }
+
+  /** The end-to-end test switch while it lasts (TEST_MS from when it was set), else null. */
+  private testLimit(now = new Date()): TestLimit | null {
+    const saved = this.meta('test_limit');
+    if (!saved) return null;
+    const t = JSON.parse(saved) as TestLimit;
+    return Date.parse(t.expiresAt) > now.getTime() ? t : null;
+  }
+
+  /**
+   * Set the test switch for TEST_MS, or clear it with null: a DO-write stop `doWrites` rows above
+   * today's use, a reset `resetMin` minutes away, and a lower spend stop. Admin only (index.ts).
+   */
+  async setTestLimit(o: { doWrites?: number; resetMin?: number; spendStop?: number } | null): Promise<TestLimit | null> {
+    if (!o) {
+      this.setMeta('test_limit', null);
+      return null;
+    }
+    const now = new Date();
+    await this.refresh(now);
+    const t: TestLimit = {
+      doStop: o.doWrites === undefined ? null : this.used('do_rows_written', now).used + o.doWrites,
+      resetAt: new Date(now.getTime() + (o.resetMin ?? 3) * 60_000).toISOString(),
+      spendStop: o.spendStop ?? null,
+      expiresAt: new Date(now.getTime() + TEST_MS).toISOString(),
+    };
+    this.setMeta('test_limit', JSON.stringify(t));
+    console.log(JSON.stringify({ testLimit: t }));
+    return t;
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -427,6 +471,10 @@ export class QuotaDO extends DurableObject<Env> {
   async reserve(cost: QuotaUse): Promise<{ metric: QuotaMetric; label: string; resumesAt: string } | null> {
     const now = new Date();
     await this.refresh(now);
+    // The test switch's DO-write stop holds indexing until its own near reset.
+    const test = this.testLimit(now);
+    if (test?.doStop != null && cost.do_rows_written && now.getTime() < Date.parse(test.resetAt) && this.used('do_rows_written', now).used + cost.do_rows_written > test.doStop)
+      return { metric: 'do_rows_written', label: this.limits.do_rows_written.label, resumesAt: test.resetAt };
     for (const m of metrics) {
       if (!cost[m]) continue;
       const { limit, label, period, hard } = this.limits[m];
@@ -492,7 +540,11 @@ export class QuotaDO extends DurableObject<Env> {
         })
       : [];
     const tried = this.meta('tried_at');
-    const over = meters.find((m) => m.hard && m.used >= m.limit * quotaStop(m.metric));
+    const test = this.testLimit(now);
+    const testHeld = test?.doStop != null && now.getTime() < Date.parse(test.resetAt) && this.used('do_rows_written', now).used >= test.doStop;
+    const over = testHeld
+      ? { metric: 'do_rows_written' as const, label: this.limits.do_rows_written.label, resetsAt: test.resetAt }
+      : meters.find((m) => m.hard && m.used >= m.limit * quotaStop(m.metric));
     return {
       plan: this.plan,
       planReadAt: this.meta('plan_read_at'),

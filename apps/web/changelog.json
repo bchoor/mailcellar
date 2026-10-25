@@ -1,5 +1,42 @@
 [
   {
+    "tag": "v0.0.7",
+    "sha": "d1e0778cf670745ffe563a45dde48aef769632c6",
+    "published_at": "2026-10-25T00:31:51Z",
+    "takeaways": [
+      {
+        "text": "**Messages sorts across all your mail**: On the Messages page, clicking the Date header now sorts all your mail, newest or oldest first, instead of only the 50 rows on screen.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Indexing card shows real status**: On the Backfill page, the Indexing card now reads Running from the start of an index run, and Waiting (with the reset time) when the daily limit is holding it, instead of Idle.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Indexed months show as done**: On the Backfill map and in the Backfills list, a month marked indexed now shows as done instead of a stuck count like \"Indexing 1,885 of 1,886\".",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Stalled work restarts by itself**: On the Backfill page, a copy run stuck on \"Copying paused: daily limit\" with Resume disabled now restarts, and stopped copying, syncing or indexing is picked up within 5 minutes even when no page is open.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Cleaner Copying and Indexing cards**: On the Backfill page, the Copying and Indexing panels sit side by side with six equal cards on one row on desktop, and the \"DO writes today\" card shows writes with reads underneath.",
+        "types": [
+          "improvement"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.6",
     "sha": "dec911078594fb624c96b94f46ffffad5b19fcd8",
     "published_at": "2026-10-24T23:51:26Z",

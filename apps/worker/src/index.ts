@@ -1,6 +1,6 @@
 import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, messageFilters, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
-import { filters, labelColors, subscriptions, withGmail } from './gmail-settings';
+import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
 import { attachment, openMessage } from './message';
 import { accountQuota } from './quota';
@@ -179,13 +179,19 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     return Response.json(page, { headers: noStore });
   }
   // One Gmail account's pages: its archive (its own mailbox DO) and its Gmail settings (read live).
-  const scoped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/(archive\/[a-z]+|filters|subscriptions|label-colors)$/);
+  const scoped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/(archive\/[a-z]+|filters|subscriptions|labels)$/);
   if (scoped && request.method === 'GET') {
     const [, id, page] = scoped;
     const refreshToken = await mailbox.accountToken(id);
     if (!refreshToken) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
-    if (page === 'filters' || page === 'subscriptions' || page === 'label-colors') {
-      const body = await withGmail<object>(env, refreshToken, page === 'filters' ? filters : page === 'label-colors' ? labelColors : subscriptions);
+    if (page === 'labels') {
+      const body = await withGmail(env, refreshToken, gmailLabels);
+      // The index named its labels once, at the first sync; catch up on any renamed or made since.
+      if (!('error' in body)) await accountMailbox(env, who.user, id).nameLabels(body);
+      return Response.json(body, { status: 'error' in body ? 502 : 200, headers: noStore });
+    }
+    if (page === 'filters' || page === 'subscriptions') {
+      const body = await withGmail<object>(env, refreshToken, page === 'filters' ? filters : subscriptions);
       return Response.json(body, { status: 'error' in body ? 502 : 200, headers: noStore });
     }
     const view = page.slice('archive/'.length) as ArchiveView;
@@ -209,6 +215,22 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     return Response.json(await accountQuota(env).overview(), { headers: noStore });
   if (url.pathname === '/api/quota/refresh' && request.method === 'POST')
     return Response.json(await accountQuota(env).readNow(), { headers: noStore });
+  if (url.pathname === '/api/admin/test-limit' && (request.method === 'PUT' || request.method === 'DELETE')) {
+    // The end-to-end test switch, for 30 minutes: {"doWrites": 500, "resetMin": 3, "spendStop": 0.2}. Admins only.
+    const admins = (env.ADMIN_EMAILS ?? '').toLowerCase().split(',').map((e) => e.trim()).filter(Boolean);
+    if (!admins.includes(email.toLowerCase())) return Response.json({ error: 'forbidden' }, { status: 403, headers: noStore });
+    if (request.method === 'DELETE') return Response.json({ test: await accountQuota(env).setTestLimit(null) }, { headers: noStore });
+    let body: { doWrites?: unknown; resetMin?: unknown; spendStop?: unknown };
+    try {
+      body = JSON.parse((await request.text()).slice(0, 1024));
+    } catch {
+      return Response.json({ error: 'bad_json' }, { status: 400 });
+    }
+    const num = (v: unknown, max: number) => (v === undefined ? undefined : typeof v === 'number' && v >= 0 && v <= max ? v : NaN);
+    const o = { doWrites: num(body.doWrites, 50_000), resetMin: num(body.resetMin, 30), spendStop: num(body.spendStop, 1) };
+    if (Object.values(o).some((v) => Number.isNaN(v))) return Response.json({ error: 'bad_limit' }, { status: 400 });
+    return Response.json({ test: await accountQuota(env).setTestLimit(o) }, { headers: noStore });
+  }
   if (url.pathname === '/api/schedules' && request.method === 'GET')
     return Response.json(await mailbox.schedules(), { headers: noStore });
   const schedule = url.pathname.match(/^\/api\/schedules\/([a-z-]{1,40})$/);

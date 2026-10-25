@@ -59,6 +59,8 @@ export const r2Keys = {
   stagedPrefix: (user: UserId, account: string, month?: string) => `${accountPrefix(user, account)}staged/${month ? `${safeMonth(month)}_` : ''}`,
   /** The message IDs a month has in Basin, written when it lands: what copying it again skips. */
   copied: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}copied/${safeMonth(month)}.json`,
+  /** The message IDs Gmail lists for a month, saved when its index is built: what the month counts as in Basin. */
+  listed: (user: UserId, account: string, month: string) => `${accountPrefix(user, account)}listed/${safeMonth(month)}.json`,
   /** Which run is the account's Basin committer, and when it last checked in. */
   committer: (user: UserId, account: string) => `${accountPrefix(user, account)}committer.json`,
   attachment: (user: UserId, sha256: string) => {

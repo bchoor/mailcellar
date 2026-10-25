@@ -10,6 +10,7 @@ import {
   type ArchiveRows,
   type ArchiveView,
   type IndexedMessage,
+  type GmailLabels,
   type MailLabel,
   checkScheduleChange,
   DEFAULT_SCHEDULES,
@@ -235,7 +236,8 @@ export class MailboxDO extends DurableObject<Env> {
         // Months copied before Basin came first went to Basin and the index together.
         ...(basin
           ? {
-              copied: Math.max(indexed, basin.copied),
+              // Once indexed, Basin's count against Gmail's list of the month; the index counts by message date.
+              copied: basin.indexed_at !== null ? basin.copied : Math.max(indexed, basin.copied),
               inBasin: basin.copied,
               landed: basin.landed_at !== null,
               indexState: basin.landed_at === null ? null : basin.indexed_at !== null ? 'done' : 'queued',
@@ -454,7 +456,11 @@ export class MailboxDO extends DurableObject<Env> {
 
   private meta<T>(key: string): T | null {
     const row = this.ctx.storage.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key).toArray()[0];
-    return row ? (JSON.parse(row.value) as T) : null;
+    if (!row) return null;
+    const value = JSON.parse(row.value) as T;
+    // Syncs saved before the rename call waiting for a daily limit 'paused'.
+    if (key === 'sync' && (value as { phase?: string }).phase === 'paused') (value as { phase: string }).phase = 'waiting';
+    return value;
   }
 
   private putMeta(key: string, value: unknown): number {
@@ -869,6 +875,17 @@ export class MailboxDO extends DurableObject<Env> {
     });
   }
 
+  /** Give indexed labels Gmail's current names; writes only the rows whose name changed. */
+  async nameLabels(labels: GmailLabels): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    let written = 0;
+    this.ctx.storage.transactionSync(() => {
+      for (const [id, l] of Object.entries(labels))
+        written += sql.exec(`UPDATE labels SET name = ?, type = ? WHERE id = ? AND (name IS NOT ? OR type IS NOT ?)`, l.name, l.type, id, l.name, l.type).rowsWritten;
+    });
+    if (written) this.count({ do_rows_written: written });
+  }
+
   /** Backfill months waiting or being copied. */
   async activeList(): Promise<string[]> {
     return [...this.activeMonths().keys()].sort();
@@ -1177,7 +1194,7 @@ export class MailboxDO extends DurableObject<Env> {
              n = n + excluded.n, bytes = bytes + excluded.bytes`,
           month, t.n, t.bytes,
         );
-      // A label Gmail has not named yet keeps its ID as its name until putLabels runs.
+      // A label Gmail has not named yet keeps its ID as its name until putLabels or nameLabels runs.
       for (const [id, t] of labels)
         run(
           `INSERT INTO labels VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET
@@ -1518,7 +1535,7 @@ export class MailboxDO extends DurableObject<Env> {
    * replaces it now; the sleeping one finds another run ID when it wakes, and stops.
    */
   private async pauseLifted(state: SyncState): Promise<boolean> {
-    if (state.phase !== 'paused' || syncStatus(state) !== 'waiting') return false;
+    if (state.phase !== 'waiting' || syncStatus(state) !== 'waiting') return false;
     return !(await accountQuota(this.env).reserve(RUN_COST));
   }
 
