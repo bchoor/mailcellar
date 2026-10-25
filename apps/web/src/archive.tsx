@@ -499,12 +499,28 @@ function useServerGroups(
     },
     getNextPageParam: (last) => last.next,
   });
+  // Period's groups are the periods list; their counts come from the server, unfiltered only.
+  const spans = useMemo(() => (by === 'period' ? periodGroups(list) : []), [by, list]);
+  const counts = useQuery({
+    queryKey: ['message-periods', id, spans.map((g) => g.filter.values[0]).join(',')],
+    enabled: !!id && spans.length > 0 && !filters.length,
+    queryFn: async (): Promise<{ n: number[] }> => {
+      const res = await fetch(`/api/accounts/${id}/messages/periods?spans=${spans.map((g) => g.filter.values[0]).join(',')}`);
+      if (!res.ok) throw new Error(`Couldn't count periods (${res.status})`);
+      return res.json();
+    },
+    staleTime: 60_000,
+  });
   const found: { key: string; n: number | null; filter: MessageFilter }[] | null = !by
     ? null
     : server
       ? (lists.data?.pages.flatMap((p) => p.groups) ?? null)
       : by === 'period'
-        ? periodGroups(list).map((g) => ({ ...g, n: null }))
+        ? filters.length
+          ? spans.map((g) => ({ ...g, n: null }))
+          : counts.data
+            ? spans.map((g, i) => ({ ...g, n: counts.data.n[i] ?? null })).filter((g) => g.n !== 0)
+            : null
         : null;
   // Which groups are open, and how many pages each has asked for; the first opens by itself.
   const [open, setOpen] = useState<Map<string, number> | null>(null);
@@ -561,8 +577,9 @@ function useServerGroups(
       next.has(k) ? next.delete(k) : next.set(k, 1);
       setOpen(next);
     },
+    onToggleAll: (all) => setOpen(new Map(all ? (found ?? []).map((g) => [g.key, opened.get(g.key) ?? 1]) : [])),
   };
-  return { groups, grouped: !!found };
+  return { groups, grouped: server || by === 'period' };
 }
 
 export function MessagesPage() {
@@ -590,7 +607,12 @@ export function MessagesPage() {
   // The server sorts by the columns it has an index for (Date, Sender, Size): newest first by default.
   const [sort, setSort] = useState<{ by: MessageSort; asc: boolean }>({ by: 'date', asc: false });
   const asc = sort.asc;
-  const list = useMemo(() => periods(Date.now(), timeZone), [timeZone]);
+  // Every year back to the oldest month indexed, for Period's groups.
+  const oldest = useMemo(() => {
+    const first = months.data?.reduce((a, m) => (m.month < a ? m.month : a), '9999-12');
+    return first && first !== '9999-12' ? Date.UTC(Number(first.slice(0, 4)), Number(first.slice(5, 7)) - 1) : undefined;
+  }, [months.data]);
+  const list = useMemo(() => periods(Date.now(), timeZone, oldest), [timeZone, oldest]);
   // A category tab is one more chip the server applies, ANDed with the person's.
   const filters = useMemo(
     () => toFilters(tab === 'all' ? tokens : [{ key: 'category', value: tab } as FilterToken, ...tokens], list, timeZone),
@@ -656,8 +678,9 @@ export function MessagesPage() {
         ? { ...next, columns: [...next.columns.slice(0, at), 'category', ...next.columns.slice(at)] }
         : next,
     );
-  const rows = (data?.rows ?? []).map(toView);
-  const loaded = !!data && !messages.isPlaceholderData;
+  // Grouped, the groups bring their own rows: the flat page's stay out of the count.
+  const rows = grouped ? [] : (data?.rows ?? []).map(toView);
+  const loaded = !grouped && !!data && !messages.isPlaceholderData;
   const crumbs = useMailboxCrumbs('Messages');
   // A row click opens the message in the drawer.
   const [opened, setOpened] = useState<MessageView | null>(null);
@@ -668,9 +691,10 @@ export function MessagesPage() {
       {data?.partial ? 'None in the mail searched so far. Next page keeps searching.' : 'Text search looks at the subject, the sender and the first lines of each message.'}
     </EmptyState>
   );
-  const seen = page * size + rows.length;
+  const seen = page * size + (data?.rows.length ?? 0);
   const meta =
-    loaded &&
+    !!data &&
+    !messages.isPlaceholderData &&
     [
       data.total !== null ? `${count(data.total)} messages` : `${count(seen)}${data.next ? '+' : ''} matching`,
       data.partial ? 'searching on' : '',

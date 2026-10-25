@@ -1375,6 +1375,40 @@ export class MailboxDO extends DurableObject<Env> {
    * the rollup's, so they hold for the whole mailbox only: under other filters each is null.
    * Senders and domains page on their n index, GROUPS_PAGE at a time; the rest come whole.
    */
+  /**
+   * How many messages each time span holds, for Group by Period. Whole UTC months come from the
+   * months rollup; the rest (a week, a day, a time zone's hours at a month's edge) is counted off
+   * the ts index, a read per message there.
+   */
+  async periodCounts(spans: [number, number][]): Promise<number[]> {
+    const sql = this.ctx.storage.sql;
+    let read = 0;
+    const exec = <R extends Record<string, SqlStorageValue>>(query: string, ...args: number[]) => {
+      const c = sql.exec<R>(query, ...args);
+      read += c.rowsRead;
+      return c.toArray();
+    };
+    const months = new Map(exec<{ month: string; n: number }>(`SELECT month, n FROM months`).map((r) => [r.month, r.n]));
+    const count = (a: number, b: number) => (a < b ? exec<{ n: number }>(`SELECT count(*) AS n FROM messages WHERE ts >= ? AND ts < ?`, a, b)[0].n : 0);
+    const monthStart = (t: number, up: boolean) => {
+      const d = new Date(t);
+      const at = Date.UTC(d.getUTCFullYear(), d.getUTCMonth());
+      return up && at < t ? Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1) : at;
+    };
+    const out = spans.map(([from, to]) => {
+      to = Math.min(to, Date.now() + 86_400_000);
+      if (to <= from) return 0;
+      const a = monthStart(from, true);
+      const b = monthStart(to, false);
+      if (a >= b) return count(from, to);
+      let n = count(from, a) + count(b, to);
+      for (let m = a; m < b; m = monthStart(m + 32 * 86_400_000, false)) n += months.get(monthOf(m)) ?? 0;
+      return n;
+    });
+    this.count({ do_rows_read: read });
+    return out;
+  }
+
   async messageGroups(by: MessageGroupBy, filtered: boolean, after: string | null): Promise<MessageGroups> {
     const sql = this.ctx.storage.sql;
     let read = 0;

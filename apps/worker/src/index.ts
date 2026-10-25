@@ -170,6 +170,15 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     // A message never changes once copied: the app keeps it for the day.
     return detail ? Response.json(detail, { headers: { 'cache-control': 'private, max-age=86400' } }) : Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
   }
+  // How many messages each Period group holds (spans as from..to, comma separated).
+  const periods = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/periods$/);
+  if (periods && request.method === 'GET') {
+    if (!(await mailbox.accountToken(periods[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    const spans = (url.searchParams.get('spans') ?? '').split(',').map((v) => v.split('..').map(Number) as [number, number]);
+    if (!spans.length || spans.length > 40 || spans.some((x) => x.length !== 2 || !x.every(Number.isFinite))) return Response.json({ error: 'bad_spans' }, { status: 400, headers: noStore });
+    const n = await accountMailbox(env, who.user, periods[1]).periodCounts(spans);
+    return Response.json({ n }, { headers: noStore });
+  }
   // One page of an account's Messages groups (Group by), from the rollups.
   const grouped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/groups$/);
   if (grouped && request.method === 'GET') {
