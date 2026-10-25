@@ -290,8 +290,11 @@ function useCoverage(id: string) {
   return { ...backfillQuery, select: (s: BackfillStatus) => coverageOf(s, id) };
 }
 
-/** A month copied to Basin whose search index is still being built from it. */
-const indexing = (m: MonthCoverage) => m.landed && m.indexed < m.inBasin;
+/**
+ * A month copied to Basin whose search index is still being built from it. The server's index
+ * state decides (a month marked indexed is done, whatever its count); counts only without one.
+ */
+const indexing = (m: MonthCoverage) => (m.indexState !== undefined && m.indexState !== null ? m.indexState !== 'done' : m.landed && m.indexed < m.inBasin);
 
 /** A month's state on the map: Copying while a lane copies it, then Indexing until search has it all. */
 function monthState(m: MonthCoverage, copying: string[]): CoverageFact['state'] {
