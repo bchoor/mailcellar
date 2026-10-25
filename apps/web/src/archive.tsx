@@ -138,13 +138,21 @@ function useUserLabels() {
     staleTime: Infinity,
   });
   const mine = new Map((labels.data ?? []).filter((l) => l.type === 'user').map((l) => [l.id, l.name]));
-  return (ids: string[]): Chip[] => ids.filter((x) => mine.has(x)).map((x) => ({ name: mine.get(x)!, ...colors.data?.[x] }));
+  return (ids: string[]): Chip[] => [
+    ...FOLDERS.filter((f) => ids.includes(f.id)).map(({ id: _, ...c }) => c),
+    ...ids.filter((x) => mine.has(x)).map((x) => ({ name: mine.get(x)!, ...colors.data?.[x] })),
+  ];
 }
 interface Chip {
   name: string;
   bg?: string;
   fg?: string;
 }
+/** Gmail's Spam and Trash, shown as chips before the person's labels, in Gmail's colours. */
+const FOLDERS: (Chip & { id: string })[] = [
+  { id: 'SPAM', name: 'Spam', bg: '#fb4c2f', fg: '#ffffff' },
+  { id: 'TRASH', name: 'Trash', bg: '#999999', fg: '#ffffff' },
+];
 
 /** Label chips in their Gmail colours; past two, a +n with the rest on hover. */
 function Chips({ chips }: { chips: Chip[] }) {
@@ -274,7 +282,11 @@ const MESSAGES: ViewDomain<MessageView> = {
       ),
     },
     { key: 'category', label: 'Category', icon: InboxIcon, value: (r) => r.category, format: 'text', filterable: true, groupable: true },
-    { key: 'is', label: 'Read', icon: MailOpenIcon, value: (r) => (r.unread ? 'Unread' : 'Read'), format: 'text', filterable: true, groupable: true },
+    {
+      key: 'is', label: 'Read', icon: MailOpenIcon, value: (r) => (r.unread ? 'Unread' : 'Read'), format: 'text', filterable: true, groupable: true,
+      // is:spam and is:trash, as in Gmail, offered when the page has such mail.
+      values: (r) => [r.unread ? 'Unread' : 'Read', ...FOLDERS.filter((f) => r.labels.includes(f.id)).map((f) => f.name)],
+    },
     { key: 'period', label: 'Period', icon: CalendarClockIcon, value: (r) => r.period, format: 'text', filterable: true, groupable: true },
     { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.chips.map((c) => c.name).join(', '), values: (r) => r.chips.map((c) => c.name), format: 'text', filterable: true, groupable: true, render: (r) => <Chips chips={r.chips} /> },
     { key: 'size_kb', label: 'Size (KB)', icon: HardDriveIcon, value: (r) => Math.max(1, r.size / KB), format: 'rounded', aggregate: 'sum', filterable: true },
@@ -373,6 +385,7 @@ function toFilters(tokens: FilterToken[], list: Period[], tz: string): MessageFi
       const unread = values.some((v) => v.toLowerCase() === 'unread');
       const read = values.some((v) => v.toLowerCase() === 'read');
       if (unread !== read) out.push({ key: 'label', values: ['UNREAD'], not: read !== not });
+      for (const f of FOLDERS) if (values.some((v) => v.toLowerCase() === f.name.toLowerCase())) out.push({ key: 'label', values: [f.id], not });
     } else if (key === 'category') {
       // Categories are exclusive: Primary is having none of the other four.
       const picked = CATEGORIES.filter((c) => values.some((v) => v.toLowerCase() === c.toLowerCase())).map((c) => `CATEGORY_${c.toUpperCase()}`);
