@@ -192,6 +192,9 @@ interface StatusBook {
 const STATUS_V = 1;
 /** Backfill jobs the status keeps, newest first. */
 const JOBS_KEPT = 20;
+/** The Size sparkline: one point a minute over the last hour, kept in memory. */
+const SIZE_STEP_MS = 60_000;
+const SIZE_WINDOW_MS = 60 * 60_000;
 
 /** One per user and mailbox (see mailboxName). Holds that user's index, rollups, sync state and schedule. */
 export class MailboxDO extends DurableObject<Env> {
@@ -675,6 +678,8 @@ export class MailboxDO extends DurableObject<Env> {
   private live = new Map<string, { at: number; runId: string; copied: number; bytes: number; stopped?: boolean }>();
   /** Copy-rate samples (total copied over time), in memory only. */
   private samples: { at: string; copied: number }[] = [];
+  /** Size copied (as Gmail counts it), one point a minute for the last hour, in memory only: the Size tile's sparkline. */
+  private sizes: { at: string; bytes: number }[] = [];
   /** Gmail pacing for this account, msgvault's way: a token bucket that halves on a rate limit and recovers. */
   private bucket = { level: BUCKET.cap, at: 0, rate: BUCKET.rate, calmAt: 0 };
   /** Lanes with a batch in flight, until their next turn (or 30 s, if a run died mid-batch). */
@@ -757,6 +762,10 @@ export class MailboxDO extends DurableObject<Env> {
     const last = this.samples.at(-1);
     if (last && now - Date.parse(last.at) < 10_000) last.copied = copied;
     else this.samples = withRecent({ ...main, copied, recent: this.samples }, at);
+    const bytes = main.bytes + [...this.live.values()].reduce((n, l) => n + l.bytes, 0);
+    const point = this.sizes.at(-1);
+    if (point && now - Date.parse(point.at) < SIZE_STEP_MS) point.bytes = bytes;
+    else this.sizes = [...this.sizes.filter((p) => now - Date.parse(p.at) < SIZE_WINDOW_MS), { at, bytes }];
   }
 
   /** Every indexed message of a year, as ID, date and labels (reads only): for an audit against Gmail. */
@@ -1102,6 +1111,7 @@ export class MailboxDO extends DurableObject<Env> {
     jobs: BackfillJob[];
     indexed: number;
     index: { status: 'indexing' | 'waiting' | 'idle'; pausedFor?: string; resumesAt?: string };
+    sizes: { at: string; bytes: number }[];
   }> {
     const book = this.status();
     const wait = book.indexWait && Date.parse(book.indexWait.resumesAt) > Date.now() ? book.indexWait : null;
@@ -1111,6 +1121,7 @@ export class MailboxDO extends DurableObject<Env> {
       months: await this.coverageMonths(),
       jobs: structuredClone(book.jobs),
       indexed: this.indexedTotal(),
+      sizes: this.sizes.filter((p) => Date.now() - Date.parse(p.at) < SIZE_WINDOW_MS),
       index: wait
         ? { status: 'waiting', pausedFor: wait.label, resumesAt: wait.resumesAt }
         : { status: book.indexing.length ? 'indexing' : 'idle' },
@@ -1814,6 +1825,7 @@ export class MailboxDO extends DurableObject<Env> {
               current: monthNow(),
               jobs: v.jobs,
               totals: { indexed: v.indexed },
+              sizes: v.sizes,
             } satisfies AccountStatus;
           }),
         )
