@@ -10,6 +10,8 @@ export const SCOPES: Scope[] = [
     id: 'mail',
     name: 'MailCellar',
     icon: 'mail',
+    // An invite to MailCellar is an invite to use it.
+    inviteLevel: 'use',
     description: 'Their own mailboxes and mail',
     levels: [
       { id: 'none', label: 'No access' },
