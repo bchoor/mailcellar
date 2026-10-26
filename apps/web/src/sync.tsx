@@ -1,7 +1,7 @@
 // The backfill: each Gmail account's sync (/api/sync), on the Backfill page and in the status bar,
 // and its coverage map: one line per year, one block per month, from Gmail's exact count for the
 // month (the census) and what MailCellar has copied. Pick months there, or select them with a
-// preset, then Start backfill; picked queued months can be taken back out.
+// preset, then Copy these months; picked queued months can be taken back out.
 // Everything shown is what the sync state says now; nothing is estimated.
 import {
   ErrorLine, IconButton, LumenCoverageMap, LumenTokenizedFilter, useIsMobile, useLumenFilter, LumenLayout, StatusItem, Tile, TileRow,
@@ -130,9 +130,9 @@ function headline(s: SyncSummary): string | null {
   if (s.phase === 'waiting' && s.resumesAt && s.pausedFor) return `Waiting for the account's daily limit (${s.pausedFor}). Resumes ${when(s.resumesAt)}.`;
   if (s.phase === 'waiting' && s.resumesAt) return `Waiting for today's free limit to reset. Resumes ${when(s.resumesAt)}.`;
   if (s.status === 'waiting' && s.resumesAt) return `Trying again ${when(s.resumesAt)}.`;
-  if (s.phase === 'live') return 'New mail is copied on each sync. Pick months below to copy older mail.';
+  if (s.phase === 'live') return 'New mail is copied every 6 hours, or when you check. Pick older months on the map.';
   if (s.status === 'running') return s.month ? `Copying ${monthName(s.month)}.` : 'Copying.';
-  return 'Not running. Sync now or the next scheduled run continues it.';
+  return 'Not running. Check for new mail, or the next scheduled check, continues it.';
 }
 
 /** A time to resume at: `5:00 PM PDT` today, `Oct 25, 5:00 PM PDT` another day. */
@@ -284,7 +284,7 @@ const SYNC_NOW_HELP = [
 function SyncNowHelp() {
   return (
     <div className="flex flex-col gap-1.5 py-1 text-left">
-      <span className="font-medium">Sync now</span>
+      <span className="font-medium">Check for new mail</span>
       <ul className="flex list-disc flex-col gap-1 pl-4">
         {SYNC_NOW_HELP.map((line) => (
           <li key={line}>{line}</li>
@@ -293,6 +293,10 @@ function SyncNowHelp() {
     </div>
   );
 }
+
+/** A job's name, the same everywhere: new mail (Check for new mail, or the schedule), or older months (a backfill). */
+const jobName = (j: { kind: 'sync' | 'backfill'; by: 'you' | 'schedule' | null; label: string }) =>
+  j.kind === 'sync' ? (j.by === 'schedule' ? 'New mail (scheduled)' : 'New mail') : `Older months: ${j.label}`;
 
 /** One job going now: what it is, what it is doing, when it started and how long it has run (ticking). */
 function RunningJob({ job, now }: { job: ActiveJob; now: number }) {
@@ -309,7 +313,7 @@ function RunningJob({ job, now }: { job: ActiveJob; now: number }) {
       </span>
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex min-w-0 items-baseline justify-between gap-3">
-          <span className="truncate text-sm font-medium">{job.kind === 'backfill' ? `Backfill: ${job.label}` : job.label}</span>
+          <span className="truncate text-sm font-medium">{jobName(job)}</span>
           <span className="shrink-0 tabular-nums text-sm">{took(now - Date.parse(job.startedAt))}</span>
         </div>
         <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 text-xs text-muted-foreground sm:flex-nowrap">
@@ -321,9 +325,9 @@ function RunningJob({ job, now }: { job: ActiveJob; now: number }) {
   );
 }
 
-/** A finished job in one line: `Sync now · done 9:16 AM PT · 34 messages in 1m 12s`. */
+/** A finished job in one line: `New mail · done 9:16 AM PT · 34 messages in 1m 12s`. */
 function lastJob(r: JobRecord): string {
-  const what = r.kind === 'backfill' ? `Backfill: ${r.label}` : r.label;
+  const what = jobName(r);
   const result = r.result === 'done' ? 'done' : r.result === 'failed' ? 'failed' : 'stopped';
   return `Last: ${what} · ${result} ${pt(r.endedAt)} · ${fmt(r.copied)} message${r.copied === 1 ? '' : 's'} in ${took(Date.parse(r.endedAt) - Date.parse(r.startedAt))}`;
 }
@@ -348,7 +352,7 @@ function RunningNow({ jobs, starting, last }: { jobs: ActiveJob[]; starting: boo
       </div>
       {starting && !jobs.some((j) => j.kind === 'sync') && (
         <div className="flex items-center gap-3 px-3 py-2.5 text-sm">
-          <Loader2Icon className="size-3.5 animate-spin text-[var(--cov-run)]" /> Starting sync…
+          <Loader2Icon className="size-3.5 animate-spin text-[var(--cov-run)]" /> Checking for new mail…
         </div>
       )}
       {jobs.map((j) => (
@@ -406,7 +410,7 @@ function AccountSync({ id, archive = false, sync: s, copy, index, meters, sizes 
                 }
               }}
             >
-              <RefreshCwIcon className={busy || syncRunning ? 'animate-spin' : undefined} /> {syncRunning ? 'Syncing' : 'Sync now'}
+              <RefreshCwIcon className={busy || syncRunning ? 'animate-spin' : undefined} /> {syncRunning ? 'Checking' : 'Check for new mail'}
             </Button>
             </span>
           </TooltipTrigger>
@@ -414,6 +418,11 @@ function AccountSync({ id, archive = false, sync: s, copy, index, meters, sizes 
             <SyncNowHelp />
           </TooltipContent>
         </Tooltip>}
+        {!archive && (
+          <Button variant="outline" size="sm" onClick={() => document.querySelector('[data-month-map]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
+            <CalendarRangeIcon /> Copy older months
+          </Button>
+        )}
       </div>
       <RunningNow jobs={running} starting={busy} last={last} />
       {result && !result.ok && <ErrorLine error={new Error(result.detail)} />}
@@ -567,7 +576,7 @@ function censusHint(c: AccountCoverage | undefined): string | null {
 
 /**
  * One account's coverage map: pick months (tap one, then another for the range; a year; or a quick pick), then
- * Start backfill, or Remove from queue for queued ones. Nothing starts from a pick alone.
+ * Copy these months, or Remove from queue for queued ones. Nothing starts from a pick alone.
  */
 function AccountCoverageMap({ id, email, archive = false, rate, copying }: { id: string; email: string; archive?: boolean; rate: number | null; copying: string[] }) {
   const client = useQueryClient();
@@ -593,7 +602,7 @@ function AccountCoverageMap({ id, email, archive = false, rate, copying }: { id:
   };
   const anyQueued = !!data?.months.some((m) => busyMonth(m) || m.state === 'failed');
   return (
-    <div className="flex flex-col gap-2">
+    <div data-month-map className="flex flex-col gap-2">
       <LumenCoverageMap
         source={{ ...backfillQuery, select: (s: BackfillStatus) => facts(id, email, copying)(coverageOf(s, id)) }}
         stateLabels={STATE_LABELS}
@@ -610,7 +619,7 @@ function AccountCoverageMap({ id, email, archive = false, rate, copying }: { id:
           return !!m && m.gmail !== null && copyable(m)! > m.copied && !busyMonth(m);
         }}
         onQueue={(pick: CoveragePick) => queue(pick.flatMap((p) => p.months))}
-        queueLabel="Start backfill"
+        queueLabel="Copy these months"
         pickNote={(pick: CoveragePick) => {
           const n = pick.flatMap((p) => p.months).reduce((t, key) => t + (month(key) ? left(month(key)!) : 0), 0);
           return `${fmt(n)} messages · ${rate ? `${duration(n / rate)} at ${fmt(Math.round(rate))} a minute` : 'time shows once copying runs'}`;
@@ -621,7 +630,7 @@ function AccountCoverageMap({ id, email, archive = false, rate, copying }: { id:
         }}
         onRemove={(pick: CoveragePick) => unqueue(pick.flatMap((p) => p.months))}
         preselect={preselect}
-        hint={archive ? 'Months as the file dates its mail. The import covers all of it.' : censusHint(data) ?? 'Nothing starts until Start backfill.'}
+        hint={archive ? 'Months as the file dates its mail. The import covers all of it.' : censusHint(data) ?? 'Pick older months, then Copy these months.'}
         pickTools={archive ? undefined : 
           <span className="flex flex-wrap items-center gap-1.5">
             {PRESETS.map((p) => (
@@ -740,7 +749,7 @@ function JobHistory({ history }: { history: JobRecord[] }) {
         {history.map((r) => (
           <TableRow key={r.id} className="h-9 align-top">
             <TableCell className="max-w-0 py-2">
-              <div className="truncate font-medium">{r.kind === 'backfill' ? `Backfill: ${r.label}` : r.label}</div>
+              <div className="truncate font-medium">{jobName(r)}</div>
               {r.months && (
                 <div className="truncate text-xs text-muted-foreground">
                   {months(r.months.total)}: {fmt(r.months.done)} done{r.months.failed ? `, ${fmt(r.months.failed)} failed` : ''}
@@ -1076,16 +1085,16 @@ export function BackfillPage() {
   const running = data?.accounts.filter((a) => a.sync.status === 'running').length ?? 0;
   return (
     <LumenLayout
-      crumbs={[{ label: 'Backfill' }]}
+      crumbs={[{ label: 'Copy mail' }]}
       meta={data && <Badge variant="secondary">{running ? `${running} copying` : 'Not copying'}</Badge>}
       cards={[
-        ...(query.error ? [{ id: 'error', title: 'Backfill', icon: HourglassIcon, kind: 'widget' as const, link: false as const, w: 6, children: <ErrorLine error={query.error} /> }] : []),
+        ...(query.error ? [{ id: 'error', title: 'Copy mail', icon: HourglassIcon, kind: 'widget' as const, link: false as const, w: 6, children: <ErrorLine error={query.error} /> }] : []),
         ...(data && data.accounts.length === 0
           ? [{
-              id: 'none', title: 'Backfill', icon: HourglassIcon, kind: 'widget' as const, link: false as const, w: 6,
+              id: 'none', title: 'Copy mail', icon: HourglassIcon, kind: 'widget' as const, link: false as const, w: 6,
               children: (
                 <EmptyState icon={HourglassIcon} title="No Gmail accounts">
-                  Add one in Settings ▸ Accounts. Its backfill shows here.
+                  Add one in Settings ▸ Accounts. Its copying shows here.
                 </EmptyState>
               ),
             }]
@@ -1099,11 +1108,21 @@ export function BackfillPage() {
                 children: <MailboxesMap accounts={data.accounts} />,
               },
               {
-                id: 'sync', title: 'Sync', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                // One card for all copying: new mail (Check for new mail, the schedule) and older
+                // months (picked on the map below) run as jobs with one Running now, queue and history.
+                id: 'sync', title: 'Copy mail', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
                 tools: <RefreshTool keys={[BACKFILL_KEY]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
-                  return <AccountSync key={a.id} id={a.id} archive={a.kind === 'archive'} sync={a.sync} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} running={a.running} last={a.history?.[0]} />;
+                  return (
+                    <div key={a.id} className="flex flex-col gap-5">
+                      <AccountSync id={a.id} archive={a.kind === 'archive'} sync={a.sync} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} running={a.running} last={a.history?.[0]} />
+                      <div className="flex flex-col gap-3 border-t pt-4">
+                        <span className="text-sm font-medium">Jobs</span>
+                        <Jobs id={a.id} rate={a.sync.ratePerMin} copying={a.sync.months} history={a.history ?? []} />
+                      </div>
+                    </div>
+                  );
                 },
               },
               {
@@ -1111,14 +1130,6 @@ export function BackfillPage() {
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
                   return <AccountCoverageMap key={a.id} id={a.id} email={a.email} archive={a.kind === 'archive'} rate={a.sync.ratePerMin} copying={a.sync.months} />;
-                },
-              },
-              {
-                id: 'jobs', title: 'Jobs', icon: ListChecksIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
-                tools: <RefreshTool keys={[BACKFILL_KEY]} />,
-                children: (f: FilterToken[]) => {
-                  const a = followed(data.accounts, f);
-                  return <Jobs key={a.id} id={a.id} rate={a.sync.ratePerMin} copying={a.sync.months} history={a.history ?? []} />;
                 },
               },
             ]
@@ -1150,7 +1161,7 @@ export function SyncStatus() {
   const ok = syncs.some((s) => s.status === 'stopped') ? false : syncs.every((s) => s.phase === 'live') ? true : null;
   return (
     <Link to="/backfill" className="hover:underline">
-      <StatusItem label="Backfill" value={value} ok={ok} />
+      <StatusItem label="Copying" value={value} ok={ok} />
     </Link>
   );
 }
