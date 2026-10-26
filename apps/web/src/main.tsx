@@ -114,7 +114,7 @@ const brand = (
 
 // In a suite (Worker variables, sent with /api/me): the suite's app switcher, with MailCellar's own mark.
 const suiteBrand = (list: string) => (
-  <LumenSuiteSwitcher source={list} current={{ id: 'mailcellar', name: 'MailCellar', iconUrl: '/favicon.svg', href: '/' }} />
+  <LumenSuiteSwitcher source={list} current={{ id: 'mailcellar', name: 'MailCellar', iconUrl: '/app/favicon.svg', href: '/app/' }} />
 );
 
 // A suite's shared prefs cookie: theme mode, font and size follow the person across its apps.
@@ -222,7 +222,8 @@ const router = createRouter({
   routeTree: root.addChildren([...mailboxRoutes, gmailRoute, ...paneRoutes, ...firstRoutes, ...opsRoutes]),
   defaultNotFoundComponent: NotFound,
   defaultErrorComponent: RouteError,
-  // Real URLs, so refresh, Back and links work. The one-file prototype has no server to answer them.
+  // Real URLs under /app, so refresh, Back and links work. The one-file prototype has no server to answer them.
+  basepath: __SINGLE_FILE__ ? '/' : '/app',
   history: __SINGLE_FILE__ ? createMemoryHistory({ initialEntries: ['/'] }) : createBrowserHistory(),
 });
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });

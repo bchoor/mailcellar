@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node ../../scripts/changelog.mjs",
+    "build": "vite build && cp -R site/. dist/ && node ../../scripts/changelog.mjs",
     "build:single": "SINGLEFILE=1 vite build",
     "type-check": "tsc --noEmit"
   },

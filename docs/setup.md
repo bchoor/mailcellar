@@ -26,12 +26,16 @@ Then, in the dashboard: Workers & Pages ▸ mailcellar ▸ Settings ▸ Domains 
 
 ## 4. Cloudflare Access
 
-Zero Trust ▸ Access ▸ Applications ▸ Add ▸ Self-hosted, on `mail.example.com`, with a policy that allows only your email. From the application, copy:
+The site root (`/`) is a public page about MailCellar; the app is under `/app`, and its API under `/api`. Only those two need Access.
+
+Zero Trust ▸ Access ▸ Applications ▸ Add ▸ Self-hosted, on `mail.example.com` with paths `app` and `api`, and a policy that allows only your email. From the application, copy:
 
 - **Team domain**, such as `https://yourteam.cloudflareaccess.com`: `ACCESS_TEAM_DOMAIN`.
 - **Application Audience (AUD) tag**: `ACCESS_AUD`.
 
-The Worker checks Access's signed token on every API request. With `ACCESS_AUD` unset it refuses every request (unless `DEV_USER_EMAIL` is set, which is for local dev only).
+The Worker checks Access's signed token on every API request. With `ACCESS_AUD` unset it refuses every request (unless `DEV_USER_EMAIL` is set, which is for local dev only). While moving from one Access application to another, `ACCESS_AUD` can list both tags, comma-separated.
+
+If an Access application already covers the whole domain (such as a wildcard), the public page sits behind it too. To make it public, add a Self-hosted application on `mail.example.com` with a Bypass policy for Everyone; the more specific `app`, `api` and `mcp` applications still win for their paths.
 
 ## 5. Google OAuth client
 
@@ -73,7 +77,7 @@ Workers & Pages ▸ mailcellar ▸ Settings ▸ Builds ▸ Connect your fork. Bu
 
 ## 8. Use it
 
-Open `https://mail.example.com`, sign in through Access, then Settings ▸ Accounts ▸ Add Gmail account. Pick months on Backfill, then Start backfill. Settings ▸ Accounts ▸ Add mbox archive imports an mbox file.
+Open `https://mail.example.com/app`, sign in through Access, then Settings ▸ Accounts ▸ Add Gmail account. Pick months on Backfill, then Start backfill. Settings ▸ Accounts ▸ Add mbox archive imports an mbox file.
 
 ## 9. MCP server
 

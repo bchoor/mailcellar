@@ -69,7 +69,7 @@ export async function peopleApi(request: Request, env: Env, url: URL, email: str
     inviteDays: INVITE_DAYS,
     fixedAdmins: adminEmails(env),
     appName: 'MailCellar',
-    link: (token) => `${url.origin}/invite/${token}`,
+    link: (token) => `${url.origin}/app/invite/${token}`,
     // No mailer of its own: the invites go out through Admin ▸ Email's settings.
     email: emailOptions(env),
     removeSteps: () => [{ label: 'Their mail', outcome: 'Stays in MailCellar. Inviting them again gives it back.' }],

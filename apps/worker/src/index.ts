@@ -14,7 +14,19 @@ export { MailboxDO } from './mailbox';
 export { QuotaDO } from './quota';
 export { SyncWorkflow } from './sync';
 
-// Static assets serve the app; only /api/* and /mcp reach this handler (run_worker_first).
+// The app's pages before it moved under /app (run_worker_first sends these here).
+const OLD_APP_PATH = /^\/(m\/.*|messages|panes|gmail\/.*|senders|domains|labels|time|backfill|usage|admin\/.*|invite\/.*)$/;
+
+/** The app under /app: its files, or its index.html for any of its pages (the router reads the address). */
+async function appPage(request: Request, env: Env, url: URL): Promise<Response> {
+  if (url.pathname === '/app') return Response.redirect(new URL(`/app/${url.search}`, url).href, 301);
+  const res = await env.ASSETS.fetch(request);
+  if (res.status !== 404 || request.method !== 'GET') return res;
+  return env.ASSETS.fetch(new Request(new URL('/app/', url), { headers: request.headers }));
+}
+
+// Static assets serve the public page and the app's files; /api/*, /mcp and the app's pages reach
+// this handler (run_worker_first).
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -25,6 +37,8 @@ export default {
     if (url.pathname === '/api/releases' && request.method === 'GET') return releases(request, env, url);
     // The MCP server: its own Access application, its own checks (mcp.ts).
     if (url.pathname === '/mcp') return mcp(request, env, url);
+    if (url.pathname === '/app' || url.pathname.startsWith('/app/')) return appPage(request, env, url);
+    if (OLD_APP_PATH.test(url.pathname)) return Response.redirect(new URL(`/app${url.pathname}${url.search}`, url).href, 301);
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     // A change must come from this app's own pages; this refuses other sites' requests outright.
     if (request.method !== 'GET' && request.headers.get('origin') !== url.origin)

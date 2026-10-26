@@ -75,8 +75,8 @@ The Usage page shows the account's Cloudflare usage against its plan, and backfi
 ```bash
 bun install
 cp .dev.vars.example .dev.vars   # then fill it in
-bun run dev                      # the web app at http://localhost:5173
-bunx wrangler dev                # Worker and app at http://localhost:8787
+bun run dev                      # the web app at http://localhost:5173/app/
+bunx wrangler dev                # Worker, page and app at http://localhost:8787 (app at /app/)
 bun run check                    # type-check and build
 ```
 
