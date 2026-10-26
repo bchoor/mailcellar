@@ -8,6 +8,7 @@ import { CONTAINS_KEY, type CustomViewConfig, customViewConfigSchema } from '@co
 import {
   type ArchiveRows,
   type ArchiveView,
+  type BodySnippet,
   type DomainRow,
   type GmailLabels,
   type LabelRow,
@@ -297,7 +298,43 @@ function Clip({ text, w }: { text: string; w: string }) {
   );
 }
 
-type MessageView = MessageRow & { labelNames: string[]; chips: Chip[]; unread: boolean; important: boolean; category: string; period: string; day: string };
+type MessageView = MessageRow & { labelNames: string[]; chips: Chip[]; unread: boolean; important: boolean; category: string; period: string; day: string; found?: BodySnippet };
+
+/** Where a search's words are in a message's body: the words in bold, under the subject. */
+function Found({ s }: { s: BodySnippet }) {
+  const parts: ReactNode[] = [];
+  let at = 0;
+  for (const [a, b] of s.hits) {
+    if (a > at) parts.push(s.text.slice(at, a));
+    parts.push(<b key={a} className="font-semibold text-foreground">{s.text.slice(a, b)}</b>);
+    at = b;
+  }
+  parts.push(s.text.slice(at));
+  return (
+    <span className="block truncate text-xs font-normal text-muted-foreground" style={{ maxWidth: '22rem' }} title={s.text}>
+      {parts}
+    </span>
+  );
+}
+
+/**
+ * Body snippets for rows a search matched only in their body, read from their raw files: one
+ * request a page of rows, kept a while. Keyed by message ID.
+ */
+function useFound(id: string | null, text: string, rows: MessageRow[]): Map<string, BodySnippet> {
+  const ids = rows.filter((r) => r.bodyHit).map((r) => r.id).slice(0, 50);
+  const found = useQuery({
+    queryKey: ['found', id, text, ids.join(',')],
+    enabled: !!id && !!text && ids.length > 0,
+    staleTime: 10 * 60_000,
+    queryFn: async (): Promise<Record<string, BodySnippet>> => {
+      const res = await fetch(`/api/accounts/${id}/snippets?${new URLSearchParams({ ids: ids.join(','), q: text })}`);
+      if (!res.ok) return {};
+      return res.json();
+    },
+  });
+  return useMemo(() => new Map(Object.entries(found.data ?? {})), [found.data]);
+}
 const MESSAGES: ViewDomain<MessageView> = {
   id: 'messages',
   // The server pages and groups these rows; a pivot would cover one page only.
@@ -321,9 +358,12 @@ const MESSAGES: ViewDomain<MessageView> = {
     {
       key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text',
       render: (r) => (
-        <span className={`flex items-center gap-1 ${r.unread ? 'font-semibold' : ''}`}>
-          {r.important && <span className="text-warning" title="Important">★</span>}
-          <Clip text={r.subject} w="22rem" />
+        <span className="block min-w-0">
+          <span className={`flex items-center gap-1 ${r.unread ? 'font-semibold' : ''}`}>
+            {r.important && <span className="text-warning" title="Important">★</span>}
+            <Clip text={r.subject} w="22rem" />
+          </span>
+          {r.found && <Found s={r.found} />}
         </span>
       ),
     },
@@ -667,6 +707,10 @@ export function MessagesPage() {
     setPage(0);
   }, [key, size, id, sort.by, asc]);
   const cursor = cursors[page] ?? null;
+  // The search box's words: rows they matched only in the body show where.
+  const text = filters.filter((f) => f.key === 'text' && !f.not).flatMap((f) => f.values).join(' ');
+  const [hits, setHits] = useState<MessageRow[]>([]);
+  const found = useFound(id, text, hits);
   const toView = (m: MessageRow): MessageView => ({
     ...m,
     labelNames: labelNames(m.labels),
@@ -676,6 +720,7 @@ export function MessagesPage() {
     category: categoryOf(m.labels),
     period: periodOf(list, m.ts),
     day: localDay(m.ts, timeZone),
+    found: found.get(m.id),
   });
   const { groups, grouped } = useServerGroups(id, filters, sort, list, toView);
   const messages = useQuery({
@@ -719,6 +764,8 @@ export function MessagesPage() {
         : next,
     );
   const page0 = (data?.rows ?? []).map(toView);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the shown page's rows, by their IDs.
+  useEffect(() => setHits(data?.rows ?? []), [data?.rows.map((r) => r.id).join(',')]);
   // Grouped, the table draws the open groups' rows; these rows only feed the filter's values.
   const rows = grouped
     ? [...new Map([...page0, ...(groups.list ?? []).flatMap((g) => g.rows as MessageView[])].map((r) => [r.id, r])).values()]
@@ -731,7 +778,7 @@ export function MessagesPage() {
   const intro = <LumenTabs tabs={tabCounts} value={tab} onChange={setTab} />;
   const noMatch = loaded && !rows.length && (
     <EmptyState icon={SearchIcon} title={tokens.length ? 'No mail matches these filters' : 'No mail in this tab'}>
-      {data?.partial ? 'None in the mail searched so far. Next page keeps searching.' : 'Text search looks at the subject, the sender and the first lines of each message.'}
+      {data?.partial ? 'None in the mail searched so far. Next page keeps searching.' : 'Text search looks at the subject, the sender and the body.'}
     </EmptyState>
   );
   const seen = page * size + (data?.rows.length ?? 0);

@@ -159,6 +159,13 @@ export const MIGRATIONS: readonly string[] = [
   `ALTER TABLE messages ADD COLUMN raw_key TEXT;
    ALTER TABLE messages ADD COLUMN raw_offset INTEGER;
    ALTER TABLE messages ADD COLUMN raw_len INTEGER;`,
+  // 16: body search (Bikram, 2026-10-25). The words of each message's body, as an index only: the
+  // text stays in the raw files (R2 objects). Contentless delete, so a message leaves it by rowid.
+  // messages.body is 1 once the body is in (or had no text): copying sets it, the body pass fills the rest.
+  `CREATE VIRTUAL TABLE body_fts USING fts5 (
+     body, content = '', contentless_delete = 1, tokenize = 'unicode61 remove_diacritics 1'
+   );
+   ALTER TABLE messages ADD COLUMN body INTEGER;`,
 ];
 
 /** Gmail labels whose mail MailCellar doesn't keep: the index never takes it in. */
@@ -352,8 +359,8 @@ export class MailboxDO extends DurableObject<Env> {
   private async dropSpam(): Promise<void> {
     const sql = this.ctx.storage.sql;
     if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'drop_spam'`).toArray().length) return;
-    const cursor = sql.exec<{ id: string; ts: number; from_addr: string; from_name: string; subject: string; snippet: string; size: number; labels: string }>(
-      `SELECT id, ts, from_addr, from_name, subject, snippet, size, labels FROM messages
+    const cursor = sql.exec<{ id: string; ts: number; from_addr: string; from_name: string; subject: string; snippet: string; size: number; labels: string; body: number | null }>(
+      `SELECT id, ts, from_addr, from_name, subject, snippet, size, labels, body FROM messages
        WHERE ' ' || labels || ' ' LIKE '% SPAM %' OR ' ' || labels || ' ' LIKE '% TRASH %'`,
     );
     const rows = cursor.toArray();
@@ -385,6 +392,7 @@ export class MailboxDO extends DurableObject<Env> {
           `INSERT INTO message_fts (message_fts, rowid, subject, from_addr, from_name, snippet, labels) VALUES ('delete', CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
           ftsRowid(r.id), r.subject, r.from_addr, r.from_name, r.snippet, r.labels,
         );
+        if (r.body) run(`DELETE FROM body_fts WHERE rowid = CAST(? AS INTEGER)`, ftsRowid(r.id));
         run(`DELETE FROM messages WHERE id = ?`, r.id);
         const m = { ts: r.ts, size: r.size } as IndexedMessage;
         tally(senders, r.from_addr.toLowerCase(), m);
@@ -817,6 +825,66 @@ export class MailboxDO extends DurableObject<Env> {
     return r?.raw_key ? { key: r.raw_key, offset: r.raw_offset ?? -1, len: r.raw_len ?? -1 } : null;
   }
 
+  /** Where each of these messages is (body snippets): null for one in a raw file of its own. Unknown IDs are left out. */
+  async locations(ids: string[]): Promise<Record<string, { key: string; offset: number; len: number } | null>> {
+    const out: Record<string, { key: string; offset: number; len: number } | null> = {};
+    let read = 0;
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100);
+      const cursor = this.ctx.storage.sql.exec<{ id: string; raw_key: string | null; raw_offset: number | null; raw_len: number | null }>(
+        `SELECT id, raw_key, raw_offset, raw_len FROM messages WHERE id IN (${chunk.map(() => '?').join(',')})`, ...chunk,
+      );
+      for (const r of cursor) out[r.id] = r.raw_key ? { key: r.raw_key, offset: r.raw_offset ?? -1, len: r.raw_len ?? -1 } : null;
+      read += cursor.rowsRead;
+    }
+    this.count({ do_rows_read: read });
+    return out;
+  }
+
+  /**
+   * The body pass's next messages (bodies.ts): up to `limit` read in ID order from its bookmark,
+   * those without their body in search with where each is. `last` is the last ID read, the next
+   * bookmark; null when the pass has read to the end.
+   */
+  async bodyTodo(limit: number): Promise<{ todo: { id: string; key: string | null; offset: number; len: number }[]; last: string | null }> {
+    const sql = this.ctx.storage.sql;
+    const at = sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'body_pass'`).toArray()[0]?.value ?? '';
+    const cursor = sql.exec<{ id: string; raw_key: string | null; raw_offset: number | null; raw_len: number | null; body: number | null }>(
+      `SELECT id, raw_key, raw_offset, raw_len, body FROM messages WHERE id > ? ORDER BY id LIMIT ?`, at, limit,
+    );
+    const rows = cursor.toArray();
+    this.count({ do_rows_read: cursor.rowsRead + 1 });
+    return {
+      todo: rows.filter((r) => !r.body).map((r) => ({ id: r.id, key: r.raw_key, offset: r.raw_offset ?? -1, len: r.raw_len ?? -1 })),
+      last: rows.length === limit ? rows[rows.length - 1].id : null,
+    };
+  }
+
+  /**
+   * Put bodies the pass read in search, mark them, and move its bookmark to `last` (null: the pass
+   * is done), in one transaction. A message already marked (copied since, or a retried batch) is skipped.
+   */
+  async addBodies(bodies: { id: string; body: string }[], last: string | null): Promise<{ added: number; rowsWritten: number }> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      let written = 0;
+      let added = 0;
+      for (const b of bodies) {
+        const marked = sql.exec(`UPDATE messages SET body = 1 WHERE id = ? AND body IS NULL`, b.id).rowsWritten;
+        written += marked;
+        if (!marked || !b.body) continue;
+        written += sql.exec(`INSERT INTO body_fts (rowid, body) VALUES (CAST(? AS INTEGER), ?)`, ftsRowid(b.id), b.body).rowsWritten;
+        added++;
+      }
+      written += sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('body_pass', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+        last ?? '~done',
+      ).rowsWritten;
+      this.count({ do_rows_written: written });
+      return { added, rowsWritten: written };
+    });
+  }
+
   /**
    * How many of a month's messages the mailbox has: of `ids` (Gmail's list of the month) when
    * given, with the ones it lacks; else the month's own count, by message date.
@@ -939,15 +1007,17 @@ export class MailboxDO extends DurableObject<Env> {
     return this.ctx.storage.transactionSync(() => {
       let written = 0;
       const rows = sql
-        .exec<{ id: string; subject: string; from_addr: string; from_name: string; snippet: string; labels: string }>(
-          `SELECT id, subject, from_addr, from_name, snippet, labels FROM messages WHERE ts >= ? AND ts < ?`, after, before,
+        .exec<{ id: string; subject: string; from_addr: string; from_name: string; snippet: string; labels: string; body: number | null }>(
+          `SELECT id, subject, from_addr, from_name, snippet, labels, body FROM messages WHERE ts >= ? AND ts < ?`, after, before,
         )
         .toArray();
-      for (const m of rows)
+      for (const m of rows) {
         written += sql.exec(
           `INSERT INTO message_fts (message_fts, rowid, subject, from_addr, from_name, snippet, labels) VALUES ('delete', CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
           ftsRowid(m.id), m.subject, m.from_addr, m.from_name, m.snippet, m.labels,
         ).rowsWritten;
+        if (m.body) written += sql.exec(`DELETE FROM body_fts WHERE rowid = CAST(? AS INTEGER)`, ftsRowid(m.id)).rowsWritten;
+      }
       written += sql.exec(`DELETE FROM messages WHERE ts >= ? AND ts < ?`, after, before).rowsWritten;
       written += sql.exec(`DELETE FROM months WHERE month = ?`, month).rowsWritten;
       written += sql.exec(`UPDATE basin_months SET indexed_at = NULL WHERE month = ?`, month).rowsWritten;
@@ -1442,10 +1512,10 @@ export class MailboxDO extends DurableObject<Env> {
         if (have.has(m.id) || notKept(m.labels)) continue;
         const labelText = m.labels.join(' ');
         const insert = sql.exec(
-          `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels, raw_key, raw_offset, raw_len)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
+          `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels, raw_key, raw_offset, raw_len, body)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
           m.id, m.threadId, m.ts, m.fromAddr, m.fromName, m.subject, m.snippet, m.size, m.attachments, labelText,
-          m.raw ?? null, m.rawOffset ?? null, m.rawLen ?? null,
+          m.raw ?? null, m.rawOffset ?? null, m.rawLen ?? null, m.body === undefined ? null : 1,
         );
         rowsWritten += insert.rowsWritten;
         if (insert.rowsWritten === 0) continue;
@@ -1455,6 +1525,7 @@ export class MailboxDO extends DurableObject<Env> {
            VALUES (CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
           ftsRowid(m.id), m.subject, m.fromAddr, m.fromName, m.snippet, labelText,
         );
+        if (m.body) run(`INSERT INTO body_fts (rowid, body) VALUES (CAST(? AS INTEGER), ?)`, ftsRowid(m.id), m.body);
         tally(months, monthOf(m.ts), m);
         if (!rollups) continue;
         tally(senders, m.fromAddr.toLowerCase(), m, m.fromName);
@@ -1552,16 +1623,9 @@ export class MailboxDO extends DurableObject<Env> {
       case 'messages': {
         const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
           subject, snippet, size, attachments, labels, state`;
-        const match = ftsQuery(q);
-        const found = match
-          ? rows(
-              // FTS rowids are Gmail IDs as signed 64-bit integers; %x prints them back as hex.
-              `SELECT ${cols} FROM messages WHERE id IN (
-                 SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?
-               ) ORDER BY ts DESC LIMIT ?`,
-              match,
-              ARCHIVE_LIMIT,
-            )
+        const words = textMatch(q);
+        const found = words
+          ? rows(`SELECT ${cols} FROM messages WHERE ${words.where} ORDER BY ts DESC LIMIT ?`, ...words.args, ARCHIVE_LIMIT)
           : rows(`SELECT ${cols} FROM messages ORDER BY ts DESC LIMIT ?`, ARCHIVE_LIMIT);
         for (const m of found as unknown as { labels: string | string[] }[])
           m.labels = String(m.labels).split(' ').filter(Boolean);
@@ -1728,7 +1792,9 @@ export class MailboxDO extends DurableObject<Env> {
     // under 5% of the mailbox, reading in order would mostly read other mail.
     const one = rest.length && rest.every((f) => f.key === 'label' && !f.not && f.values.length === 1) ? rest : [];
     const rare = one.map((f) => labelIds.find((l) => l.id === f.values[0])).filter((l) => !!l && l.n < this.indexedTotal() * 0.05);
-    const match = [ftsQuery(text), ...rare.map((l) => `labels : "${l!.id.replaceAll('"', '""')}"`)].filter(Boolean).join(' ');
+    // Words match the envelope or the body, each on its own; labels match the envelope's index.
+    const words = textMatch(text);
+    const match = rare.map((l) => `labels : "${l!.id.replaceAll('"', '""')}"`).join(' ');
     // One sender (a Sender group) seeks its index rather than checking rows read in order.
     const sender = sorts.includes('from') ? rest.find((f) => f.key === 'from' && f.op === 'eq' && !f.not && f.values.length === 1) : undefined;
     const keep = messageTest(rest, labelIds);
@@ -1743,8 +1809,10 @@ export class MailboxDO extends DurableObject<Env> {
     const hi = spans.length ? Math.min(...spans.map((x) => x[1])) : null;
     // The order as phases read one after another (Attachments: with, then without; Category: each).
     const phases = sortPhases(by, asc, by === 'category' && !labelIds.length ? exec<{ id: string; n: number }>(`SELECT id, n FROM labels`) : labelIds, this.indexedTotal());
+    // Under a search, whether the envelope holds every word: if not, the row matched on its body.
+    const envelope = words ? ftsQuery(text) : '';
     const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
-      subject, snippet, size, attachments, labels, state`;
+      subject, snippet, size, attachments, labels, state${envelope ? `, id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?) AS envelope` : ''}`;
     const [cmp, dir] = asc ? ['>', 'ASC'] : ['<', 'DESC'];
     // A cursor is the phase, then the last row's keys in that phase's order.
     const from = cursor ? decodeCursor(cursor, phases) : null;
@@ -1771,14 +1839,17 @@ export class MailboxDO extends DurableObject<Env> {
         bounded && lo !== null && Number.isFinite(lo) ? 'ts >= ?' : '1',
         bounded && hi !== null && Number.isFinite(hi) ? 'ts < ?' : '1',
         phaseMatch ? `id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?)` : '1',
+        words?.where ?? '1',
         sender ? 'lower(from_addr) = ?' : '1',
         also ?? '1',
       ];
       const args: (string | number)[] = [
+        ...(envelope ? [envelope] : []),
         ...(at ?? []),
         ...(bounded && lo !== null && Number.isFinite(lo) ? [lo] : []),
         ...(bounded && hi !== null && Number.isFinite(hi) ? [hi] : []),
         ...(phaseMatch ? [phaseMatch] : []),
+        ...(words?.args ?? []),
         ...(sender ? [sender.values[0].toLowerCase()] : []),
       ];
       const got = exec<Record<string, SqlStorageValue>>(
@@ -1790,7 +1861,8 @@ export class MailboxDO extends DurableObject<Env> {
       scanned += got.length;
       for (const g of got) {
         last = keyOf(keys, g);
-        const m = { ...g, labels: g.labels.split(' ').filter(Boolean) } as MessageRow;
+        const { envelope: inEnvelope, ...row } = g as typeof g & { envelope?: number };
+        const m = { ...row, labels: row.labels.split(' ').filter(Boolean), ...(envelope && !inEnvelope ? { bodyHit: true } : {}) } as MessageRow;
         if (!keep(m) || (test && !test(m))) continue;
         rows.push(m);
         ends.push([p, ...last]);
@@ -2591,6 +2663,21 @@ export function messageTest(filters: MessageFilter[], labels: { id: string; name
     return (m: MessageRow) => one(m) !== !!f.not;
   });
   return (m) => tests.every((t) => t(m));
+}
+
+/**
+ * A search box's words as a condition on messages: each word in the envelope's index or the body's
+ * (so one word can be in the subject and another in the body). Null when there are no words.
+ */
+export function textMatch(q: string): { where: string; args: string[] } | null {
+  const words = ftsQuery(q).split(' ').filter(Boolean);
+  if (!words.length) return null;
+  return {
+    where: words
+      .map(() => `(id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?) OR id IN (SELECT printf('%x', rowid) FROM body_fts WHERE body_fts MATCH ?))`)
+      .join(' AND '),
+    args: words.flatMap((w) => [w, w]),
+  };
 }
 
 /** A search box's words as an FTS5 query: each word quoted, so FTS syntax in it is literal. */

@@ -116,6 +116,8 @@ export interface SyncParams {
    * answer names the indexed messages no month lists, and listed ones the index lacks. Reads only.
    */
   audit?: string;
+  /** Instead of syncing, put mail copied before body search into it, from the raw files (the body pass). */
+  bodies?: boolean;
   /** Check a landed month against Gmail's list of it and mark it done (copying indexed it already). */
   index?: string;
   /** Unused since copying indexes as it goes (2026-10-25); kept so runs queued before then still parse. */
