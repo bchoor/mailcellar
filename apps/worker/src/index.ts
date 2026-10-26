@@ -1,4 +1,4 @@
-import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, MESSAGE_GROUPS, MESSAGE_SORTS, messageFilters, type MessageGroupBy, type MessageSort, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
+import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, MESSAGE_GROUPS, MESSAGE_SORTS, messageFilters, type MessageGroupBy, type MessageSort, monthNow, type ArchiveView, type Health, type Suite, type UsageDay } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
@@ -61,10 +61,20 @@ async function releases(request: Request, env: Env, url: URL): Promise<Response>
   return Response.json({ releases: from < 0 ? [] : all.slice(from, from + limit) }, { headers: noStore });
 }
 
+/** The suite this deployment joins, from its Worker variables; undefined when none is set. */
+function suiteOf(env: Env): Suite | undefined {
+  const suite: Suite = {
+    list: env.SUITE_LIST_URL || undefined,
+    prefsCookie: env.SUITE_PREFS_COOKIE || undefined,
+    prefsDomain: env.SUITE_PREFS_DOMAIN || undefined,
+  };
+  return suite.list || suite.prefsCookie ? suite : undefined;
+}
+
 /** The API a person's mailboxes serve: who this is, accounts, each account's pages, schedules and usage. Null: not one of these. */
 async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): Promise<Response | null> {
   const { email, mailbox } = who;
-  if (url.pathname === '/api/me' && request.method === 'GET') return Response.json(await mailbox.me(email), { headers: noStore });
+  if (url.pathname === '/api/me' && request.method === 'GET') return Response.json({ ...(await mailbox.me(email)), suite: suiteOf(env) }, { headers: noStore });
   const test = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/test$/);
   if (test && request.method === 'POST') {
     if (!(await testAccount(env, mailbox, test[1]))) return Response.json({ error: 'not_found' }, { status: 404 });
