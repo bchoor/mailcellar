@@ -3,7 +3,7 @@ import { callback, connect, identity, revoke, testAccount, type Identity } from 
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
 import { attachment, openMessage } from './message';
-import { admit, isAdmin, membersApi } from './members';
+import { admit, peopleApi } from './members';
 import { mcp } from './mcp';
 import { bodySnippets } from './search';
 import { accountQuota } from './quota';
@@ -33,14 +33,15 @@ export default {
     const who = await identity(request, env);
     if (!who) return Response.json({ error: 'no_identity' }, { status: 401, headers: noStore });
     // Signed in is not the same as let in: only admins and the guest list are (members.ts).
-    if (!(await admit(env, who.email))) return Response.json({ error: 'not_invited', email: who.email }, { status: 403, headers: noStore });
-    const members = await membersApi(request, env, url, who.email);
-    if (members) return members;
+    const pass = await admit(env, who.email);
+    if (!pass) return Response.json({ error: 'not_invited', email: who.email }, { status: 403, headers: noStore });
+    const people = await peopleApi(request, env, url, who.email, pass.admin);
+    if (people) return people;
     if (request.method === 'GET') {
       if (url.pathname === '/api/accounts/connect') return connect(url, env);
       if (url.pathname === '/api/auth/callback') return callback(request, env, url, who);
     }
-    const res = await mailboxApi(request, env, url, who);
+    const res = await mailboxApi(request, env, url, who, pass.admin);
     return res ?? Response.json({ error: 'not_found' }, { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -67,9 +68,9 @@ async function releases(request: Request, env: Env, url: URL): Promise<Response>
 }
 
 /** The API a person's mailboxes serve: who this is, accounts, each account's pages, schedules and usage. Null: not one of these. */
-async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): Promise<Response | null> {
+async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, admin: boolean): Promise<Response | null> {
   const { email, mailbox } = who;
-  if (url.pathname === '/api/me' && request.method === 'GET') return Response.json({ ...(await mailbox.me(email)), admin: isAdmin(env, email) }, { headers: noStore });
+  if (url.pathname === '/api/me' && request.method === 'GET') return Response.json({ ...(await mailbox.me(email)), admin }, { headers: noStore });
   const test = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/test$/);
   if (test && request.method === 'POST') {
     if (!(await testAccount(env, mailbox, test[1]))) return Response.json({ error: 'not_found' }, { status: 404 });
@@ -264,7 +265,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     return Response.json(await accountQuota(env).readNow(), { headers: noStore });
   if (url.pathname === '/api/admin/test-limit' && (request.method === 'PUT' || request.method === 'DELETE')) {
     // The end-to-end test switch, for 30 minutes: {"doWrites": 500, "resetMin": 3, "spendStop": 0.2}. Admins only.
-    if (!isAdmin(env, email)) return Response.json({ error: 'forbidden' }, { status: 403, headers: noStore });
+    if (!admin) return Response.json({ error: 'forbidden' }, { status: 403, headers: noStore });
     if (request.method === 'DELETE') return Response.json({ test: await accountQuota(env).setTestLimit(null) }, { headers: noStore });
     let body: { doWrites?: unknown; resetMin?: unknown; spendStop?: unknown };
     try {

@@ -4,7 +4,10 @@
 // it) at most every 5 minutes, and adds what MailCellar has counted since.
 import { DurableObject } from 'cloudflare:workers';
 import { PAID_DAILY_GUARD, paidNow, SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, quotaStop, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, type LevelMetric } from '@mailcellar/schema';
+import { createPeople, doSql, sqlStore } from '@columenlabs/lumen-people';
 import type { Env } from './env';
+import type { Person } from '@columenlabs/lumen-ui-types/people';
+import { adminEmails, INVITE_DAYS, type PeopleOp, type PeopleService, SCOPES } from './people';
 
 export type QuotaUse = Partial<Record<QuotaMetric, number>>;
 
@@ -411,40 +414,30 @@ export class QuotaDO extends DurableObject<Env> {
       -- Cloudflare's figure for a period when last read, and MailCellar's own count at that moment.
       CREATE TABLE IF NOT EXISTS cloudflare (metric TEXT PRIMARY KEY, period TEXT NOT NULL, value INTEGER NOT NULL, ours INTEGER NOT NULL) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT, WITHOUT ROWID;
-      -- The guest list (members.ts): who may use MailCellar besides ADMIN_EMAILS. Emails lower-cased.
-      CREATE TABLE IF NOT EXISTS members (email TEXT PRIMARY KEY, added_at TEXT NOT NULL, seen_at TEXT, invited_at TEXT) STRICT, WITHOUT ROWID;
     `);
   }
 
-  /** The guest list, newest first. */
-  async members(): Promise<{ email: string; added_at: string; seen_at: string | null; invited_at: string | null }[]> {
-    return this.ctx.storage.sql
-      .exec<{ email: string; added_at: string; seen_at: string | null; invited_at: string | null }>(`SELECT email, added_at, seen_at, invited_at FROM members ORDER BY added_at DESC`)
-      .toArray();
+  /** Who may use MailCellar (members.ts): the kit's people service, on this object's own SQLite. */
+  private peopleService: PeopleService | null = null;
+  private async peopleNow(): Promise<PeopleService> {
+    if (!this.peopleService) {
+      const store = sqlStore(doSql(this.ctx.storage.sql));
+      await store.init();
+      // An invite turns active on its link's Accept, so the link in the email always works.
+      this.peopleService = createPeople({ store, scopes: SCOPES, fixedAdmins: adminEmails(this.env), inviteDays: INVITE_DAYS, acceptOnSignIn: false });
+    }
+    return this.peopleService;
   }
 
-  /** Note that an invite email went out. */
-  async invited(email: string): Promise<void> {
-    this.ctx.storage.sql.exec(`UPDATE members SET invited_at = ? WHERE email = ?`, new Date().toISOString(), email);
+  /** A verified sign-in: the person (their visit noted), or null when they may not come in. */
+  async seen(email: string): Promise<Person | null> {
+    return (await this.peopleNow()).seen(email);
   }
 
-  /** Add someone to the guest list; false if they were on it already. */
-  async addMember(email: string): Promise<boolean> {
-    return this.ctx.storage.sql.exec(`INSERT OR IGNORE INTO members (email, added_at) VALUES (?, ?)`, email, new Date().toISOString()).rowsWritten > 0;
-  }
-
-  /** Take someone off the guest list; false if they weren't on it. */
-  async removeMember(email: string): Promise<boolean> {
-    return this.ctx.storage.sql.exec(`DELETE FROM members WHERE email = ?`, email).rowsWritten > 0;
-  }
-
-  /** Whether someone is on the guest list; notes the day of their visit (one write a day at most). */
-  async admit(email: string): Promise<boolean> {
-    const row = this.ctx.storage.sql.exec<{ seen_at: string | null }>(`SELECT seen_at FROM members WHERE email = ?`, email).toArray()[0];
-    if (!row) return false;
-    const today = new Date().toISOString().slice(0, 10);
-    if (row.seen_at?.slice(0, 10) !== today) this.ctx.storage.sql.exec(`UPDATE members SET seen_at = ? WHERE email = ?`, new Date().toISOString(), email);
-    return true;
+  /** One call on the people service; the kit's routes reach it through here. */
+  async people<K extends PeopleOp>(op: K, args: Parameters<PeopleService[K]>): Promise<Awaited<ReturnType<PeopleService[K]>>> {
+    const service = await this.peopleNow();
+    return (service[op] as (...a: unknown[]) => Promise<Awaited<ReturnType<PeopleService[K]>>>)(...args);
   }
 
   /** The plan last read from Cloudflare; Free until one is read, and from PAID_ENDS whatever billing says. */

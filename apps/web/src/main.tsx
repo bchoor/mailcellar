@@ -24,10 +24,10 @@ import {
   useLocation,
   useParams,
 } from '@tanstack/react-router';
-import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, UserIcon, UsersIcon } from 'lucide-react';
+import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, MailPlusIcon, ScrollTextIcon, ShieldCheckIcon, UserIcon, UsersIcon } from 'lucide-react';
 import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { NotInvited, UsersPage } from './admin';
+import { InvitePage, NotInvited, PEOPLE_SECTIONS, PeoplePage } from './admin';
 import { AccountsSettings, NoIdentity, NotInvitedError, SettingsFromUrl, useMe } from './auth';
 import { MessagesPage, OverviewPage, PanesPage } from './archive';
 import { FiltersPage, SubscriptionsPage } from './gmail-pages';
@@ -84,8 +84,9 @@ const opsNav = (
   />
 );
 
-// Only admins (ADMIN_EMAILS) see this group: who may use MailCellar.
-const adminNav = <NavGroup label="Admin" items={[{ title: 'Users', to: '/admin/users', icon: UsersIcon }]} />;
+// Only admins see this group: who may use MailCellar, their access, invites and the audit log.
+const ADMIN_ICONS = { people: UsersIcon, invites: MailPlusIcon, permissions: ShieldCheckIcon, audit: ScrollTextIcon };
+const adminNav = <NavGroup label="Admin" items={PEOPLE_SECTIONS.map((s) => ({ title: s.title, to: `/admin/${s.section}`, icon: ADMIN_ICONS[s.section] }))} />;
 
 // On a phone the menu is a sheet over the page: picking a page closes it.
 function CloseMenuOnNavigate() {
@@ -192,7 +193,8 @@ function NotFound() {
 const opsRoutes = [
   createRoute({ getParentRoute: () => root, path: '/backfill', component: BackfillPage }),
   createRoute({ getParentRoute: () => root, path: '/usage', component: UsagePage }),
-  createRoute({ getParentRoute: () => root, path: '/admin/users', component: UsersPage }),
+  ...PEOPLE_SECTIONS.map((s) => createRoute({ getParentRoute: () => root, path: `/admin/${s.section}`, component: () => <PeoplePage section={s.section} /> })),
+  createRoute({ getParentRoute: () => root, path: '/invite/$token', component: InvitePage }),
 ];
 const router = createRouter({
   routeTree: root.addChildren([...mailboxRoutes, gmailRoute, ...paneRoutes, ...firstRoutes, ...opsRoutes]),

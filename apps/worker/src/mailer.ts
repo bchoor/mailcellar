@@ -1,6 +1,8 @@
-// Sends MailCellar's own email (invites) over SMTP with STARTTLS, straight from the Worker.
+// Sends MailCellar's own email (invites, built by the people kit) over SMTP with STARTTLS, straight from the Worker.
 // The relay and its send-only login are Worker variables and secrets (SMTP_*); unset: no email.
 import { connect } from 'cloudflare:sockets';
+import type { MailMessage } from '@columenlabs/lumen-people';
+import type { MailOutcome } from '@columenlabs/lumen-ui-types/people';
 import type { Env } from './env';
 
 export const canSend = (env: Env) => !!(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASSWORD && env.MAIL_FROM);
@@ -55,9 +57,11 @@ class Smtp {
 const b64 = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
 const header = (text: string) => (/^[\x20-\x7e]*$/.test(text) ? text : `=?UTF-8?B?${b64(text)}?=`);
 
-/** Send one plain-text email. Throws with the relay's words if it refuses. */
-export async function sendMail(env: Env, to: string, subject: string, body: string): Promise<void> {
-  if (!canSend(env)) throw new Error('Email isn’t set up');
+const lines = (text: string) => (b64(text).match(/.{1,76}/g) ?? []).join('\r\n');
+
+/** Send one email (text and HTML). Never throws: says whether it went, and why not. */
+export async function sendMail(env: Env, m: MailMessage): Promise<MailOutcome> {
+  if (!canSend(env)) return { ok: false, detail: 'Email isn’t set up' };
   const smtp = new Smtp(connect({ hostname: env.SMTP_HOST!, port: Number(env.SMTP_PORT ?? 587) }, { secureTransport: 'starttls', allowHalfOpen: false }));
   try {
     await smtp.reply(220);
@@ -67,22 +71,36 @@ export async function sendMail(env: Env, to: string, subject: string, body: stri
     await smtp.send('EHLO mailcellar', 250);
     await smtp.send(`AUTH PLAIN ${b64(`\0${env.SMTP_USER}\0${env.SMTP_PASSWORD}`)}`, 235);
     await smtp.send(`MAIL FROM:<${env.MAIL_FROM}>`, 250);
-    await smtp.send(`RCPT TO:<${to}>`, 250);
+    await smtp.send(`RCPT TO:<${m.to}>`, 250);
     await smtp.send('DATA', 354);
+    const boundary = `mc-${crypto.randomUUID()}`;
     const message = [
       `From: MailCellar <${env.MAIL_FROM}>`,
-      `To: <${to}>`,
-      `Subject: ${header(subject)}`,
+      `To: <${m.to}>`,
+      `Subject: ${header(m.subject)}`,
       `Date: ${new Date().toUTCString()}`,
       `Message-ID: <${crypto.randomUUID()}@${env.MAIL_FROM!.split('@')[1]}>`,
       'MIME-Version: 1.0',
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
       'Content-Type: text/plain; charset=utf-8',
       'Content-Transfer-Encoding: base64',
       '',
-      (b64(body).match(/.{1,76}/g) ?? []).join('\r\n'),
+      lines(m.text),
+      `--${boundary}`,
+      'Content-Type: text/html; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      lines(m.html),
+      `--${boundary}--`,
     ].join('\r\n');
     await smtp.send(`${message}\r\n.`, 250);
     await smtp.send('QUIT', 221).catch(() => '');
+    return { ok: true, detail: `Sent to ${m.to}` };
+  } catch (e) {
+    console.log(JSON.stringify({ mail: 'failed', error: String(e) }));
+    return { ok: false, detail: 'The email didn’t send. Resend to try again.' };
   } finally {
     smtp.close();
   }

@@ -58,8 +58,8 @@ bunx wrangler secret put GOOGLE_CLIENT_SECRET
 
 Optional:
 
-- `ADMIN_EMAILS`: comma-separated admin emails. Admins are always let in and see Admin ▸ Users, where they invite other people; anyone else Access signs in must be on that list. Unset: no list, and Access alone decides who gets in.
-- `SMTP_HOST`, `SMTP_PORT` (default 587), `MAIL_FROM`, and the secrets `SMTP_USER`, `SMTP_PASSWORD`: an SMTP relay with STARTTLS for invite emails. Unset: Admin ▸ Users adds people without emailing them.
+- `ADMIN_EMAILS`: comma-separated built-in admins. They are always let in and see Admin ▸ People, where they invite people and set their access; anyone else Access signs in needs an invite. Unset: no people list, and Access alone decides who gets in.
+- `SMTP_HOST`, `SMTP_PORT` (default 587), `MAIL_FROM`, and the secrets `SMTP_USER`, `SMTP_PASSWORD`: an SMTP relay with STARTTLS for invite emails. Unset: each invite gives a link to send by hand.
 - `CF_ANALYTICS_TOKEN`: a token with Account Analytics, Workers Scripts and Workflows read. The Usage page reads the account's usage with it.
 - `CF_BILLING_TOKEN`: a token with Billing Read. The Usage page reads the plan with it.
 
