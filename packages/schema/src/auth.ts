@@ -44,6 +44,8 @@ export interface ArchiveImport {
 /** Response of GET /api/me: the Access user and their connected Gmail accounts. */
 export interface Me {
   user: { email: string };
+  /** Manages people: sees Admin ▸ People. */
+  admin: boolean;
   accounts: ConnectedAccount[];
   /** The suite this deployment joins (Worker variables); absent when it joins none. */
   suite?: Suite;

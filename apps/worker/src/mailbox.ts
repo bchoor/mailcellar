@@ -2755,7 +2755,7 @@ export class MailboxDO extends DurableObject<Env> {
           },
         };
       });
-    return { user: { email }, accounts };
+    return { user: { email }, admin: false, accounts };
   }
 
   /** Usage for the last `days` UTC days, oldest first. */

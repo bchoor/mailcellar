@@ -58,7 +58,8 @@ bunx wrangler secret put GOOGLE_CLIENT_SECRET
 
 Optional:
 
-- `ADMIN_EMAILS`: comma-separated emails allowed the end-to-end test switch.
+- `ADMIN_EMAILS`: comma-separated built-in admins. They are always let in and see Admin ▸ People, where they invite people and set their access; anyone else Access signs in needs an invite. Unset: no people list, and Access alone decides who gets in.
+- Invite emails: set in the app, Admin ▸ Email, against any Resend-style email API (Resend, or a self-hosted one such as FreeSend). A self-hosted one behind a Cloudflare Tunnel is reached through a Workers VPC service bound as `FREESEND` (`vpc_services` in `wrangler.jsonc`), the Private tunnel route. Not set: each invite gives a link to send by hand.
 - `CF_ANALYTICS_TOKEN`: a token with Account Analytics, Workers Scripts and Workflows read. The Usage page reads the account's usage with it.
 - `CF_BILLING_TOKEN`: a token with Billing Read. The Usage page reads the plan with it.
 - `SUITE_LIST_URL`: when MailCellar sits in a suite of Lumen apps, the address its app switcher reads (`{ apps: [{ id, name, url, icon?, group? }] }`, sent with the browser's cookies, so the suite must allow this origin with credentials). Unset: the sidebar shows MailCellar alone.

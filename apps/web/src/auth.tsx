@@ -9,13 +9,25 @@ import { LogOutIcon, PlusIcon, RefreshCwIcon, ShieldAlertIcon } from 'lucide-rea
 import { useEffect, useState } from 'react';
 import { AddArchive, ArchiveRow } from './archive-import';
 
+/** Signed in with Access, but not let in (the API answers 403 not_invited). */
+export class NotInvitedError extends Error {
+  constructor(readonly email: string) {
+    super('not_invited');
+  }
+}
+
 /** The Access user and their Gmail accounts: null when Access sent no identity (the API answers 401). */
 export function useMe() {
   return useQuery({
     queryKey: ['me'],
+    retry: (n, e) => !(e instanceof NotInvitedError) && n < 3,
     queryFn: async (): Promise<Me | null> => {
       const res = await fetch('/api/me');
       if (res.status === 401) return null;
+      if (res.status === 403) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string; email?: string };
+        if (body.error === 'not_invited') throw new NotInvitedError(body.email ?? '');
+      }
       if (!res.ok) throw new Error(`Couldn't load your account (${res.status})`);
       return res.json();
     },

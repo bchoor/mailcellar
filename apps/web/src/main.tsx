@@ -25,11 +25,12 @@ import {
   useLocation,
   useParams,
 } from '@tanstack/react-router';
-import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, UserIcon } from 'lucide-react';
+import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, MailIcon, MailPlusIcon, ScrollTextIcon, ShieldCheckIcon, UserIcon, UsersIcon } from 'lucide-react';
 import type { Suite } from '@mailcellar/schema';
 import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
+import { EmailSettings, InvitePage, NotInvited, PEOPLE_SECTIONS, PeoplePage } from './admin';
+import { AccountsSettings, NoIdentity, NotInvitedError, SettingsFromUrl, useMe } from './auth';
 import { MessagesPage, OverviewPage, PanesPage } from './archive';
 import { FiltersPage, SubscriptionsPage } from './gmail-pages';
 import { MAILBOX_PAGES, MailboxNav, mailboxPath, PANE_PAGES } from './mailbox';
@@ -85,6 +86,10 @@ const opsNav = (
   />
 );
 
+// Only admins see this group: who may use MailCellar, their access, invites and the audit log.
+const ADMIN_ICONS = { people: UsersIcon, invites: MailPlusIcon, permissions: ShieldCheckIcon, audit: ScrollTextIcon };
+const adminNav = <NavGroup label="Admin" items={PEOPLE_SECTIONS.map((s) => ({ title: s.title, to: `/admin/${s.section}`, icon: ADMIN_ICONS[s.section] }))} />;
+
 // On a phone the menu is a sheet over the page: picking a page closes it.
 function CloseMenuOnNavigate() {
   const path = useLocation({ select: (l) => l.pathname });
@@ -129,6 +134,7 @@ function Frame() {
   const me = useMe();
   useSuitePrefs(me.data?.suite);
   if (me.isPending) return null;
+  if (me.error instanceof NotInvitedError) return <NotInvited email={me.error.email} />;
   if (me.data === null) return <NoIdentity />;
   return (
     <LumenShell
@@ -136,7 +142,7 @@ function Frame() {
       appLabel="MailCellar"
       brand={me.data?.suite?.list ? suiteBrand(me.data.suite.list) : brand}
       // One section per Gmail account, then the pages that cover all of them.
-      nav={<><MailboxNav />{opsNav}</>}
+      nav={<><MailboxNav />{opsNav}{me.data?.admin && adminNav}</>}
       user={me.data ? { email: me.data.user.email, name: null } : null}
       // Signing out is Cloudflare Access's: it ends the Access session for this site.
       signOutUrl="/cdn-cgi/access/logout"
@@ -146,6 +152,7 @@ function Frame() {
       settings={[
         { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts and mbox archives MailCellar keeps', content: <AccountsSettings /> },
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },
+        ...(me.data?.admin ? [{ id: 'email', title: 'Email', icon: MailIcon, description: 'Where invite emails are sent from', content: <EmailSettings /> }] : []),
       ]}
     >
       <CloseMenuOnNavigate />
@@ -208,6 +215,8 @@ function NotFound() {
 const opsRoutes = [
   createRoute({ getParentRoute: () => root, path: '/backfill', component: BackfillPage }),
   createRoute({ getParentRoute: () => root, path: '/usage', component: UsagePage }),
+  ...PEOPLE_SECTIONS.map((s) => createRoute({ getParentRoute: () => root, path: `/admin/${s.section}`, component: () => <PeoplePage section={s.section} /> })),
+  createRoute({ getParentRoute: () => root, path: '/invite/$token', component: InvitePage }),
 ];
 const router = createRouter({
   routeTree: root.addChildren([...mailboxRoutes, gmailRoute, ...paneRoutes, ...firstRoutes, ...opsRoutes]),
