@@ -15,7 +15,7 @@ export { QuotaDO } from './quota';
 export { SyncWorkflow } from './sync';
 
 // The app's pages before it moved under /app (run_worker_first sends these here).
-const OLD_APP_PATH = /^\/(m\/.*|messages|panes|gmail\/.*|senders|domains|labels|time|backfill|usage)$/;
+const OLD_APP_PATH = /^\/(m\/.*|messages|panes|gmail\/.*|senders|domains|labels|time|backfill|usage|admin\/.*|invite\/.*)$/;
 
 /** The app under /app: its files, or its index.html for any of its pages (the router reads the address). */
 async function appPage(request: Request, env: Env, url: URL): Promise<Response> {

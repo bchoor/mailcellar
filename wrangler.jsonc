@@ -19,7 +19,8 @@
     "not_found_handling": "none",
     "run_worker_first": [
       "/api/*", "/mcp", "/app", "/app/*", "!/app/assets/*",
-      "/m/*", "/messages", "/panes", "/gmail/*", "/senders", "/domains", "/labels", "/time", "/backfill", "/usage"
+      "/m/*", "/messages", "/panes", "/gmail/*", "/senders", "/domains", "/labels", "/time", "/backfill", "/usage",
+      "/admin/*", "/invite/*"
     ]
   },
   "vars": {
