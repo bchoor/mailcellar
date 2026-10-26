@@ -61,6 +61,8 @@ Optional:
 - `ADMIN_EMAILS`: comma-separated emails allowed the end-to-end test switch.
 - `CF_ANALYTICS_TOKEN`: a token with Account Analytics, Workers Scripts and Workflows read. The Usage page reads the account's usage with it.
 - `CF_BILLING_TOKEN`: a token with Billing Read. The Usage page reads the plan with it.
+- `SUITE_LIST_URL`: when MailCellar sits in a suite of Lumen apps, the address its app switcher reads (`{ apps: [{ id, name, url, icon?, group? }] }`, sent with the browser's cookies, so the suite must allow this origin with credentials). Unset: the sidebar shows MailCellar alone.
+- `SUITE_PREFS_COOKIE` and `SUITE_PREFS_DOMAIN`: the suite's shared Lumen prefs cookie and its domain (such as `.example.com`), so theme mode, font and size follow the person across the suite. MailCellar keeps its own palette and mark.
 
 Plain variables set in the dashboard work too: `keep_vars` keeps them across deploys.
 

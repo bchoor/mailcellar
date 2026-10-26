@@ -2,6 +2,7 @@ import {
   configureLumen,
   LumenPageState,
   LumenShell,
+  LumenSuiteSwitcher,
   NavGroup,
   RouteError,
   SchedulesSection,
@@ -25,6 +26,7 @@ import {
   useParams,
 } from '@tanstack/react-router';
 import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, UserIcon } from 'lucide-react';
+import type { Suite } from '@mailcellar/schema';
 import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
@@ -105,15 +107,34 @@ const brand = (
   </SidebarMenu>
 );
 
+// In a suite (Worker variables, sent with /api/me): the suite's app switcher, with MailCellar's own mark.
+const suiteBrand = (list: string) => (
+  <LumenSuiteSwitcher source={list} current={{ id: 'mailcellar', name: 'MailCellar', iconUrl: '/favicon.svg', href: '/' }} />
+);
+
+// A suite's shared prefs cookie: theme mode, font and size follow the person across its apps.
+function useSuitePrefs(suite: Suite | undefined) {
+  const cookie = suite?.prefsCookie;
+  const domain = suite?.prefsDomain;
+  useEffect(() => {
+    if (!cookie) return;
+    configureLumen({
+      prefsCookie: cookie,
+      cookieDomain: (host) => (domain && host.endsWith(domain.replace(/^\./, '')) ? domain : undefined),
+    });
+  }, [cookie, domain]);
+}
+
 function Frame() {
   const me = useMe();
+  useSuitePrefs(me.data?.suite);
   if (me.isPending) return null;
   if (me.data === null) return <NoIdentity />;
   return (
     <LumenShell
       app="mailcellar"
       appLabel="MailCellar"
-      brand={brand}
+      brand={me.data?.suite?.list ? suiteBrand(me.data.suite.list) : brand}
       // One section per Gmail account, then the pages that cover all of them.
       nav={<><MailboxNav />{opsNav}</>}
       user={me.data ? { email: me.data.user.email, name: null } : null}

@@ -28,6 +28,11 @@ export interface Env {
   MCP_ACCESS_AUD?: string;
   /** Comma-separated emails allowed the admin test switch (PUT /api/admin/test-limit). */
   ADMIN_EMAILS?: string;
+  /** A suite this deployment joins (plain Worker variables, all optional): the address its app switcher
+   *  reads, and the Lumen prefs cookie and its domain shared across the suite's apps. */
+  SUITE_LIST_URL?: string;
+  SUITE_PREFS_COOKIE?: string;
+  SUITE_PREFS_DOMAIN?: string;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
   DEV_USER_EMAIL?: string;
 }
