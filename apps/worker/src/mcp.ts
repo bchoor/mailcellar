@@ -274,7 +274,7 @@ const TOOLS: Tool[] = [
         messages: found,
         has_more: more,
         ...(more ? { cursor: encodeCursor(next) } : {}),
-        ...(partial && !found.length ? { note: 'No match in this stretch of the archive yet; the cursor keeps searching.' } : {}),
+        ...(partial && more && !found.length ? { note: 'No match in this stretch of the archive yet; the cursor keeps searching.' } : {}),
       });
     },
   },
