@@ -411,7 +411,33 @@ export class QuotaDO extends DurableObject<Env> {
       -- Cloudflare's figure for a period when last read, and MailCellar's own count at that moment.
       CREATE TABLE IF NOT EXISTS cloudflare (metric TEXT PRIMARY KEY, period TEXT NOT NULL, value INTEGER NOT NULL, ours INTEGER NOT NULL) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT, WITHOUT ROWID;
+      -- The guest list (members.ts): who may use MailCellar besides ADMIN_EMAILS. Emails lower-cased.
+      CREATE TABLE IF NOT EXISTS members (email TEXT PRIMARY KEY, added_at TEXT NOT NULL, seen_at TEXT) STRICT, WITHOUT ROWID;
     `);
+  }
+
+  /** The guest list, newest first. */
+  async members(): Promise<{ email: string; added_at: string; seen_at: string | null }[]> {
+    return this.ctx.storage.sql.exec<{ email: string; added_at: string; seen_at: string | null }>(`SELECT email, added_at, seen_at FROM members ORDER BY added_at DESC`).toArray();
+  }
+
+  /** Add someone to the guest list; false if they were on it already. */
+  async addMember(email: string): Promise<boolean> {
+    return this.ctx.storage.sql.exec(`INSERT OR IGNORE INTO members (email, added_at) VALUES (?, ?)`, email, new Date().toISOString()).rowsWritten > 0;
+  }
+
+  /** Take someone off the guest list; false if they weren't on it. */
+  async removeMember(email: string): Promise<boolean> {
+    return this.ctx.storage.sql.exec(`DELETE FROM members WHERE email = ?`, email).rowsWritten > 0;
+  }
+
+  /** Whether someone is on the guest list; notes the day of their visit (one write a day at most). */
+  async admit(email: string): Promise<boolean> {
+    const row = this.ctx.storage.sql.exec<{ seen_at: string | null }>(`SELECT seen_at FROM members WHERE email = ?`, email).toArray()[0];
+    if (!row) return false;
+    const today = new Date().toISOString().slice(0, 10);
+    if (row.seen_at?.slice(0, 10) !== today) this.ctx.storage.sql.exec(`UPDATE members SET seen_at = ? WHERE email = ?`, new Date().toISOString(), email);
+    return true;
   }
 
   /** The plan last read from Cloudflare; Free until one is read, and from PAID_ENDS whatever billing says. */

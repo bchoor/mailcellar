@@ -44,7 +44,22 @@ export interface ArchiveImport {
 /** Response of GET /api/me: the Access user and their connected Gmail accounts. */
 export interface Me {
   user: { email: string };
+  /** One of ADMIN_EMAILS: sees Admin ▸ Users. */
+  admin: boolean;
   accounts: ConnectedAccount[];
+}
+
+/**
+ * One person who may use MailCellar (GET /api/admin/users). Admins come from ADMIN_EMAILS and
+ * can't be removed in the app; everyone else is on the guest list an admin keeps.
+ */
+export interface AppUser {
+  email: string;
+  admin: boolean;
+  /** When an admin added them; null for admins. */
+  addedAt: string | null;
+  /** Their last visit, to the day; null until their first. */
+  seenAt: string | null;
 }
 
 /** Codes the connect redirect puts in `?auth_error=`, and what Settings ▸ Accounts says for each. */

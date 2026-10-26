@@ -24,10 +24,11 @@ import {
   useLocation,
   useParams,
 } from '@tanstack/react-router';
-import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, UserIcon } from 'lucide-react';
+import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, UserIcon, UsersIcon } from 'lucide-react';
 import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { AccountsSettings, NoIdentity, SettingsFromUrl, useMe } from './auth';
+import { NotInvited, UsersPage } from './admin';
+import { AccountsSettings, NoIdentity, NotInvitedError, SettingsFromUrl, useMe } from './auth';
 import { MessagesPage, OverviewPage, PanesPage } from './archive';
 import { FiltersPage, SubscriptionsPage } from './gmail-pages';
 import { MAILBOX_PAGES, MailboxNav, mailboxPath, PANE_PAGES } from './mailbox';
@@ -83,6 +84,9 @@ const opsNav = (
   />
 );
 
+// Only admins (ADMIN_EMAILS) see this group: who may use MailCellar.
+const adminNav = <NavGroup label="Admin" items={[{ title: 'Users', to: '/admin/users', icon: UsersIcon }]} />;
+
 // On a phone the menu is a sheet over the page: picking a page closes it.
 function CloseMenuOnNavigate() {
   const path = useLocation({ select: (l) => l.pathname });
@@ -108,6 +112,7 @@ const brand = (
 function Frame() {
   const me = useMe();
   if (me.isPending) return null;
+  if (me.error instanceof NotInvitedError) return <NotInvited email={me.error.email} />;
   if (me.data === null) return <NoIdentity />;
   return (
     <LumenShell
@@ -115,7 +120,7 @@ function Frame() {
       appLabel="MailCellar"
       brand={brand}
       // One section per Gmail account, then the pages that cover all of them.
-      nav={<><MailboxNav />{opsNav}</>}
+      nav={<><MailboxNav />{opsNav}{me.data?.admin && adminNav}</>}
       user={me.data ? { email: me.data.user.email, name: null } : null}
       // Signing out is Cloudflare Access's: it ends the Access session for this site.
       signOutUrl="/cdn-cgi/access/logout"
@@ -187,6 +192,7 @@ function NotFound() {
 const opsRoutes = [
   createRoute({ getParentRoute: () => root, path: '/backfill', component: BackfillPage }),
   createRoute({ getParentRoute: () => root, path: '/usage', component: UsagePage }),
+  createRoute({ getParentRoute: () => root, path: '/admin/users', component: UsersPage }),
 ];
 const router = createRouter({
   routeTree: root.addChildren([...mailboxRoutes, gmailRoute, ...paneRoutes, ...firstRoutes, ...opsRoutes]),

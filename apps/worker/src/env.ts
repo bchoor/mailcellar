@@ -26,7 +26,10 @@ export interface Env {
   ACCESS_AUD: string;
   /** The MCP server's own Access application (/mcp, with Managed OAuth): its audience tag. Unset: /mcp is off. */
   MCP_ACCESS_AUD?: string;
-  /** Comma-separated emails allowed the admin test switch (PUT /api/admin/test-limit). */
+  /**
+   * Comma-separated admin emails: always let in, they keep the guest list (Admin ▸ Users, members.ts)
+   * and the test switch. Unset: no guest list; anyone Cloudflare Access lets through is in.
+   */
   ADMIN_EMAILS?: string;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
   DEV_USER_EMAIL?: string;

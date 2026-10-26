@@ -5,6 +5,7 @@
 // app's API does, with that application's audience (MCP_ACCESS_AUD).
 import type { GmailLabels, MessageFilter, MessageRow, MonthRow } from '@mailcellar/schema';
 import { identity, type Identity } from './auth';
+import { admit } from './members';
 import type { Env } from './env';
 import { attachmentFile, messageText } from './message';
 import { bodySnippets } from './search';
@@ -38,6 +39,7 @@ export async function mcp(request: Request, env: Env, url: URL): Promise<Respons
   if (env.ACCESS_AUD && !env.MCP_ACCESS_AUD) return Response.json({ error: 'mcp_not_set_up' }, { status: 503, headers: noStore });
   const who = await identity(request, env, env.MCP_ACCESS_AUD);
   if (!who) return Response.json({ error: 'no_identity' }, { status: 401, headers: noStore });
+  if (!(await admit(env, who.email))) return Response.json({ error: 'not_invited' }, { status: 403, headers: noStore });
   const text = await request.text();
   if (text.length > 64 * 1024) return Response.json(rpcError(null, -32600, 'Request too large'), { status: 413, headers: noStore });
   let body: unknown;
