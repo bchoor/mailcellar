@@ -217,6 +217,8 @@ export async function runBatch(
   const replaced: RunResult = { copied: 0, phase: 'replaced', more: false, resumesAt: null };
   if (!state || state.runId !== runId) return replaced;
   const added = { copied: 0, bytes: 0 };
+  // Months whose Gmail list this run fetched again, with their IDs.
+  const relisted = new Map<string, string[]>();
   const save = (next: SyncState) => mailbox.saveSync({ ...next, updatedAt: new Date().toISOString() }, runId, added);
   // A stop fails the month being copied; Retry copies it again (copied mail is skipped).
   const stop = async (error: string): Promise<RunResult> => {
@@ -330,16 +332,19 @@ export async function runBatch(
     const landed = new Set(rows.map((r) => new Date(r.ts).toISOString().slice(0, 7)).filter((m) => m >= addMonths(monthNow(), -1)));
     for (const month of landed) {
       if (calls + LIST_CALLS() > limits.calls) break;
-      let n = 0;
+      const ids: string[] = [];
       let pageToken: string | undefined;
       for (let page = 0; page < LIST_CALLS(); page++) {
         calls++;
         const got = await listPage(token, pageToken, 500, monthQuery(month));
-        n += got.ids.length;
+        ids.push(...got.ids);
         pageToken = got.next ?? undefined;
         if (!pageToken) break;
       }
-      if (!pageToken) await mailbox.putMonthCount(month, n);
+      if (!pageToken) {
+        await mailbox.putMonthCount(month, ids.length);
+        relisted.set(month, ids);
+      }
     }
   } catch (e) {
     // Mail fetched before the error isn't indexed, so it isn't counted; the next run copies it again.
@@ -374,6 +379,13 @@ export async function runBatch(
     Object.assign(added, { copied: 0, bytes: 0 });
     indexError = 'Paused before the daily DO write limit. Copying resumes after it resets.';
   }
+  // Copied counts against the list Gmail just gave, not by message date: a message dated the
+  // last day of a month that Gmail files in the next one left one month a message short.
+  if (!indexError)
+    for (const [month, ids] of relisted) {
+      const { have } = await mailbox.monthHas(month, ids);
+      await mailbox.markIndexed(month, have);
+    }
   // Sync-state saves and month bookkeeping: a few rows each run.
   await quota.add({ do_rows_written: rowsWritten + 6, do_rows_read: rowsRead + rowsWritten * 2 + 20, r2_class_a: r2a, r2_class_b: r2b });
   // Raw mail counts at Gmail's size (gzip only makes it smaller).
