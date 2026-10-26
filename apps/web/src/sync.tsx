@@ -711,7 +711,7 @@ function BackfillRow({ m, stage, left, action }: { m: MonthCoverage; stage: Stag
         <Meter done={m.copied} total={copyable(m) ?? 0} color={stage === 'failed' ? 'failed' : m.gmail !== null && m.copied >= copyable(m)! ? 'done' : 'copy'} />
       </TableCell>
       <TableCell className="hidden w-[24%] md:table-cell">
-        <Meter done={m.indexed} total={m.landed ? m.inBasin : 0} color="done" />
+        <Meter done={m.indexed} total={m.landed ? m.inBasin : m.copied} color="done" />
       </TableCell>
       <TableCell className={`hidden text-right tabular-nums text-xs sm:table-cell ${stage === 'failed' ? 'text-loss' : 'text-muted-foreground'}`}>{left}</TableCell>
       <TableCell className="w-16 pr-0 text-right sm:w-20">
