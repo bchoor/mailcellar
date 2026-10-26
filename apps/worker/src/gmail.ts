@@ -322,7 +322,13 @@ export function indexRow(m: RawMessage, raw: Uint8Array, h = headers(raw)): Inde
     attachments: countAttachments(raw),
     labels: m.labelIds ?? [],
     body: searchText(raw),
+    rcpt: recipients(h),
   };
+}
+
+/** A message's To, Cc and Bcc addresses, lower case, space separated, each once. */
+export function recipients(h: Map<string, string>): string {
+  return [...new Set(['to', 'cc', 'bcc'].flatMap((k) => parseAddresses(h.get(k) ?? '')).map((a) => a.replace(/\s+/g, '')))].join(' ');
 }
 
 /** Addresses in a To or Cc header, lower-cased. */

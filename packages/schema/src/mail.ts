@@ -25,6 +25,8 @@ export interface IndexedMessage {
   rawLen?: number;
   /** Body text for search only (index, never stored): absent for mail indexed before body search. */
   body?: string;
+  /** To, Cc and Bcc addresses, lower case, space separated: absent for mail indexed before recipients were kept. */
+  rcpt?: string;
 }
 
 /** A Gmail label as labels.list returns it. */
@@ -98,7 +100,7 @@ export const ARCHIVE_LIMIT = 1000;
  * an `op` (`gt`, `lt`, `eq`, or `between` with `a..b`). `range` values are `from..to` in epoch ms.
  */
 export interface MessageFilter {
-  key: 'from' | 'domain' | 'subject' | 'label' | 'text' | 'size' | 'attachments' | 'range';
+  key: 'from' | 'to' | 'domain' | 'subject' | 'label' | 'text' | 'size' | 'attachments' | 'range';
   values: string[];
   not?: boolean;
   op?: 'gt' | 'lt' | 'eq' | 'between';
@@ -139,7 +141,7 @@ export interface MessagePage {
   sorts: MessageSort[];
 }
 
-const FILTER_KEYS: readonly MessageFilter['key'][] = ['from', 'domain', 'subject', 'label', 'text', 'size', 'attachments', 'range'];
+const FILTER_KEYS: readonly MessageFilter['key'][] = ['from', 'to', 'domain', 'subject', 'label', 'text', 'size', 'attachments', 'range'];
 const FILTER_OPS: readonly NonNullable<MessageFilter['op']>[] = ['gt', 'lt', 'eq', 'between'];
 /** The `f` query parameter (JSON filters) checked; null when it is not a list of filters. */
 export function messageFilters(raw: string | null): MessageFilter[] | null {
