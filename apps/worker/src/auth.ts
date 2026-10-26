@@ -57,8 +57,8 @@ async function accessKey(env: Env, kid: string): Promise<CryptoKey | null> {
   return accessKeys.keys.get(kid) ?? null;
 }
 
-/** The email in a valid Cloudflare Access token for this app, or null. */
-async function verifyAccess(token: string, env: Env, audience: string): Promise<string | null> {
+/** The email in a valid Cloudflare Access token for one of these applications, or null. */
+async function verifyAccess(token: string, env: Env, audiences: string[]): Promise<string | null> {
   try {
     const [head, body, sig] = token.split('.');
     const header = json<{ alg?: string; kid?: string }>(fromB64url(head));
@@ -69,7 +69,7 @@ async function verifyAccess(token: string, env: Env, audience: string): Promise<
     if (!ok) return null;
     const claims = json<{ aud?: string | string[]; iss?: string; exp?: number; email?: string }>(fromB64url(body));
     const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    if (!aud.includes(audience) || claims.iss !== env.ACCESS_TEAM_DOMAIN) return null;
+    if (!aud.some((a) => a && audiences.includes(a)) || claims.iss !== env.ACCESS_TEAM_DOMAIN) return null;
     if ((claims.exp ?? 0) * 1000 < Date.now() || !claims.email) return null;
     return claims.email;
   } catch {
@@ -82,12 +82,14 @@ async function verifyAccess(token: string, env: Env, audience: string): Promise<
  * token; Access sits in front of the whole site, and the Worker checks the token itself.
  * `wrangler dev` has no Access, so there DEV_USER_EMAIL stands in (set only in .dev.vars).
  * `audience` is the Access application's tag: the app's, or the MCP server's (its own application).
+ * It may list several, comma-separated, while the site moves from one Access application to another.
  */
 export async function identity(request: Request, env: Env, audience = env.ACCESS_AUD): Promise<Identity | null> {
   let email: string | null = null;
   if (env.ACCESS_AUD) {
     const token = request.headers.get('cf-access-jwt-assertion');
-    email = token && audience ? await verifyAccess(token, env, audience) : null;
+    const audiences = (audience ?? '').split(',').map((a) => a.trim()).filter(Boolean);
+    email = token && audiences.length ? await verifyAccess(token, env, audiences) : null;
   } else if (env.DEV_USER_EMAIL) email = env.DEV_USER_EMAIL;
   if (!email) return null;
   const user = await userIdFor(email);
@@ -111,7 +113,7 @@ const redirect = (to: string, setCookie?: string) => {
   if (setCookie) headers.append('set-cookie', setCookie);
   return new Response(null, { status: 302, headers });
 };
-const back = (error?: AuthError) => redirect(`/?settings=accounts${error ? `&auth_error=${error}` : ''}`, cookie('', 0));
+const back = (error?: AuthError) => redirect(`/app/?settings=accounts${error ? `&auth_error=${error}` : ''}`, cookie('', 0));
 
 /**
  * GET /api/accounts/connect: off to Google to pick a Gmail account and allow access to it.

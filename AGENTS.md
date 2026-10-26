@@ -12,7 +12,7 @@ Gmail and mbox archive on Cloudflare Workers. Bun monorepo. MIT.
 ## Commands
 
 - `bun install`
-- `bun run dev`: web app at http://localhost:5173. `bunx wrangler dev` serves Worker + app at http://localhost:8787.
+- `bun run dev`: web app at http://localhost:5173/app/. `bunx wrangler dev` serves Worker, public page and app at http://localhost:8787 (app at /app/). The page's source is apps/web/site/.
 - `bun run check`: type-check and build. Must pass before a push.
 
 ## Identity and accounts

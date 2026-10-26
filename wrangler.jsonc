@@ -1,5 +1,5 @@
 {
-  // One Worker serves the app (static assets) and the API (/api/*), and hosts the per-mailbox
+  // One Worker serves the public page (/), the app (/app, static assets) and the API (/api/*), and hosts the per-mailbox
   // Durable Objects and the sync Workflow that copies Gmail into them. Setup: docs/setup.md.
   // Nothing here names an account or domain: the account comes from your wrangler login (or
   // CLOUDFLARE_ACCOUNT_ID), the custom domain is set on the Worker in the dashboard, and the
@@ -14,8 +14,13 @@
   "assets": {
     "directory": "./apps/web/dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/mcp"]
+    // The public page is the site root; the app is under /app. The Worker answers the app's
+    // addresses (falling back to its index.html) and moves the app's old addresses to /app.
+    "not_found_handling": "none",
+    "run_worker_first": [
+      "/api/*", "/mcp", "/app", "/app/*", "!/app/assets/*",
+      "/m/*", "/messages", "/panes", "/gmail/*", "/senders", "/domains", "/labels", "/time", "/backfill", "/usage"
+    ]
   },
   "vars": {
     "APP_VERSION": "dev",
