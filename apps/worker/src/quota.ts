@@ -6,7 +6,10 @@ import { DurableObject } from 'cloudflare:workers';
 import { PAID_DAILY_GUARD, paidNow, SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, quotaStop, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, type LevelMetric } from '@mailcellar/schema';
 import { createPeople, doSql, sqlStore } from '@columenlabs/lumen-people';
 import type { Env } from './env';
-import type { Person } from '@columenlabs/lumen-ui-types/people';
+import type { EmailCheck, Person } from '@columenlabs/lumen-ui-types/people';
+import type { StoredEmail } from '@columenlabs/lumen-people';
+
+export type StoredEmailRow = { settings: StoredEmail; updatedAt: number; updatedBy: string };
 import { adminEmails, INVITE_DAYS, type PeopleOp, type PeopleService, SCOPES } from './people';
 
 export type QuotaUse = Partial<Record<QuotaMetric, number>>;
@@ -438,6 +441,25 @@ export class QuotaDO extends DurableObject<Env> {
   async people<K extends PeopleOp>(op: K, args: Parameters<PeopleService[K]>): Promise<Awaited<ReturnType<PeopleService[K]>>> {
     const service = await this.peopleNow();
     return (service[op] as (...a: unknown[]) => Promise<Awaited<ReturnType<PeopleService[K]>>>)(...args);
+  }
+
+  /** The invite email settings (Admin ▸ Email), key included. Only the kit's routes read it; the key never goes back out. */
+  emailSettings(): StoredEmailRow | null {
+    const v = this.meta('email');
+    return v ? (JSON.parse(v) as StoredEmailRow) : null;
+  }
+
+  setEmailSettings(row: StoredEmailRow | null): void {
+    this.setMeta('email', row && JSON.stringify(row));
+  }
+
+  emailTest(): EmailCheck | null {
+    const v = this.meta('email_test');
+    return v ? (JSON.parse(v) as EmailCheck) : null;
+  }
+
+  setEmailTest(t: EmailCheck): void {
+    this.setMeta('email_test', JSON.stringify(t));
   }
 
   /** The plan last read from Cloudflare; Free until one is read, and from PAID_ENDS whatever billing says. */

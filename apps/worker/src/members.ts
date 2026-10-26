@@ -1,12 +1,11 @@
 // Who may use MailCellar. Cloudflare Access proves who a person is; the people list decides
 // whether they are let in (Lumen's people kit, kept in QuotaDO). ADMIN_EMAILS are built-in
 // admins; everyone else needs an invite. With no ADMIN_EMAILS there is no list, and Access alone decides.
-import { type PeopleApi, peopleRoutes } from '@columenlabs/lumen-people';
-import { can, type Person } from '@columenlabs/lumen-ui-types/people';
+import { type EmailOptions, type PeopleApi, peopleRoutes } from '@columenlabs/lumen-people';
+import { can, type EmailCheck, type Person } from '@columenlabs/lumen-ui-types/people';
 import type { Env } from './env';
-import { canSend, sendMail } from './mailer';
 import { adminEmails, INVITE_DAYS, MAIL_SCOPE, type PeopleOp, SCOPES } from './people';
-import { accountQuota } from './quota';
+import { accountQuota, type StoredEmailRow } from './quota';
 
 /** How long a Worker trusts what the list said about someone: a removal takes effect within this. */
 const ADMIT_MS = 60_000;
@@ -35,6 +34,30 @@ const service = (env: Env): PeopleApi => {
   return Object.fromEntries(ops.map((op) => [op, call(op)])) as unknown as PeopleApi;
 };
 
+/** Invite email through a Resend-style API (FreeSend), reached over the private tunnel or the public internet.
+ *  The settings live in QuotaDO; the API key is typed in Admin ▸ Email and never sent back. */
+const emailOptions = (env: Env): EmailOptions => ({
+  routes: [
+    {
+      id: 'tunnel',
+      label: 'Private tunnel',
+      state: env.FREESEND ? 'Connected' : 'Not set up',
+      url: 'http://localhost:5000/api',
+      urlInfo: 'As seen from the tunnel’s machine, so localhost is that machine itself.',
+      where: 'the tunnel’s machine',
+      fetch: () => (env.FREESEND ? (req) => env.FREESEND!.fetch(req) : null),
+    },
+    { id: 'public', label: 'Public internet', url: 'https://api.resend.com' },
+  ],
+  store: {
+    get: async () => (await accountQuota(env).emailSettings()) as StoredEmailRow | null,
+    put: async (_req, settings, by) => accountQuota(env).setEmailSettings({ settings, updatedAt: Date.now(), updatedBy: by }),
+    clear: async () => accountQuota(env).setEmailSettings(null),
+    lastTest: async () => (await accountQuota(env).emailTest()) as EmailCheck | null,
+    putTest: async (_req, test) => accountQuota(env).setEmailTest(test),
+  },
+});
+
 /** /api/people/*: the routes Admin ▸ People and the invite page call. Null: not one of these. */
 export async function peopleApi(request: Request, env: Env, url: URL, email: string, admin: boolean): Promise<Response | null> {
   if (!url.pathname.startsWith('/api/people')) return null;
@@ -47,8 +70,8 @@ export async function peopleApi(request: Request, env: Env, url: URL, email: str
     fixedAdmins: adminEmails(env),
     appName: 'MailCellar',
     link: (token) => `${url.origin}/invite/${token}`,
-    mailer: () => (canSend(env) ? (m) => sendMail(env, m) : null),
-    mailFrom: () => env.MAIL_FROM,
+    // No mailer of its own: the invites go out through Admin ▸ Email's settings.
+    email: emailOptions(env),
     removeSteps: () => [{ label: 'Their mail', outcome: 'Stays in MailCellar. Inviting them again gives it back.' }],
   });
   const res = await routes(request);

@@ -24,10 +24,10 @@ import {
   useLocation,
   useParams,
 } from '@tanstack/react-router';
-import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, MailPlusIcon, ScrollTextIcon, ShieldCheckIcon, UserIcon, UsersIcon } from 'lucide-react';
+import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, MailIcon, MailPlusIcon, ScrollTextIcon, ShieldCheckIcon, UserIcon, UsersIcon } from 'lucide-react';
 import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { InvitePage, NotInvited, PEOPLE_SECTIONS, PeoplePage } from './admin';
+import { EmailSettings, InvitePage, NotInvited, PEOPLE_SECTIONS, PeoplePage } from './admin';
 import { AccountsSettings, NoIdentity, NotInvitedError, SettingsFromUrl, useMe } from './auth';
 import { MessagesPage, OverviewPage, PanesPage } from './archive';
 import { FiltersPage, SubscriptionsPage } from './gmail-pages';
@@ -131,6 +131,7 @@ function Frame() {
       settings={[
         { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts and mbox archives MailCellar keeps', content: <AccountsSettings /> },
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },
+        ...(me.data?.admin ? [{ id: 'email', title: 'Email', icon: MailIcon, description: 'Where invite emails are sent from', content: <EmailSettings /> }] : []),
       ]}
     >
       <CloseMenuOnNavigate />

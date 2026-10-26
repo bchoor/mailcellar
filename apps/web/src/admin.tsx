@@ -1,10 +1,11 @@
 // Admin ▸ People: who may use MailCellar, their access, invites and the audit log. Lumen's People
 // screens over the kit's routes at /api/people (members.ts). Only admins see it.
-import { LumenInviteAccept, LumenPeople, type PeopleSection, peopleClient } from '@columenlabs/lumen-ui/people';
+import { LumenEmailSettings, LumenInviteAccept, LumenPeople, type PeopleSection, peopleClient } from '@columenlabs/lumen-ui/people';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from '@tanstack/react-router';
+import { useShell } from '@columenlabs/lumen-ui';
 import { LogOutIcon, UserXIcon } from 'lucide-react';
 
 const people = peopleClient('/api/people');
@@ -18,14 +19,21 @@ export const PEOPLE_SECTIONS: { section: PeopleSection; title: string }[] = [
 
 export function PeoplePage({ section }: { section: PeopleSection }) {
   const navigate = useNavigate();
+  const { openSettings } = useShell();
   return (
     <LumenPeople
       adapter={people}
       crumbs={[{ label: 'Admin' }]}
       section={section}
       onSection={(s) => void navigate({ to: `/admin/${s}` })}
+      onSetUpMail={() => openSettings('email')}
     />
   );
+}
+
+/** Settings ▸ Email: the email API invites go out through (FreeSend over the private tunnel, or one on the internet). */
+export function EmailSettings() {
+  return <LumenEmailSettings adapter={people} />;
 }
 
 /** Where an invite email's link lands: accept, then into the app. */
