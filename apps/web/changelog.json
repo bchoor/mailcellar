@@ -1,5 +1,44 @@
 [
   {
+    "tag": "v0.0.13",
+    "sha": "e1c0bc8f14de82e1e26d9dce8376b76b89b651f6",
+    "published_at": "2026-10-26T18:52:03Z",
+    "takeaways": [
+      {
+        "text": "**Choose who may use MailCellar**: In the new Admin sidebar group (People, Invites, Permissions, Audit log), visible only to admins, you can now invite people by email or single-use link, give or remove their access, and review an audit log of changes.",
+        "types": [
+          "feature",
+          "security"
+        ]
+      },
+      {
+        "text": "**Ask Claude about your mail, read-only**: Claude can now connect to your mailbox through the new `/mcp` endpoint to search messages, read them, open threads and attachments, and answer \"how many\" questions with counts grouped by month, sender, domain, recipient and more, without changing anything.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Connecting Gmail works again**: On the Accounts page, connecting or reconnecting a Gmail account no longer fails with Cloudflare Error 1101, and Google now asks only for MailCellar's own permissions (sign-in, email and Gmail).",
+        "types": [
+          "fix",
+          "security"
+        ]
+      },
+      {
+        "text": "**New mailboxes show up on Backfill**: On the Backfill page, a mailbox you just added, removed or uploaded as an mbox archive now appears right away instead of \"No Gmail accounts\" until you reload.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Month map counts are accurate**: On the month map, the copied count for a month no longer shows 1–2 short, for both older months and the month new mail is arriving in.",
+        "types": [
+          "fix"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.12",
     "sha": "14f75800ccf66391a621f1590655fc9e1d2eadaa",
     "published_at": "2026-10-26T01:27:19Z",

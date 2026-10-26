@@ -1,8 +1,9 @@
-import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, MESSAGE_GROUPS, MESSAGE_SORTS, messageFilters, type MessageGroupBy, type MessageSort, monthNow, type ArchiveView, type Health, type UsageDay } from '@mailcellar/schema';
+import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, MESSAGE_GROUPS, MESSAGE_SORTS, messageFilters, type MessageGroupBy, type MessageSort, monthNow, type ArchiveView, type Health, type Suite, type UsageDay } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
 import { attachment, openMessage } from './message';
+import { admit, peopleApi } from './members';
 import { mcp } from './mcp';
 import { bodySnippets } from './search';
 import { accountQuota } from './quota';
@@ -31,11 +32,16 @@ export default {
     // Cloudflare Access names the person; everything below is their own mailbox, reached only through them.
     const who = await identity(request, env);
     if (!who) return Response.json({ error: 'no_identity' }, { status: 401, headers: noStore });
+    // Signed in is not the same as let in: only admins and the guest list are (members.ts).
+    const pass = await admit(env, who.email);
+    if (!pass) return Response.json({ error: 'not_invited', email: who.email }, { status: 403, headers: noStore });
+    const people = await peopleApi(request, env, url, who.email, pass.admin);
+    if (people) return people;
     if (request.method === 'GET') {
       if (url.pathname === '/api/accounts/connect') return connect(url, env);
       if (url.pathname === '/api/auth/callback') return callback(request, env, url, who);
     }
-    const res = await mailboxApi(request, env, url, who);
+    const res = await mailboxApi(request, env, url, who, pass.admin);
     return res ?? Response.json({ error: 'not_found' }, { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -61,10 +67,20 @@ async function releases(request: Request, env: Env, url: URL): Promise<Response>
   return Response.json({ releases: from < 0 ? [] : all.slice(from, from + limit) }, { headers: noStore });
 }
 
+/** The suite this deployment joins, from its Worker variables; undefined when none is set. */
+function suiteOf(env: Env): Suite | undefined {
+  const suite: Suite = {
+    list: env.SUITE_LIST_URL || undefined,
+    prefsCookie: env.SUITE_PREFS_COOKIE || undefined,
+    prefsDomain: env.SUITE_PREFS_DOMAIN || undefined,
+  };
+  return suite.list || suite.prefsCookie ? suite : undefined;
+}
+
 /** The API a person's mailboxes serve: who this is, accounts, each account's pages, schedules and usage. Null: not one of these. */
-async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): Promise<Response | null> {
+async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, admin: boolean): Promise<Response | null> {
   const { email, mailbox } = who;
-  if (url.pathname === '/api/me' && request.method === 'GET') return Response.json(await mailbox.me(email), { headers: noStore });
+  if (url.pathname === '/api/me' && request.method === 'GET') return Response.json({ ...(await mailbox.me(email)), admin, suite: suiteOf(env) }, { headers: noStore });
   const test = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/test$/);
   if (test && request.method === 'POST') {
     if (!(await testAccount(env, mailbox, test[1]))) return Response.json({ error: 'not_found' }, { status: 404 });
@@ -259,8 +275,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
     return Response.json(await accountQuota(env).readNow(), { headers: noStore });
   if (url.pathname === '/api/admin/test-limit' && (request.method === 'PUT' || request.method === 'DELETE')) {
     // The end-to-end test switch, for 30 minutes: {"doWrites": 500, "resetMin": 3, "spendStop": 0.2}. Admins only.
-    const admins = (env.ADMIN_EMAILS ?? '').toLowerCase().split(',').map((e) => e.trim()).filter(Boolean);
-    if (!admins.includes(email.toLowerCase())) return Response.json({ error: 'forbidden' }, { status: 403, headers: noStore });
+    if (!admin) return Response.json({ error: 'forbidden' }, { status: 403, headers: noStore });
     if (request.method === 'DELETE') return Response.json({ test: await accountQuota(env).setTestLimit(null) }, { headers: noStore });
     let body: { doWrites?: unknown; resetMin?: unknown; spendStop?: unknown };
     try {
