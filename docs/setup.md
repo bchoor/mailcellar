@@ -62,6 +62,8 @@ Optional:
 - Invite emails: set in the app, Admin ▸ Email, against any Resend-style email API (Resend, or a self-hosted one such as FreeSend). A self-hosted one behind a Cloudflare Tunnel is reached through a Workers VPC service bound as `FREESEND` (`vpc_services` in `wrangler.jsonc`), the Private tunnel route. Not set: each invite gives a link to send by hand.
 - `CF_ANALYTICS_TOKEN`: a token with Account Analytics, Workers Scripts and Workflows read. The Usage page reads the account's usage with it.
 - `CF_BILLING_TOKEN`: a token with Billing Read. The Usage page reads the plan with it.
+- `SUITE_LIST_URL`: when MailCellar sits in a suite of Lumen apps, the address its app switcher reads (`{ apps: [{ id, name, url, icon?, group? }] }`, sent with the browser's cookies, so the suite must allow this origin with credentials). Unset: the sidebar shows MailCellar alone.
+- `SUITE_PREFS_COOKIE` and `SUITE_PREFS_DOMAIN`: the suite's shared Lumen prefs cookie and its domain (such as `.example.com`), so theme mode, font and size follow the person across the suite. MailCellar keeps its own palette and mark.
 
 Plain variables set in the dashboard work too: `keep_vars` keeps them across deploys.
 

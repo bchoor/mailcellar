@@ -47,6 +47,19 @@ export interface Me {
   /** Manages people: sees Admin ▸ People. */
   admin: boolean;
   accounts: ConnectedAccount[];
+  /** The suite this deployment joins (Worker variables); absent when it joins none. */
+  suite?: Suite;
+}
+
+/**
+ * A suite of apps MailCellar sits in, set per deployment: `list` is the address its app switcher
+ * reads (Lumen's `LumenSuiteSwitcher`), and `prefsCookie` + `prefsDomain` the shared Lumen prefs
+ * cookie, so theme mode, font and size follow the person across the suite's apps.
+ */
+export interface Suite {
+  list?: string;
+  prefsCookie?: string;
+  prefsDomain?: string;
 }
 
 /** Codes the connect redirect puts in `?auth_error=`, and what Settings ▸ Accounts says for each. */

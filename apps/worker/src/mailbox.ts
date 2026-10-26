@@ -2669,7 +2669,7 @@ export class MailboxDO extends DurableObject<Env> {
     const token = account.refreshToken ?? known?.refresh_token;
     if (!token) return { ok: false, error: 'no_refresh' };
     const { rowsWritten } = sql.exec(
-        `INSERT INTO accounts VALUES (?, ?, ?, ?, ?, ?, NULL) ON CONFLICT (id) DO UPDATE SET
+        `INSERT INTO accounts (id, email, refresh_token, scopes, added_at, tested_at, test_error) VALUES (?, ?, ?, ?, ?, ?, NULL) ON CONFLICT (id) DO UPDATE SET
            email = excluded.email, refresh_token = excluded.refresh_token, scopes = excluded.scopes,
            tested_at = excluded.tested_at, test_error = NULL`,
         account.id, account.email, token, account.scopes.join(' '), new Date().toISOString(), new Date().toISOString(),

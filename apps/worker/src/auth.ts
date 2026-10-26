@@ -125,7 +125,6 @@ export async function connect(url: URL, env: Env): Promise<Response> {
     response_type: 'code',
     scope: CONNECT_SCOPES.join(' '),
     access_type: 'offline',
-    include_granted_scopes: 'true',
     // Consent every time, so Google always issues a refresh token, even for an account seen before.
     prompt: 'select_account consent',
     ...(url.searchParams.get('email') ? { login_hint: url.searchParams.get('email')! } : {}),

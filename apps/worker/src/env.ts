@@ -33,6 +33,11 @@ export interface Env {
   ADMIN_EMAILS?: string;
   /** The private tunnel to the self-hosted email API (a Workers VPC service), for invite emails. Unbound: only the public route. */
   FREESEND?: { fetch: (req: Request) => Promise<Response> };
+  /** A suite this deployment joins (plain Worker variables, all optional): the address its app switcher
+   *  reads, and the Lumen prefs cookie and its domain shared across the suite's apps. */
+  SUITE_LIST_URL?: string;
+  SUITE_PREFS_COOKIE?: string;
+  SUITE_PREFS_DOMAIN?: string;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
   DEV_USER_EMAIL?: string;
 }
