@@ -196,6 +196,15 @@ const router = createRouter({
   history: __SINGLE_FILE__ ? createMemoryHistory({ initialEntries: ['/'] }) : createBrowserHistory(),
 });
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+// Adding, removing or uploading a mailbox changes /api/me; the backfill's kept answer is then
+// out of date (staleTime is Infinity), so Backfill would miss the new mailbox until a reload.
+let lastMe: unknown;
+queryClient.getQueryCache().subscribe((e) => {
+  if (e.type !== 'updated' || e.action.type !== 'success' || e.query.queryKey[0] !== 'me') return;
+  const me = e.query.state.data;
+  if (lastMe !== undefined && me !== lastMe) void queryClient.invalidateQueries({ queryKey: ['backfill'] });
+  lastMe = me;
+});
 
 createRoot(document.getElementById('root') as HTMLElement).render(
   <StrictMode>
