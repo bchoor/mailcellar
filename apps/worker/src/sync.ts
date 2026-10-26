@@ -613,6 +613,7 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       await step.do('next run', () => syncDeps.launch(this.env, { user, account, commit: true }, r.nextId!));
       return r;
     }
+    if (event.payload.sizes) return step.do('sizes', () => accountMailbox(this.env, user, account).storageSizes());
     if (event.payload.bodies) {
       // The body pass (bodies.ts): each run moves the mailbox's bookmark and names the next.
       const r = await step.do('bodies', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runBodies(this.env, user, account, runId));
