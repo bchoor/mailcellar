@@ -23,6 +23,8 @@ export interface IndexedMessage {
   raw?: string;
   rawOffset?: number;
   rawLen?: number;
+  /** Body text for search only (index, never stored): absent for mail indexed before body search. */
+  body?: string;
 }
 
 /** A Gmail label as labels.list returns it. */
@@ -66,7 +68,16 @@ export interface SenderRow { addr: string; name: string; n: number; bytes: numbe
 export type MessageState = 'live' | 'archived';
 export const MESSAGE_STATES: readonly MessageState[] = ['live', 'archived'];
 
-export type MessageRow = IndexedMessage & { state: MessageState };
+export type MessageRow = IndexedMessage & {
+  state: MessageState;
+  /** Under a text search: the words were found only in the body, so the row's snippet doesn't show them. */
+  bodyHit?: boolean;
+};
+/** The part of a message's body where a search's words are, and each word's place in it ([start, end) in `text`). */
+export interface BodySnippet {
+  text: string;
+  hits: [number, number][];
+}
 export interface ArchiveRows {
   months: MonthRow;
   labels: LabelRow;

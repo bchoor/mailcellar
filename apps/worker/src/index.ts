@@ -3,6 +3,7 @@ import { callback, connect, identity, revoke, testAccount, type Identity } from 
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
 import { attachment, openMessage } from './message';
+import { bodySnippets } from './search';
 import { accountQuota } from './quota';
 import { archiveApi, removeArchive } from './archive-api';
 import { accountMailbox } from './sync';
@@ -204,6 +205,13 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity): 
       (MESSAGE_SORTS as readonly string[]).includes(url.searchParams.get('sort') ?? '') ? (url.searchParams.get('sort') as MessageSort) : 'date',
     );
     return Response.json(page, { headers: noStore });
+  }
+  // Search results' body snippets: the line of each body where the words are, read from its raw file.
+  const snips = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/snippets$/);
+  if (snips && request.method === 'GET') {
+    if (!(await mailbox.hasMailbox(snips[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    const ids = (url.searchParams.get('ids') ?? '').split(',').filter((id) => /^[0-9a-f]{1,16}$/.test(id));
+    return Response.json(await bodySnippets(env, who.user, snips[1], ids, url.searchParams.get('q') ?? ''), { headers: noStore });
   }
   // One Gmail account's pages: its archive (its own mailbox DO) and its Gmail settings (read live).
   const scoped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/(archive\/[a-z]+|filters|subscriptions|labels)$/);

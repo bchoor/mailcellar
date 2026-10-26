@@ -321,6 +321,7 @@ export function indexRow(m: RawMessage, raw: Uint8Array, h = headers(raw)): Inde
     size: m.sizeEstimate,
     attachments: countAttachments(raw),
     labels: m.labelIds ?? [],
+    body: searchText(raw),
   };
 }
 
@@ -415,7 +416,7 @@ const htmlToText = (html: string) =>
 export const BODY_SCAN = 256 * 1024;
 
 /**
- * The readable text of a message, for full-text search in Basin: the first text/plain part,
+ * The readable text of a message: the first text/plain part,
  * or the first text/html part with tags removed. Attachments are skipped, not decoded. Only the
  * first BODY_SCAN bytes are read, which keeps a message with big attachments cheap.
  */
@@ -448,4 +449,28 @@ export function bodyText(raw: Uint8Array, max = 32 * 1024): string {
   };
   walk(binary(raw.subarray(0, BODY_SCAN)), 0);
   return (found.plain ?? found.html ?? '').trim().slice(0, max);
+}
+
+/** Body text kept in search a message, at most: covers nearly every email a person wrote. */
+export const BODY_MAX = 16 * 1024;
+
+/** Where a reply's quoted mail starts: "On … wrote:" (Gmail, Apple Mail), Outlook's header block, or a forward's. */
+const QUOTE_START = /^(On [^\n]{0,300}?(\n[^\n]{0,200}?)?wrote:\s*$|-{2,}\s*Original Message\s*-{2,}|_{10,}\s*$|From:[^\n]*\n(Sent|Date):)/im;
+
+/**
+ * The words body search keeps for a message (Bikram, 2026-10-25): its plain text (HTML with tags
+ * removed when it has no plain part), without the mail it quotes, up to BODY_MAX characters.
+ */
+export function searchText(raw: Uint8Array): string {
+  let text = bodyText(raw, BODY_MAX * 2);
+  const quote = QUOTE_START.exec(text);
+  if (quote && quote.index > 0) text = text.slice(0, quote.index);
+  return text
+    .split('\n')
+    .filter((l) => !l.startsWith('>'))
+    .join('\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, BODY_MAX);
 }

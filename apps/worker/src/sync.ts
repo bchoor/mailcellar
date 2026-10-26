@@ -12,6 +12,7 @@ import type { Env } from './env';
 import { accountQuota, type QuotaUse } from './quota';
 import { runCommit, runLane } from './copy';
 import { runImport } from './import';
+import { runBodies } from './bodies';
 import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, GmailError, indexRow, labels, listPage, packBySize, profile, type RawMessage } from './gmail';
 
 /** Messages one run copies: about 510 R2 and DO calls, well inside the cap of 1,000. */
@@ -610,6 +611,14 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       if (!r.more || !r.nextId) return r;
       if (r.waitMs) await step.sleep('wait for months to land', r.waitMs);
       await step.do('next run', () => syncDeps.launch(this.env, { user, account, commit: true }, r.nextId!));
+      return r;
+    }
+    if (event.payload.bodies) {
+      // The body pass (bodies.ts): each run moves the mailbox's bookmark and names the next.
+      const r = await step.do('bodies', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runBodies(this.env, user, account, runId));
+      if (!r.nextId) return r;
+      if (r.resumesAt) await step.sleepUntil('wait for the daily guard', new Date(r.resumesAt));
+      await step.do('next run', () => syncDeps.launch(this.env, { user, account, bodies: true }, r.nextId!));
       return r;
     }
     if (event.payload.import) {
