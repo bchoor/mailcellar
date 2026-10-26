@@ -1722,6 +1722,88 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
+   * How many messages match, in one query rather than pages (the MCP server's count_messages and
+   * search_messages' total), optionally grouped. Dates seek the ts index; the rest is checked on
+   * those rows. `keys` also returns each match's sender, subject and minute, so mailboxes can be
+   * counted together without a message held in two of them counted twice.
+   */
+  async countMessages(
+    q: { text?: string; from?: string; domain?: string; label?: string; after?: number; before?: number; attachments?: boolean },
+    groupBy: 'none' | 'sender' | 'domain' | 'label' | 'month' | 'year',
+    keys = false,
+  ): Promise<{ total: number; bytes: number; groups: { key: string; n: number; bytes: number }[]; keys?: string[]; unknownLabel?: true }> {
+    const sql = this.ctx.storage.sql;
+    let read = 0;
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (q.after !== undefined) where.push('ts >= ?'), args.push(q.after);
+    if (q.before !== undefined) where.push('ts < ?'), args.push(q.before);
+    if (q.from) where.push(`(instr(lower(from_addr), ?) > 0 OR instr(lower(from_name), ?) > 0)`), args.push(q.from.toLowerCase(), q.from.toLowerCase());
+    if (q.domain) {
+      // The domain and its subdomains: amazon.com counts mail from amazon.com and email.amazon.com.
+      const d = q.domain.toLowerCase().replace(/^@/, '');
+      where.push(`(lower(from_addr) LIKE ? ESCAPE '\\' OR lower(from_addr) LIKE ? ESCAPE '\\')`);
+      const lit = d.replace(/[\\%_]/g, (c) => `\\${c}`);
+      args.push(`%@${lit}`, `%.${lit}`);
+    }
+    if (q.attachments) where.push('attachments > 0');
+    if (q.label) {
+      const v = q.label;
+      const c = sql.exec<{ id: string }>(`SELECT id FROM labels WHERE id = ? OR id = ? OR lower(name) = ?`, v, v.toUpperCase(), v.toLowerCase());
+      const ids = c.toArray().map((r) => r.id);
+      read += c.rowsRead;
+      if (!ids.length) return { total: 0, bytes: 0, groups: [], unknownLabel: true };
+      where.push(`(${ids.map(() => `instr(' ' || labels || ' ', ?) > 0`).join(' OR ')})`);
+      args.push(...ids.map((id) => ` ${id} `));
+    }
+    // Each word in the envelope or the body, as one list of IDs: SQLite seeks those rows by key
+    // instead of reading the mailbox (textMatch's OR reads every row).
+    for (const w of q.text ? ftsQuery(q.text).split(' ').filter(Boolean) : []) {
+      where.push(`id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ? UNION SELECT printf('%x', rowid) FROM body_fts WHERE body_fts MATCH ?)`);
+      args.push(w, w);
+    }
+    if (!where.length && groupBy === 'none' && !keys) {
+      // No filter: the running totals hold it.
+      const [m] = sql.exec<{ b: number }>(`SELECT coalesce(sum(bytes), 0) AS b FROM months`).toArray();
+      return { total: this.indexedTotal(), bytes: m?.b ?? 0, groups: [] };
+    }
+    const cond = where.length ? where.join(' AND ') : '1';
+    const exec = <R extends Record<string, SqlStorageValue>>(query: string) => {
+      const c = sql.exec<R>(query, ...args);
+      const out = c.toArray();
+      read += c.rowsRead;
+      return out;
+    };
+    const [sum] = exec<{ n: number; b: number }>(`SELECT count(*) AS n, coalesce(sum(size), 0) AS b FROM messages WHERE ${cond}`);
+    let groups: { key: string; n: number; bytes: number }[] = [];
+    const key = {
+      sender: 'lower(from_addr)',
+      domain: `lower(substr(from_addr, instr(from_addr, '@') + 1))`,
+      month: `strftime('%Y-%m', ts / 1000, 'unixepoch')`,
+      year: `strftime('%Y', ts / 1000, 'unixepoch')`,
+    } as const;
+    if (groupBy === 'label') {
+      const n = new Map<string, { n: number; bytes: number }>();
+      for (const r of exec<{ labels: string; size: number }>(`SELECT labels, size FROM messages WHERE ${cond}`))
+        for (const l of r.labels.split(' ').filter(Boolean)) {
+          const g = n.get(l) ?? { n: 0, bytes: 0 };
+          g.n++;
+          g.bytes += r.size;
+          n.set(l, g);
+        }
+      groups = [...n].map(([k, g]) => ({ key: k, ...g }));
+    } else if (groupBy !== 'none')
+      groups = exec<{ key: string; n: number; bytes: number }>(
+        `SELECT ${key[groupBy]} AS key, count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages WHERE ${cond} GROUP BY 1`,
+      );
+    const out = keys
+      ? exec<{ k: string }>(`SELECT lower(from_addr) || '|' || subject || '|' || (ts / 60000) AS k FROM messages WHERE ${cond} LIMIT 50000`).map((r) => r.k)
+      : undefined;
+    this.count({ do_rows_read: read });
+    return { total: sum?.n ?? 0, bytes: sum?.b ?? 0, groups, ...(out ? { keys: out } : {}) };
+  }
+
+  /**
    * One page of Messages groups, largest first, from the rollups: no message is read. Counts are
    * the rollup's, so they hold for the whole mailbox only: under other filters each is null.
    * Senders and domains page on their n index, GROUPS_PAGE at a time; the rest come whole.
