@@ -401,7 +401,7 @@ function decodeBody(body: string, encoding: string, charset: string): string {
   }
 }
 
-const htmlToText = (html: string) =>
+export const htmlToText = (html: string) =>
   unescapeSnippet(
     html
       .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')

@@ -3,6 +3,7 @@ import { callback, connect, identity, revoke, testAccount, type Identity } from 
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
 import type { Env } from './env';
 import { attachment, openMessage } from './message';
+import { mcp } from './mcp';
 import { bodySnippets } from './search';
 import { accountQuota } from './quota';
 import { archiveApi, removeArchive } from './archive-api';
@@ -12,7 +13,7 @@ export { MailboxDO } from './mailbox';
 export { QuotaDO } from './quota';
 export { SyncWorkflow } from './sync';
 
-// Static assets serve the app; only /api/* reaches this handler (run_worker_first).
+// Static assets serve the app; only /api/* and /mcp reach this handler (run_worker_first).
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -21,6 +22,8 @@ export default {
       return Response.json(body);
     }
     if (url.pathname === '/api/releases' && request.method === 'GET') return releases(request, env, url);
+    // The MCP server: its own Access application, its own checks (mcp.ts).
+    if (url.pathname === '/mcp') return mcp(request, env, url);
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     // A change must come from this app's own pages; this refuses other sites' requests outright.
     if (request.method !== 'GET' && request.headers.get('origin') !== url.origin)

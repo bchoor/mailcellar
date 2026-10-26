@@ -46,6 +46,9 @@ import {
   type SyncParams,
   type MessageFilter,
   type MessageRow,
+  type SenderRow,
+  type DomainRow,
+  type LabelRow,
   type MessagePage,
   type MessageSort,
   type MessageGroup,
@@ -1633,6 +1636,89 @@ export class MailboxDO extends DurableObject<Env> {
       }
     }
     throw new Error('unknown view');
+  }
+
+  /** The biggest senders, domains or labels by count, from their rollups (the MCP server's aggregate). */
+  async top(by: 'senders' | 'domains' | 'labels', limit: number): Promise<(SenderRow | DomainRow | LabelRow)[]> {
+    const query = {
+      senders: `SELECT addr, name, n, bytes, first_ts AS firstTs, last_ts AS lastTs FROM senders ORDER BY n DESC LIMIT ?`,
+      domains: `SELECT domain, n, bytes FROM domains ORDER BY n DESC LIMIT ?`,
+      labels: `SELECT id, name, type, n, bytes FROM labels WHERE n > 0 ORDER BY n DESC LIMIT ?`,
+    }[by];
+    const cursor = this.ctx.storage.sql.exec(query, limit);
+    const out = cursor.toArray() as unknown as (SenderRow | DomainRow | LabelRow)[];
+    this.count({ do_rows_read: cursor.rowsRead });
+    return out;
+  }
+
+  /** The database's size in bytes, as SQLite counts its pages. */
+  async databaseSize(): Promise<number> {
+    return this.ctx.storage.sql.databaseSize;
+  }
+
+  /**
+   * How the database's bytes split: message metadata and rollups (bytes as stored), the envelope and
+   * body search indexes (their blocks), and the rest (plain indexes and page overhead). Reads every
+   * message row once, so only on request (a `sizes` run of the sync Workflow).
+   */
+  async storageSizes(): Promise<{ total: number; messages: number; metadata: number; envelopeSearch: number; bodySearch: number; indexesAndOverhead: number }> {
+    const sql = this.ctx.storage.sql;
+    let read = 0;
+    const one = (query: string) => {
+      const c = sql.exec<{ v: number | null }>(query);
+      const v = c.one().v ?? 0;
+      read += c.rowsRead;
+      return v;
+    };
+    const total = sql.databaseSize;
+    const messages = one(`SELECT COUNT(*) AS v FROM messages`);
+    // Stored bytes of each row: text as written, numbers at 8 bytes. SQLite's page split isn't readable here.
+    const metadata = one(
+      `SELECT SUM(length(id) + length(thread_id) + length(from_addr) + length(from_name) + length(subject) + length(snippet)
+         + length(labels) + length(state) + ifnull(length(raw_key), 0) + 48) AS v FROM messages`,
+    ) +
+      one(`SELECT SUM(length(addr) + length(name) + 32) AS v FROM senders`) +
+      one(`SELECT SUM(length(domain) + 16) AS v FROM domains`) +
+      one(`SELECT SUM(length(month) + 16) AS v FROM months`) +
+      one(`SELECT SUM(length(id) + length(name) + length(type) + 16) AS v FROM labels`);
+    const envelopeSearch = one(`SELECT SUM(length(block)) AS v FROM message_fts_data`);
+    const bodySearch = one(`SELECT SUM(length(block)) AS v FROM body_fts_data`);
+    this.count({ do_rows_read: read });
+    return { total, messages, metadata, envelopeSearch, bodySearch, indexesAndOverhead: Math.max(0, total - metadata - envelopeSearch - bodySearch) };
+  }
+
+  /** Whether the thread index is built; null until read from the schema. */
+  private threadReady: boolean | null = null;
+  private threadTried = 0;
+
+  /**
+   * One conversation, oldest first (the MCP server's list_thread), and how many messages it has.
+   * Its index is built like the sort indexes: once the day's DO writes have room for one write a
+   * message. Until then a conversation is found by reading the whole mailbox.
+   */
+  async thread(threadId: string, limit: number): Promise<{ rows: MessageRow[]; total: number }> {
+    const sql = this.ctx.storage.sql;
+    this.threadReady ??= sql.exec(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'messages_thread'`).toArray().length > 0;
+    if (!this.threadReady && Date.now() - this.threadTried >= 5 * 60_000) {
+      this.threadTried = Date.now();
+      const quota = accountQuota(this.env);
+      if (!(await quota.reserve({ do_rows_written: this.indexedTotal() + 100 }))) {
+        const c = sql.exec(`CREATE INDEX IF NOT EXISTS messages_thread ON messages (thread_id, ts)`);
+        this.count({ do_rows_written: c.rowsWritten, do_rows_read: c.rowsRead });
+        await quota.add({ do_rows_written: c.rowsWritten, do_rows_read: c.rowsRead });
+        console.log(JSON.stringify({ threadIndex: { rowsWritten: c.rowsWritten, rowsRead: c.rowsRead } }));
+        this.threadReady = true;
+      }
+    }
+    const c = sql.exec(
+      `SELECT id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
+         subject, snippet, size, attachments, labels, state
+       FROM messages WHERE thread_id = ? ORDER BY ts, id`,
+      threadId,
+    );
+    const all = c.toArray() as unknown as (Omit<MessageRow, 'labels'> & { labels: string })[];
+    this.count({ do_rows_read: c.rowsRead });
+    return { rows: all.slice(0, limit).map((r) => ({ ...r, labels: r.labels.split(' ').filter(Boolean) })), total: all.length };
   }
 
   /**

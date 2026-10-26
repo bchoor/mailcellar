@@ -3,6 +3,7 @@
 import { mailboxName, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
 import PostalMime, { type Address, type Attachment, type Email } from 'postal-mime';
 import type { Env } from './env';
+import { htmlToText } from './gmail';
 
 /** Inline images past this many bytes, all told, stay as cid: links rather than data URLs. */
 const INLINE_MAX = 4 * 1024 * 1024;
@@ -74,6 +75,30 @@ export async function openMessage(env: Env, user: UserId, account: string, id: s
   };
 }
 
+/** The message for a reader with no screen (the MCP server): headers, attachments, and its body as plain text. */
+export async function messageText(env: Env, user: UserId, account: string, id: string): Promise<(Omit<MessageDetail, 'html' | 'text'> & { body: string }) | null> {
+  const raw = await rawBytes(env, user, account, id);
+  if (!raw) return null;
+  const mail = await parse(raw);
+  const date = mail.date && !Number.isNaN(Date.parse(mail.date)) ? new Date(mail.date).toISOString() : null;
+  return {
+    from: addresses(mail.from ? [mail.from] : undefined)[0] ?? null,
+    to: addresses(mail.to), cc: addresses(mail.cc), bcc: addresses(mail.bcc), replyTo: addresses(mail.replyTo),
+    date, subject: mail.subject ?? '',
+    attachments: listed(mail).map(({ a, index }) => ({ index, filename: a.filename || `attachment-${index + 1}`, mimeType: a.mimeType, size: bytesOf(a).length })),
+    body: (mail.text ?? (mail.html ? htmlToText(mail.html) : '')).trim(),
+  };
+}
+
+/** One attachment's name, type and bytes; null when the message or the attachment isn't there. */
+export async function attachmentFile(env: Env, user: UserId, account: string, id: string, index: number): Promise<{ filename: string; mimeType: string; bytes: Uint8Array } | null> {
+  const raw = await rawBytes(env, user, account, id);
+  if (!raw) return null;
+  const a = (await parse(raw)).attachments[index];
+  if (!a) return null;
+  return { filename: a.filename || `attachment-${index + 1}`, mimeType: a.mimeType.split(';')[0].trim().toLowerCase(), bytes: bytesOf(a) };
+}
+
 /** Types the app may show in place; anything else is only ever a download. SVG stays out: as a page it can run scripts. */
 const VIEWABLE = /^(image\/(png|jpe?g|gif|webp|avif|bmp)|application\/pdf|text\/(plain|csv)|application\/json)$/i;
 
@@ -82,16 +107,14 @@ const VIEWABLE = /^(image\/(png|jpe?g|gif|webp|avif|bmp)|application\/pdf|text\/
  * `view=1` a viewable type comes as itself (for the preview), still unable to run on this site.
  */
 export async function attachment(env: Env, user: UserId, account: string, id: string, month: string, index: number, view = false): Promise<Response | null> {
-  const raw = await rawBytes(env, user, account, id);
-  if (!raw) return null;
-  const a = (await parse(raw)).attachments[index];
+  const a = await attachmentFile(env, user, account, id, index);
   if (!a) return null;
-  const name = (a.filename || `attachment-${index + 1}`).replace(/[\r\n"\\]/g, '_');
-  const type = a.mimeType.split(';')[0].trim().toLowerCase();
+  const name = a.filename.replace(/[\r\n"\\]/g, '_');
+  const type = a.mimeType;
   const shown = view && VIEWABLE.test(type);
   // Text is read as text by the app; JSON or CSV opened directly shows as plain text, never as a page.
   const as = shown ? (type.startsWith('text/') || type === 'application/json' ? 'text/plain; charset=utf-8' : type) : 'application/octet-stream';
-  return new Response(bytesOf(a), {
+  return new Response(a.bytes, {
     headers: {
       'content-type': as,
       'content-disposition': `${shown ? 'inline' : 'attachment'}; filename="${name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,

@@ -15,13 +15,13 @@
     "directory": "./apps/web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/mcp"]
   },
   "vars": {
     "APP_VERSION": "dev",
     // The R2 bucket that holds the raw files; must match r2_buckets below.
     "ARCHIVE_BUCKET": "mailcellar"
-    // Set per deployment (docs/setup.md), not here: CF_ACCOUNT_ID, ACCESS_TEAM_DOMAIN, ACCESS_AUD,
+    // Set per deployment (docs/setup.md), not here: CF_ACCOUNT_ID, ACCESS_TEAM_DOMAIN, ACCESS_AUD, MCP_ACCESS_AUD,
     // ADMIN_EMAILS; secrets GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, CF_ANALYTICS_TOKEN,
     // CF_BILLING_TOKEN.
   },

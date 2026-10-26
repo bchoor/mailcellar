@@ -58,7 +58,7 @@ async function accessKey(env: Env, kid: string): Promise<CryptoKey | null> {
 }
 
 /** The email in a valid Cloudflare Access token for this app, or null. */
-async function verifyAccess(token: string, env: Env): Promise<string | null> {
+async function verifyAccess(token: string, env: Env, audience: string): Promise<string | null> {
   try {
     const [head, body, sig] = token.split('.');
     const header = json<{ alg?: string; kid?: string }>(fromB64url(head));
@@ -69,7 +69,7 @@ async function verifyAccess(token: string, env: Env): Promise<string | null> {
     if (!ok) return null;
     const claims = json<{ aud?: string | string[]; iss?: string; exp?: number; email?: string }>(fromB64url(body));
     const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    if (!aud.includes(env.ACCESS_AUD) || claims.iss !== env.ACCESS_TEAM_DOMAIN) return null;
+    if (!aud.includes(audience) || claims.iss !== env.ACCESS_TEAM_DOMAIN) return null;
     if ((claims.exp ?? 0) * 1000 < Date.now() || !claims.email) return null;
     return claims.email;
   } catch {
@@ -81,12 +81,13 @@ async function verifyAccess(token: string, env: Env): Promise<string | null> {
  * Who is making this request. In production that is the email in Cloudflare Access's signed
  * token; Access sits in front of the whole site, and the Worker checks the token itself.
  * `wrangler dev` has no Access, so there DEV_USER_EMAIL stands in (set only in .dev.vars).
+ * `audience` is the Access application's tag: the app's, or the MCP server's (its own application).
  */
-export async function identity(request: Request, env: Env): Promise<Identity | null> {
+export async function identity(request: Request, env: Env, audience = env.ACCESS_AUD): Promise<Identity | null> {
   let email: string | null = null;
   if (env.ACCESS_AUD) {
     const token = request.headers.get('cf-access-jwt-assertion');
-    email = token ? await verifyAccess(token, env) : null;
+    email = token && audience ? await verifyAccess(token, env, audience) : null;
   } else if (env.DEV_USER_EMAIL) email = env.DEV_USER_EMAIL;
   if (!email) return null;
   const user = await userIdFor(email);

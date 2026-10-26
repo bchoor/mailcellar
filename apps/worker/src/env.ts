@@ -24,6 +24,8 @@ export interface Env {
   /** Cloudflare Access in front of the site: the team domain and this app's audience tag. */
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
+  /** The MCP server's own Access application (/mcp, with Managed OAuth): its audience tag. Unset: /mcp is off. */
+  MCP_ACCESS_AUD?: string;
   /** Comma-separated emails allowed the admin test switch (PUT /api/admin/test-limit). */
   ADMIN_EMAILS?: string;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */

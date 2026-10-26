@@ -51,6 +51,7 @@ Copy the client ID and secret. While the app is in Testing, Google expires its r
 bunx wrangler secret put CF_ACCOUNT_ID         # your account ID (dashboard ▸ Account home)
 bunx wrangler secret put ACCESS_TEAM_DOMAIN
 bunx wrangler secret put ACCESS_AUD
+bunx wrangler secret put MCP_ACCESS_AUD     # step 9, for the MCP server
 bunx wrangler secret put GOOGLE_CLIENT_ID
 bunx wrangler secret put GOOGLE_CLIENT_SECRET
 ```
@@ -70,6 +71,16 @@ Workers & Pages ▸ mailcellar ▸ Settings ▸ Builds ▸ Connect your fork. Bu
 ## 8. Use it
 
 Open `https://mail.example.com`, sign in through Access, then Settings ▸ Accounts ▸ Add Gmail account. Pick months on Backfill, then Start backfill. Settings ▸ Accounts ▸ Add mbox archive imports an mbox file.
+
+## 9. MCP server
+
+`/mcp` gets its own Access application, so an MCP client's sign-in reaches only `/mcp`:
+
+1. Zero Trust ▸ Access ▸ Applications ▸ Add ▸ Self-hosted, on `mail.example.com` with path `mcp`, and the same policy (only your email).
+2. Advanced settings ▸ turn on **Managed OAuth**, with dynamic client registration allowing `https://claude.ai/api/mcp/auth_callback` (and `http://localhost/*` for local clients).
+3. Copy its **Application Audience (AUD) tag** into the Worker variable `MCP_ACCESS_AUD`.
+
+Until `MCP_ACCESS_AUD` is set, `/mcp` answers 503. Then add the connector in claude.ai (Settings ▸ Connectors ▸ Add custom connector, `https://mail.example.com/mcp`) and sign in through Access when asked.
 
 ## Local dev
 
