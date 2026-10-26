@@ -4,7 +4,7 @@
 // its text is. No Gmail calls. Runs chain, each stopping before the daily DO write guard.
 import { paidNow, r2Keys, type UserId } from '@mailcellar/schema';
 import type { Env } from './env';
-import { BODY_SCAN, searchText } from './gmail';
+import { BODY_SCAN, headers, recipients, searchText } from './gmail';
 import { accountQuota } from './quota';
 import { accountMailbox } from './sync';
 
@@ -42,8 +42,13 @@ async function bytesOf(obj: R2ObjectBody): Promise<Uint8Array> {
   return new Uint8Array(await obj.arrayBuffer());
 }
 
-/** Each message's search text, by reading its raw file: one read a pack where the pack is small enough. */
-async function readBodies(env: Env, user: UserId, account: string, todo: Todo[]): Promise<{ bodies: { id: string; body: string }[]; bytes: number; reads: number }> {
+/**
+ * Each message's search text (or what `extract` takes from its first `scan` bytes), by reading its
+ * raw file: one read a pack where the pack is small enough.
+ */
+async function readBodies(
+  env: Env, user: UserId, account: string, todo: Todo[], scan = BODY_SCAN, extract: (raw: Uint8Array) => string = searchText,
+): Promise<{ bodies: { id: string; body: string }[]; bytes: number; reads: number }> {
   const prefix = r2Keys.prefix(user);
   const groups = new Map<string, Todo[]>();
   for (const t of todo) {
@@ -60,9 +65,9 @@ async function readBodies(env: Env, user: UserId, account: string, todo: Todo[])
     for (const t of whole) jobs.push({ key, items: [t] });
     if (!placed.length) continue;
     const start = Math.min(...placed.map((t) => t.offset));
-    const end = Math.max(...placed.map((t) => t.offset + Math.min(t.len, BODY_SCAN)));
+    const end = Math.max(...placed.map((t) => t.offset + Math.min(t.len, scan)));
     if (end - start <= PACK_READ_MAX) jobs.push({ key, range: { offset: start, length: end - start }, items: placed });
-    else for (const t of placed) jobs.push({ key, range: { offset: t.offset, length: Math.min(t.len, BODY_SCAN) }, items: [t] });
+    else for (const t of placed) jobs.push({ key, range: { offset: t.offset, length: Math.min(t.len, scan) }, items: [t] });
   }
   const bodies: { id: string; body: string }[] = [];
   let bytes = 0;
@@ -80,8 +85,8 @@ async function readBodies(env: Env, user: UserId, account: string, todo: Todo[])
       bytes += b.length;
       const base = job.range?.offset ?? 0;
       for (const t of job.items) {
-        const raw = job.range ? b.subarray(t.offset - base, t.offset - base + Math.min(t.len, BODY_SCAN)) : b;
-        bodies.push({ id: t.id, body: searchText(raw) });
+        const raw = job.range ? b.subarray(t.offset - base, t.offset - base + Math.min(t.len, scan)) : b;
+        bodies.push({ id: t.id, body: extract(raw) });
       }
     }
   };
@@ -117,5 +122,44 @@ export async function runBodies(env: Env, user: UserId, account: string, runId: 
   // The workflow starts the next run, after the guard's reset when it stopped for it.
   if (!out.done) out.nextId = `${account}-bodies-${Date.now().toString(36)}`;
   console.log(JSON.stringify({ bodies: { account, runId, ...out, rowsPerBody: out.added ? +(out.rowsWritten / out.added).toFixed(2) : null } }));
+  return out;
+}
+
+/** Header bytes the recipients pass reads a message: the header block ends well before this. */
+const HEAD_SCAN = 64 * 1024;
+/** Rows a message's recipients cost to write, about (its messages row, its share of pages). */
+const RCPT_ROWS = 2;
+
+/**
+ * One recipients pass run (Bikram, 2026-10-25): like the body pass, but it keeps each message's
+ * To, Cc and Bcc from its headers, for counts of mail sent to someone. Same bookmark scheme, its own.
+ */
+export async function runRecipients(env: Env, user: UserId, account: string, runId: string): Promise<BodyResult> {
+  const mailbox = accountMailbox(env, user, account);
+  const quota = accountQuota(env);
+  const out: BodyResult = { read: 0, added: 0, rowsWritten: 0, bytes: 0, rawReads: 0, done: false, nextId: null };
+  while (out.bytes < RUN_BYTES()) {
+    const full = await quota.reserve({ do_rows_written: BODY_BATCH * RCPT_ROWS });
+    if (full) {
+      out.resumesAt = full.resumesAt;
+      break;
+    }
+    const { todo, last } = await mailbox.rcptTodo(BODY_BATCH);
+    // A message whose raw file is gone gets no recipients (''), so the pass moves on.
+    const got = await readBodies(env, user, account, todo, HEAD_SCAN, (raw) => recipients(headers(raw)));
+    const r = await mailbox.addRcpts(got.bodies.map((b) => ({ id: b.id, rcpt: b.body })), last);
+    await quota.add({ do_rows_written: r.rowsWritten, do_rows_read: BODY_BATCH + todo.length, r2_class_b: got.reads });
+    out.read += todo.length;
+    out.added += r.added;
+    out.rowsWritten += r.rowsWritten;
+    out.bytes += got.bytes;
+    out.rawReads += got.reads;
+    if (last === null) {
+      out.done = true;
+      break;
+    }
+  }
+  if (!out.done) out.nextId = `${account}-rcpt-${Date.now().toString(36)}`;
+  console.log(JSON.stringify({ recipients: { account, runId, ...out } }));
   return out;
 }

@@ -169,11 +169,24 @@ export const MIGRATIONS: readonly string[] = [
      body, content = '', contentless_delete = 1, tokenize = 'unicode61 remove_diacritics 1'
    );
    ALTER TABLE messages ADD COLUMN body INTEGER;`,
+  // 17: recipients (Bikram, 2026-10-25): each message's To, Cc and Bcc addresses, for "mail I sent
+  // to X". Null until kept: copying writes them, the recipients pass fills mail copied before.
+  `ALTER TABLE messages ADD COLUMN rcpt TEXT;`,
 ];
 
 /** Gmail labels whose mail MailCellar doesn't keep: the index never takes it in. */
 const NOT_KEPT = ['SPAM', 'TRASH'];
 const notKept = (labels: string[]) => labels.some((l) => NOT_KEPT.includes(l));
+
+/** What count_messages groups by. */
+export type CountDim = 'sender' | 'domain' | 'label' | 'recipient' | 'month' | 'year';
+/** The dimensions SQL groups on its own, one value a message. */
+const COUNT_SQL = {
+  sender: 'lower(from_addr)',
+  domain: `lower(substr(from_addr, instr(from_addr, '@') + 1))`,
+  month: `strftime('%Y-%m', ts / 1000, 'unixepoch')`,
+  year: `strftime('%Y', ts / 1000, 'unixepoch')`,
+} as const;
 
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -889,6 +902,44 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
+   * The recipients pass's next messages (recipients.ts): up to `limit` in ID order from its
+   * bookmark, those whose recipients aren't kept yet, with where each is. `last` as bodyTodo's.
+   */
+  async rcptTodo(limit: number): Promise<{ todo: { id: string; key: string | null; offset: number; len: number }[]; last: string | null }> {
+    const sql = this.ctx.storage.sql;
+    const at = sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'rcpt_pass'`).toArray()[0]?.value ?? '';
+    const cursor = sql.exec<{ id: string; raw_key: string | null; raw_offset: number | null; raw_len: number | null; rcpt: string | null }>(
+      `SELECT id, raw_key, raw_offset, raw_len, rcpt FROM messages WHERE id > ? ORDER BY id LIMIT ?`, at, limit,
+    );
+    const rows = cursor.toArray();
+    this.count({ do_rows_read: cursor.rowsRead + 1 });
+    return {
+      todo: rows.filter((r) => r.rcpt === null).map((r) => ({ id: r.id, key: r.raw_key, offset: r.raw_offset ?? -1, len: r.raw_len ?? -1 })),
+      last: rows.length === limit ? rows[rows.length - 1].id : null,
+    };
+  }
+
+  /** Keep the recipients the pass read and move its bookmark to `last` (null: done), in one transaction. */
+  async addRcpts(list: { id: string; rcpt: string }[], last: string | null): Promise<{ added: number; rowsWritten: number }> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      let written = 0;
+      let added = 0;
+      for (const r of list) {
+        const n = sql.exec(`UPDATE messages SET rcpt = ? WHERE id = ? AND rcpt IS NULL`, r.rcpt, r.id).rowsWritten;
+        written += n;
+        added += n ? 1 : 0;
+      }
+      written += sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('rcpt_pass', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+        last ?? '~done',
+      ).rowsWritten;
+      this.count({ do_rows_written: written });
+      return { added, rowsWritten: written };
+    });
+  }
+
+  /**
    * How many of a month's messages the mailbox has: of `ids` (Gmail's list of the month) when
    * given, with the ones it lacks; else the month's own count, by message date.
    */
@@ -1515,10 +1566,10 @@ export class MailboxDO extends DurableObject<Env> {
         if (have.has(m.id) || notKept(m.labels)) continue;
         const labelText = m.labels.join(' ');
         const insert = sql.exec(
-          `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels, raw_key, raw_offset, raw_len, body)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
+          `INSERT INTO messages (id, thread_id, ts, from_addr, from_name, subject, snippet, size, attachments, labels, raw_key, raw_offset, raw_len, body, rcpt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
           m.id, m.threadId, m.ts, m.fromAddr, m.fromName, m.subject, m.snippet, m.size, m.attachments, labelText,
-          m.raw ?? null, m.rawOffset ?? null, m.rawLen ?? null, m.body === undefined ? null : 1,
+          m.raw ?? null, m.rawOffset ?? null, m.rawLen ?? null, m.body === undefined ? null : 1, m.rcpt ?? null,
         );
         rowsWritten += insert.rowsWritten;
         if (insert.rowsWritten === 0) continue;
@@ -1723,15 +1774,16 @@ export class MailboxDO extends DurableObject<Env> {
 
   /**
    * How many messages match, in one query rather than pages (the MCP server's count_messages and
-   * search_messages' total), optionally grouped. Dates seek the ts index; the rest is checked on
-   * those rows. `keys` also returns each match's sender, subject and minute, so mailboxes can be
-   * counted together without a message held in two of them counted twice.
+   * search_messages' total), optionally grouped by one or two of: sender, domain, label, recipient,
+   * month, year. Dates seek the ts index; the rest is checked on those rows. `keys` also returns
+   * each match's sender, subject and minute, so mailboxes can be counted together without a
+   * message held in two of them counted twice.
    */
   async countMessages(
-    q: { text?: string; from?: string; domain?: string; label?: string; after?: number; before?: number; attachments?: boolean },
-    groupBy: 'none' | 'sender' | 'domain' | 'label' | 'month' | 'year',
+    q: { text?: string; from?: string; to?: string; domain?: string; label?: string; after?: number; before?: number; attachments?: boolean },
+    groupBy: CountDim[],
     keys = false,
-  ): Promise<{ total: number; bytes: number; groups: { key: string; n: number; bytes: number }[]; keys?: string[]; unknownLabel?: true }> {
+  ): Promise<{ total: number; bytes: number; groups: { key: string; sub?: string; n: number; bytes: number }[]; keys?: string[]; unknownLabel?: true; rcptPending?: true }> {
     const sql = this.ctx.storage.sql;
     let read = 0;
     const where: string[] = [];
@@ -1739,6 +1791,7 @@ export class MailboxDO extends DurableObject<Env> {
     if (q.after !== undefined) where.push('ts >= ?'), args.push(q.after);
     if (q.before !== undefined) where.push('ts < ?'), args.push(q.before);
     if (q.from) where.push(`(instr(lower(from_addr), ?) > 0 OR instr(lower(from_name), ?) > 0)`), args.push(q.from.toLowerCase(), q.from.toLowerCase());
+    if (q.to) where.push(`instr(rcpt, ?) > 0`), args.push(q.to.toLowerCase());
     if (q.domain) {
       // The domain and its subdomains: amazon.com counts mail from amazon.com and email.amazon.com.
       const d = q.domain.toLowerCase().replace(/^@/, '');
@@ -1762,7 +1815,8 @@ export class MailboxDO extends DurableObject<Env> {
       where.push(`id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ? UNION SELECT printf('%x', rowid) FROM body_fts WHERE body_fts MATCH ?)`);
       args.push(w, w);
     }
-    if (!where.length && groupBy === 'none' && !keys) {
+    const byRcpt = !!q.to || groupBy.includes('recipient');
+    if (!where.length && !groupBy.length && !keys) {
       // No filter: the running totals hold it.
       const [m] = sql.exec<{ b: number }>(`SELECT coalesce(sum(bytes), 0) AS b FROM months`).toArray();
       return { total: this.indexedTotal(), bytes: m?.b ?? 0, groups: [] };
@@ -1775,32 +1829,47 @@ export class MailboxDO extends DurableObject<Env> {
       return out;
     };
     const [sum] = exec<{ n: number; b: number }>(`SELECT count(*) AS n, coalesce(sum(size), 0) AS b FROM messages WHERE ${cond}`);
-    let groups: { key: string; n: number; bytes: number }[] = [];
-    const key = {
-      sender: 'lower(from_addr)',
-      domain: `lower(substr(from_addr, instr(from_addr, '@') + 1))`,
-      month: `strftime('%Y-%m', ts / 1000, 'unixepoch')`,
-      year: `strftime('%Y', ts / 1000, 'unixepoch')`,
-    } as const;
-    if (groupBy === 'label') {
-      const n = new Map<string, { n: number; bytes: number }>();
-      for (const r of exec<{ labels: string; size: number }>(`SELECT labels, size FROM messages WHERE ${cond}`))
-        for (const l of r.labels.split(' ').filter(Boolean)) {
-          const g = n.get(l) ?? { n: 0, bytes: 0 };
-          g.n++;
-          g.bytes += r.size;
-          n.set(l, g);
-        }
-      groups = [...n].map(([k, g]) => ({ key: k, ...g }));
-    } else if (groupBy !== 'none')
+    let groups: { key: string; sub?: string; n: number; bytes: number }[] = [];
+    if (groupBy.length === 1 && groupBy[0] in COUNT_SQL) {
       groups = exec<{ key: string; n: number; bytes: number }>(
-        `SELECT ${key[groupBy]} AS key, count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages WHERE ${cond} GROUP BY 1`,
+        `SELECT ${COUNT_SQL[groupBy[0] as keyof typeof COUNT_SQL]} AS key, count(*) AS n, coalesce(sum(size), 0) AS bytes FROM messages WHERE ${cond} GROUP BY 1`,
       );
+    } else if (groupBy.length) {
+      // Labels and recipients are several a message, and two dimensions cross: grouped here.
+      const values = (d: CountDim, r: { from_addr: string; ts: number; labels: string; rcpt: string | null }): string[] => {
+        if (d === 'label') return r.labels.split(' ').filter(Boolean);
+        if (d === 'recipient') return (r.rcpt ?? '').split(' ').filter(Boolean);
+        if (d === 'sender') return [r.from_addr.toLowerCase()];
+        if (d === 'domain') return [(r.from_addr.split('@')[1] ?? '').toLowerCase()];
+        const iso = new Date(r.ts).toISOString();
+        return [d === 'month' ? iso.slice(0, 7) : iso.slice(0, 4)];
+      };
+      const n = new Map<string, { key: string; sub?: string; n: number; bytes: number }>();
+      for (const r of exec<{ from_addr: string; ts: number; labels: string; rcpt: string | null; size: number }>(
+        `SELECT from_addr, ts, labels, rcpt, size FROM messages WHERE ${cond}`,
+      ))
+        for (const a of values(groupBy[0], r))
+          for (const b of groupBy[1] ? values(groupBy[1], r) : [undefined]) {
+            const k = b === undefined ? a : `${a}\u0000${b}`;
+            const g = n.get(k) ?? { key: a, ...(b !== undefined ? { sub: b } : {}), n: 0, bytes: 0 };
+            g.n++;
+            g.bytes += r.size;
+            n.set(k, g);
+          }
+      groups = [...n.values()];
+    }
     const out = keys
       ? exec<{ k: string }>(`SELECT lower(from_addr) || '|' || subject || '|' || (ts / 60000) AS k FROM messages WHERE ${cond} LIMIT 50000`).map((r) => r.k)
       : undefined;
+    // Until the recipients pass is done, mail copied before it can't match a recipient: say so.
+    let pending = byRcpt && sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'rcpt_pass'`).toArray()[0]?.value !== '~done';
+    if (pending && !sql.exec(`SELECT 1 FROM messages WHERE rcpt IS NULL LIMIT 1`).toArray().length) {
+      // Every message was copied with its recipients (a mailbox added since): nothing for the pass to do.
+      sql.exec(`INSERT INTO meta (key, value) VALUES ('rcpt_pass', '~done') ON CONFLICT (key) DO UPDATE SET value = excluded.value`);
+      pending = false;
+    }
     this.count({ do_rows_read: read });
-    return { total: sum?.n ?? 0, bytes: sum?.b ?? 0, groups, ...(out ? { keys: out } : {}) };
+    return { total: sum?.n ?? 0, bytes: sum?.b ?? 0, groups, ...(out ? { keys: out } : {}), ...(pending ? { rcptPending: true as const } : {}) };
   }
 
   /**
@@ -1980,7 +2049,7 @@ export class MailboxDO extends DurableObject<Env> {
     // Under a search, whether the envelope holds every word: if not, the row matched on its body.
     const envelope = words ? ftsQuery(text) : '';
     const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
-      subject, snippet, size, attachments, labels, state${envelope ? `, id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?) AS envelope` : ''}`;
+      subject, snippet, size, attachments, labels, state, rcpt${envelope ? `, id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?) AS envelope` : ''}`;
     const [cmp, dir] = asc ? ['>', 'ASC'] : ['<', 'DESC'];
     // A cursor is the phase, then the last row's keys in that phase's order.
     const from = cursor ? decodeCursor(cursor, phases) : null;
@@ -2805,6 +2874,8 @@ export function messageTest(filters: MessageFilter[], labels: { id: string; name
     const has = (s: string) => vs.some((v) => s.toLowerCase().includes(v));
     const one = (m: MessageRow): boolean => {
       switch (f.key) {
+        case 'to':
+          return has(m.rcpt ?? '');
         case 'from':
           // eq: the one address (a Sender group), any case; else a part of the address or name.
           return f.op === 'eq' ? vs.includes(m.fromAddr.toLowerCase()) : has(m.fromAddr) || has(m.fromName);
