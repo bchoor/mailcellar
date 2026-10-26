@@ -55,7 +55,7 @@ The Usage page shows the account's Cloudflare usage against its plan, and backfi
 
 ## MCP server
 
-`https://mail.example.com/mcp` lets Claude (or any MCP client) search and read your archive. It is read only: no tool sends, changes or deletes mail. Tools: `list_mailboxes`, `search_messages` (words in the subject, sender, labels or body), `get_message` (body as text, paged), `list_thread`, `get_stats`, `aggregate` (top senders, domains, labels, months), `get_attachment`. Sign-in is Cloudflare Access with Managed OAuth; see [docs/setup.md](docs/setup.md#9-mcp-server). In claude.ai: Settings ▸ Connectors ▸ Add custom connector, with that URL.
+`https://mail.example.com/mcp` lets Claude (or any MCP client) search and read your archive. It is read only: no tool sends, changes or deletes mail. Tools: `list_mailboxes`, `search_messages` (words in the subject, sender, labels or body, with a total), `count_messages` (one fast count under the same filters, by month, year, sender, domain, label or mailbox), `get_message` (body as text, paged), `list_thread`, `get_stats`, `aggregate` (top senders, domains, labels, months), `get_attachment`. Sign-in is Cloudflare Access with Managed OAuth; see [docs/setup.md](docs/setup.md#9-mcp-server). In claude.ai: Settings ▸ Connectors ▸ Add custom connector, with that URL.
 
 ## Set up
 
