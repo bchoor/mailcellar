@@ -660,8 +660,8 @@ const STAGES: Record<Stage, { label: string; filter: StageFilter; dot: string }>
   failed: { label: 'Failed', filter: 'failed', dot: 'bg-destructive' },
   copying: { label: 'Copying', filter: 'copying', dot: 'bg-[var(--cov-run)]' },
   stopping: { label: 'Stopping', filter: 'copying', dot: 'bg-muted-foreground' },
-  checking: { label: 'Checking', filter: 'copying', dot: 'bg-[var(--cov-run-soft)]' },
-  check_waiting: { label: 'Waiting', filter: 'copying', dot: 'bg-[var(--cov-run-soft)]' },
+  checking: { label: 'Checking', filter: 'copying', dot: 'bg-[var(--cov-index)]' },
+  check_waiting: { label: 'Waiting', filter: 'copying', dot: 'bg-[var(--cov-index-soft)]' },
   next: { label: 'Next', filter: 'next', dot: 'bg-muted-foreground/50' },
 };
 type StageFilter = 'all' | 'failed' | 'copying' | 'next' | 'finished';
