@@ -707,11 +707,8 @@ function BackfillRow({ m, stage, left, action }: { m: MonthCoverage; stage: Stag
           {label}
         </span>
       </TableCell>
-      <TableCell className="w-[32%]">
+      <TableCell className="w-[45%]">
         <Meter done={m.copied} total={copyable(m) ?? 0} color={stage === 'failed' ? 'failed' : m.gmail !== null && m.copied >= copyable(m)! ? 'done' : 'copy'} />
-      </TableCell>
-      <TableCell className="hidden w-[24%] md:table-cell">
-        <Meter done={m.indexed} total={m.landed ? m.inBasin : m.copied} color="done" />
       </TableCell>
       <TableCell className={`hidden text-right tabular-nums text-xs sm:table-cell ${stage === 'failed' ? 'text-loss' : 'text-muted-foreground'}`}>{left}</TableCell>
       <TableCell className="w-16 pr-0 text-right sm:w-20">
@@ -935,7 +932,6 @@ function Jobs({ id, rate, copying, history }: { id: string; rate: number | null;
             <TableHead className="w-24">Month</TableHead>
             <TableHead className="w-32">Stage</TableHead>
             <TableHead>Copied</TableHead>
-            <TableHead className="hidden md:table-cell">Searchable</TableHead>
             <TableHead className="hidden text-right sm:table-cell">Left</TableHead>
             <TableHead className="w-16 sm:w-20" />
           </TableRow>
@@ -946,7 +942,7 @@ function Jobs({ id, rate, copying, history }: { id: string; rate: number | null;
           ))}
           {folded.length > 0 && (
             <TableRow className="h-9">
-              <TableCell colSpan={6} className="text-xs text-muted-foreground">
+              <TableCell colSpan={5} className="text-xs text-muted-foreground">
                 and {fmt(folded.length)} more next: {monthName(folded[0].m.month)}
                 {folded.length > 1 ? ` to ${monthName(folded[folded.length - 1].m.month)}` : ''} ·{' '}
                 <Button variant="link" size="xs" className="h-auto p-0 text-xs" onClick={() => setFilter('next')}>
