@@ -267,7 +267,8 @@ const TOOLS: Tool[] = [
         }),
       );
       found.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-      const more = Object.values(next).some((c) => c !== null);
+      // Once the count says every match is on this page, there is nothing left to page through.
+      const more = Object.values(next).some((c) => c !== null) && !(first && total <= found.length);
       return result({
         ...(first ? { total } : {}),
         messages: found,
