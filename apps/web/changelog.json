@@ -1,5 +1,42 @@
 [
   {
+    "tag": "v0.0.12",
+    "sha": "14f75800ccf66391a621f1590655fc9e1d2eadaa",
+    "published_at": "2026-10-26T01:27:19Z",
+    "takeaways": [
+      {
+        "text": "**Search inside email bodies**: On the Messages page, searching now also matches words inside the email body, not just the subject and sender, for new mail, and older mail follows once the body pass is started by hand.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Attachment previews**: In the message drawer's Attachments section, tapping an image, PDF or text file now opens a preview, and a new List / Grid toggle shows image thumbnails.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Page buttons for groups**: On the Messages page, with Group by set to Sender or Domain, groups now come in pages with previous and next buttons (such as `1–50 of 1,240`) instead of a \"More groups\" row.",
+        "types": [
+          "improvement"
+        ]
+      },
+      {
+        "text": "**Filter values while grouped**: On the Messages page, the filter menu now lists its values (such as each Domain) when Group by is on, so you can filter a grouped view.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Mailbox is the record**: This affects how every mailbox stores and opens mail: each message's location is now kept in the mailbox itself, so syncs and backfills no longer wait on Basin write access and opening a message needs no Basin lookup.",
+        "types": [
+          "improvement"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.11",
     "sha": "79f69a325ca09548f9afd781c3d95d332db2563f",
     "published_at": "2026-10-25T19:24:58Z",
