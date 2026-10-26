@@ -31,6 +31,12 @@ export interface Env {
    * and the test switch. Unset: no guest list; anyone Cloudflare Access lets through is in.
    */
   ADMIN_EMAILS?: string;
+  /** Invite emails (mailer.ts): an SMTP relay with STARTTLS, its send-only login (secrets), and the From address. Unset: no email. */
+  SMTP_HOST?: string;
+  SMTP_PORT?: string;
+  SMTP_USER?: string;
+  SMTP_PASSWORD?: string;
+  MAIL_FROM?: string;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
   DEV_USER_EMAIL?: string;
 }

@@ -60,6 +60,16 @@ export interface AppUser {
   addedAt: string | null;
   /** Their last visit, to the day; null until their first. */
   seenAt: string | null;
+  /** When the last invite email went out; null if none did. */
+  invitedAt: string | null;
+}
+
+/** Response of adding someone or resending their invite: the list, and how the invite email went. */
+export interface UsersChange {
+  users: AppUser[];
+  /** sent; failed (error says why); off: this MailCellar has no email set up. */
+  invite: 'sent' | 'failed' | 'off';
+  error?: string;
 }
 
 /** Codes the connect redirect puts in `?auth_error=`, and what Settings ▸ Accounts says for each. */

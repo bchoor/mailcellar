@@ -5,9 +5,9 @@ import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Input } from '@columenlabs/lumen-ui/ui/input';
-import type { AppUser } from '@mailcellar/schema';
+import type { AppUser, UsersChange } from '@mailcellar/schema';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LogOutIcon, PlusIcon, UserXIcon } from 'lucide-react';
+import { LogOutIcon, MailIcon, PlusIcon, UserXIcon } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { EmptyState } from './archive';
 
@@ -20,25 +20,34 @@ const ERRORS: Record<string, string> = {
 
 const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 
-/** The list, or the API's refusal in words. */
-async function call(path: string, init?: RequestInit): Promise<AppUser[]> {
+/** The API's answer, or its refusal in words. */
+async function call<T = AppUser[]>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(ERRORS[(body as { error?: string }).error ?? ''] ?? `Not saved (${res.status})`);
-  return body as AppUser[];
+  return body as T;
 }
+
+/** What happened to the invite email, in words. */
+const inviteNote = (to: string, c: UsersChange) =>
+  c.invite === 'sent' ? `Invite sent to ${to}.` : c.invite === 'off' ? `Added. Email isn’t set up, so tell ${to} yourself.` : null;
 
 function AddUser() {
   const client = useQueryClient();
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    setNote(null);
     try {
-      client.setQueryData(['users'], await call('/api/admin/users', { method: 'POST', body: JSON.stringify({ email }) }));
+      const c = await call<UsersChange>('/api/admin/users', { method: 'POST', body: JSON.stringify({ email }) });
+      client.setQueryData(['users'], c.users);
+      setNote(inviteNote(email.trim(), c));
+      if (c.error) setError(new Error(c.error));
       setEmail('');
     } catch (err) {
       setError(err as Error);
@@ -51,12 +60,48 @@ function AddUser() {
       <div className="flex gap-2">
         <Input type="email" required placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} className="max-w-sm" />
         <Button type="submit" size="sm" disabled={busy || !email.trim()}>
-          <PlusIcon /> {busy ? 'Adding…' : 'Add'}
+          <PlusIcon /> {busy ? 'Adding…' : 'Add and invite'}
         </Button>
       </div>
       <ErrorLine error={error} />
-      <p className="text-xs text-muted-foreground">They sign in with Google or an emailed code, using this address.</p>
+      {note && <p className="text-sm text-gain">{note}</p>}
+      <p className="text-xs text-muted-foreground">They get an email with the link. They sign in with Google or an emailed code, using this address.</p>
     </form>
+  );
+}
+
+/** Send the invite email again, for someone who hasn't signed in yet. */
+function Resend({ email }: { email: string }) {
+  const client = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  return (
+    <>
+      <Button
+        size="sm"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          setNote(null);
+          setError(null);
+          try {
+            const c = await call<UsersChange>(`/api/admin/users/${encodeURIComponent(email)}/invite`, { method: 'POST' });
+            client.setQueryData(['users'], c.users);
+            setNote(inviteNote(email, c));
+            if (c.error) setError(new Error(c.error));
+          } catch (err) {
+            setError(err as Error);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <MailIcon /> {busy ? 'Sending…' : 'Resend invite'}
+      </Button>
+      {note && <p className="basis-full text-sm text-gain">{note}</p>}
+      {error && <div className="basis-full"><ErrorLine error={error} /></div>}
+    </>
   );
 }
 
@@ -71,8 +116,14 @@ function UserList() {
         <IntegrationRow
           key={u.email}
           name={u.email}
-          meta={u.admin ? 'Admin' : `Added ${day(u.addedAt!)} · ${u.seenAt ? `last seen ${day(u.seenAt)}` : 'not signed in yet'}`}
-          badge={<Badge variant={u.admin ? 'secondary' : 'outline'}>{u.admin ? 'Admin' : 'User'}</Badge>}
+          meta={
+            u.admin
+              ? 'Admin'
+              : u.seenAt
+                ? `Added ${day(u.addedAt!)} · last seen ${day(u.seenAt)}`
+                : `${u.invitedAt ? `Invited ${day(u.invitedAt)}` : `Added ${day(u.addedAt!)}`} · not signed in yet`
+          }
+          badge={<Badge variant={u.admin ? 'secondary' : 'outline'}>{u.admin ? 'Admin' : u.seenAt ? 'User' : 'Invited'}</Badge>}
           open={open === u.email}
           onOpenChange={(o: boolean) => setOpen(o ? u.email : null)}
         >
@@ -81,7 +132,8 @@ function UserList() {
           ) : (
             <div className="flex flex-col gap-3">
               <p className="text-sm text-muted-foreground">Their mail is theirs alone; admins can’t open it here.</p>
-              <div>
+              <div className="flex flex-wrap gap-2">
+                {!u.seenAt && <Resend email={u.email} />}
                 <LumenConfirm
                   title={`Remove ${u.email}?`}
                   description="They can’t sign in from the next minute. Their mail stays in MailCellar; adding them again gives it back."
@@ -99,7 +151,7 @@ function UserList() {
         </IntegrationRow>
       ))}
       {users.data.every((u) => u.admin) && (
-        <EmptyState icon={PlusIcon} title="Only admins so far">Add an email above to let someone in.</EmptyState>
+        <EmptyState icon={PlusIcon} title="Only admins so far">Add an email above to invite someone.</EmptyState>
       )}
     </div>
   );

@@ -412,13 +412,20 @@ export class QuotaDO extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS cloudflare (metric TEXT PRIMARY KEY, period TEXT NOT NULL, value INTEGER NOT NULL, ours INTEGER NOT NULL) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT, WITHOUT ROWID;
       -- The guest list (members.ts): who may use MailCellar besides ADMIN_EMAILS. Emails lower-cased.
-      CREATE TABLE IF NOT EXISTS members (email TEXT PRIMARY KEY, added_at TEXT NOT NULL, seen_at TEXT) STRICT, WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS members (email TEXT PRIMARY KEY, added_at TEXT NOT NULL, seen_at TEXT, invited_at TEXT) STRICT, WITHOUT ROWID;
     `);
   }
 
   /** The guest list, newest first. */
-  async members(): Promise<{ email: string; added_at: string; seen_at: string | null }[]> {
-    return this.ctx.storage.sql.exec<{ email: string; added_at: string; seen_at: string | null }>(`SELECT email, added_at, seen_at FROM members ORDER BY added_at DESC`).toArray();
+  async members(): Promise<{ email: string; added_at: string; seen_at: string | null; invited_at: string | null }[]> {
+    return this.ctx.storage.sql
+      .exec<{ email: string; added_at: string; seen_at: string | null; invited_at: string | null }>(`SELECT email, added_at, seen_at, invited_at FROM members ORDER BY added_at DESC`)
+      .toArray();
+  }
+
+  /** Note that an invite email went out. */
+  async invited(email: string): Promise<void> {
+    this.ctx.storage.sql.exec(`UPDATE members SET invited_at = ? WHERE email = ?`, new Date().toISOString(), email);
   }
 
   /** Add someone to the guest list; false if they were on it already. */
