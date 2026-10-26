@@ -1,7 +1,7 @@
 // Who may use MailCellar. Cloudflare Access proves who a person is; the people list decides
 // whether they are let in (Lumen's people kit, kept in QuotaDO). ADMIN_EMAILS are built-in
 // admins; everyone else needs an invite. With no ADMIN_EMAILS there is no list, and Access alone decides.
-import { type EmailOptions, type PeopleApi, peopleRoutes, type StoredEmail } from '@columenlabs/lumen-people';
+import { type EmailOptions, type PeopleApi, peopleRoutes } from '@columenlabs/lumen-people';
 import { can, type EmailCheck, type Person } from '@columenlabs/lumen-ui-types/people';
 import type { Env } from './env';
 import { adminEmails, INVITE_DAYS, MAIL_SCOPE, type PeopleOp, SCOPES } from './people';
@@ -50,19 +50,13 @@ const emailOptions = (env: Env): EmailOptions => ({
     { id: 'public', label: 'Public internet', url: 'https://api.resend.com' },
   ],
   store: {
-    get: async () => ((await accountQuota(env).emailSettings()) as StoredEmailRow | null) ?? deployedEmail(env),
+    get: async () => (await accountQuota(env).emailSettings()) as StoredEmailRow | null,
     put: async (_req, settings, by) => accountQuota(env).setEmailSettings({ settings, updatedAt: Date.now(), updatedBy: by }),
     clear: async () => accountQuota(env).setEmailSettings(null),
     lastTest: async () => (await accountQuota(env).emailTest()) as EmailCheck | null,
     putTest: async (_req, test) => accountQuota(env).setEmailTest(test),
   },
 });
-
-/** Set on the Worker (FREESEND_API_KEY, MAIL_FROM): FreeSend over the tunnel, so nobody types the key. */
-const deployedEmail = (env: Env): { settings: StoredEmail; updatedAt: null; updatedBy: null } | null =>
-  env.FREESEND && env.FREESEND_API_KEY && env.MAIL_FROM
-    ? { settings: { route: 'tunnel', url: 'http://localhost:5000/api', apiKey: env.FREESEND_API_KEY, from: env.MAIL_FROM, fromName: 'MailCellar' }, updatedAt: null, updatedBy: null }
-    : null;
 
 /** /api/people/*: the routes Admin ▸ People and the invite page call. Null: not one of these. */
 export async function peopleApi(request: Request, env: Env, url: URL, email: string, admin: boolean): Promise<Response | null> {

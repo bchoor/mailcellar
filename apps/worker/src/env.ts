@@ -33,9 +33,6 @@ export interface Env {
   ADMIN_EMAILS?: string;
   /** The private tunnel to the self-hosted email API (a Workers VPC service), for invite emails. Unbound: only the public route. */
   FREESEND?: { fetch: (req: Request) => Promise<Response> };
-  /** FreeSend's API key (secret) and the From address: the email settings until an admin saves others in Settings ▸ Email. */
-  FREESEND_API_KEY?: string;
-  MAIL_FROM?: string;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
   DEV_USER_EMAIL?: string;
 }
