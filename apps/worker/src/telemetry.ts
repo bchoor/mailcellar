@@ -126,7 +126,7 @@ export function meteredEnv(env: Env): Env {
           if (R2_CLASS_A.has(prop)) m.r2a++;
           else if (R2_CLASS_B.has(prop)) m.r2b++;
         }
-        return (v as (...a: unknown[]) => unknown).apply(target, args);
+        return Reflect.apply(v as (...a: unknown[]) => unknown, target, args);
       };
     },
   });
