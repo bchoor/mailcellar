@@ -359,7 +359,7 @@ const MESSAGES: ViewDomain<MessageView> = {
     },
     { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.fromAddr.split('@')[1] ?? '', format: 'text', filterable: true, groupable: true },
     {
-      key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text',
+      key: 'subject', label: 'Subject', icon: MailIcon, value: (r) => r.subject, format: 'text', priority: 1,
       render: (r) => (
         <span className="block min-w-0">
           <span className={`flex items-center gap-1 ${r.unread ? 'font-semibold' : ''}`}>
