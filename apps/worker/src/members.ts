@@ -41,9 +41,9 @@ const emailOptions = (env: Env): EmailOptions => ({
     {
       id: 'tunnel',
       label: 'Private tunnel',
-      state: env.FREESEND ? 'Connected' : 'Not set up',
-      url: 'http://localhost:5000/api',
-      urlInfo: 'As seen from the tunnel’s machine, so localhost is that machine itself.',
+      state: env.FREESEND ? 'Linked' : 'Not linked to MailCellar',
+      url: 'http://send.icaruslab.dev/api',
+      urlInfo: 'The server’s own name: the tunnel takes the request to that machine, which passes it on by name.',
       where: 'the tunnel’s machine',
       fetch: () => (env.FREESEND ? (req) => env.FREESEND!.fetch(req) : null),
     },
