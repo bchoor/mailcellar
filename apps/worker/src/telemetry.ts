@@ -1,20 +1,47 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import {
+  flushCalls,
+  foldRoute,
+  meterEvent,
+  meterFetch,
+  meterRequest,
+  meteredBindings,
+  requestCalls,
+  serverTiming,
+  setEventSink,
+  setRequestSink,
+  withRequest,
+} from '@columenlabs/lumen-ops';
+import { meterClientBatch, setClientSink } from '@columenlabs/lumen-ops/client';
 import type { Env } from './env';
 
 /**
- * One data point per piece of work (an API request, a Durable Object call or alarm, a Workflow
- * step) in the Analytics Engine dataset bound as TELEMETRY. Each point says what ran, how long it
- * took and what it used: SQLite rows read and written, raw file (R2) operations by billing class,
- * and outgoing requests (Gmail's apart). Query it with Analytics Engine's SQL API, e.g.
+ * Telemetry from Lumen's ops meters (@columenlabs/lumen-ops), in the Analytics Engine dataset bound
+ * as METRICS (mailcellar_requests, the same columns as every Lumen app's):
  *
- *   SELECT blob2 AS name, count() * any(_sample_interval) AS calls, quantileWeighted(0.95)(double1, _sample_interval) AS p95_ms,
- *          sum(double2 * _sample_interval) AS rows_read FROM mailcellar_telemetry
- *   WHERE timestamp > NOW() - INTERVAL '1' DAY GROUP BY name ORDER BY rows_read DESC
+ *   requests   one point per request: route template, status, outcome, ms, and the time it spent
+ *              waiting on bindings and other services (blob2 `api` or `site`)
+ *   calls      every Durable Object RPC, R2, Workers AI, Workflow, asset and tunnel call and every
+ *              outbound fetch, timed: one `call` event per call code a piece of work made (code
+ *              `ARCHIVE.put`, `fetch.gmail.googleapis.com`, ...), and the split sent back as `Server-Timing`
+ *   work       one `do` event per Durable Object method or alarm (code `Class.method`) and one
+ *              `workflow` event per Workflow step (code the step): ms, and counts SQLite rows read,
+ *              rows written, calls made; plus `gmail.refused` (counts 429s, 403s) when Gmail said no
+ *   browser    screens opened, failed requests and Web Vitals from the app's pages (`POST /api/t`,
+ *              blob2 `view`, `fetch_fail`, `vital`, `error`), and each crash as a `client_error` event
+ *              with its detail in Workers Logs (`POST /api/client-error`)
  *
- * Columns: index1 = kind; blob1 kind (http, do, workflow), blob2 name, blob3 outcome (a status
- * code, ok or error), blob4 the build; double1 wall ms, double2 rows read, double3 rows written,
- * double4 raw file Class A ops, double5 Class B ops, double6 subrequests, double7 Gmail calls,
- * double8 Gmail calls refused (429/403). Wall time includes waiting on I/O; CPU time is in Workers Logs.
+ * R2 billing classes read off the call codes: Class A is ARCHIVE.put, list and the multipart
+ * calls; Class B is ARCHIVE.get and head. Always weight by `_sample_interval`, e.g. the heaviest
+ * Durable Object methods of the last day:
+ *
+ *   SELECT blob3 AS method, sum(_sample_interval) AS calls, sum(double3 * _sample_interval) AS rows_read
+ *   FROM mailcellar_requests WHERE blob2 = 'do' AND timestamp > NOW() - INTERVAL '1' DAY
+ *   GROUP BY method ORDER BY rows_read DESC
+ *
+ * A point holds route templates, codes and numbers: never a raw path, a query, an email or a body.
+ * With no dataset bound nothing is written and Server-Timing still works. The old per-work points
+ * (TELEMETRY, mailcellar_telemetry) are still written alongside until the new ones are confirmed.
  */
 interface Meter {
   cursors: SqlStorageCursor<Record<string, SqlStorageValue>>[];
@@ -22,67 +49,122 @@ interface Meter {
   r2b: number;
   fetches: number;
   gmail: number;
-  gmailRefused: number;
+  refused429: number;
+  refused403: number;
 }
 
 const als = new AsyncLocalStorage<Meter>();
+const APP = 'mailcellar';
+const newMeter = (): Meter => ({ cursors: [], r2a: 0, r2b: 0, fetches: 0, gmail: 0, refused429: 0, refused403: 0 });
+const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 16);
 
-// R2 operations by billing class (Class A: writes and lists; Class B: reads).
+// R2 operations by billing class (Class A: writes and lists; Class B: reads), for the old points.
 const R2_CLASS_A = new Set(['put', 'list', 'createMultipartUpload', 'resumeMultipartUpload']);
 const R2_CLASS_B = new Set(['get', 'head']);
 
-/** Runs `work` under its own meter and writes its data point when it ends, however it ends. */
-export function measured<T>(env: Env, kind: string, name: string, work: () => T, outcome?: (r: Awaited<T>) => string): T {
-  if (als.getStore()) return work();
-  const m: Meter = { cursors: [], r2a: 0, r2b: 0, fetches: 0, gmail: 0, gmailRefused: 0 };
-  const t0 = Date.now();
-  const done = (result: string) => record(env, m, kind, name, result, Date.now() - t0);
-  let r: T;
-  try {
-    r = als.run(m, work);
-  } catch (e) {
-    done('error');
-    throw e;
-  }
-  // A method that answers at once is measured at once, and stays synchronous for its callers.
-  if (!(r instanceof Promise)) {
-    done(outcome ? outcome(r as Awaited<T>) : 'ok');
-    return r;
-  }
-  return r.then(
-    (v) => {
-      done(outcome ? outcome(v as Awaited<T>) : 'ok');
-      return v;
-    },
-    (e) => {
-      done('error');
-      throw e;
-    },
-  ) as T;
+/** What each binding counts as in Server-Timing; Durable Object namespaces are `do` without saying. */
+const KINDS: Record<string, string> = { ARCHIVE: 'r2', AI: 'ai', ASSETS: 'assets', SYNC: 'workflow', FREESEND: 'vpc' };
+
+let wired = false;
+
+/** Points the meters at the dataset and patches fetch, once per isolate (the Worker's and each object's). */
+function wire(env: Env): void {
+  if (wired) return;
+  wired = true;
+  const version = env.APP_VERSION?.slice(0, 7);
+  setRequestSink(env.METRICS);
+  setEventSink(env.METRICS, { app: APP, env: 'production', version });
+  setClientSink(env.METRICS);
+  // Lumen's meter first (each call timed by its host), then Gmail's calls and refusals counted.
+  meterFetch();
+  const timed = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const m = als.getStore();
+    if (!m) return timed(input, init);
+    m.fetches++;
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const gmail = url.includes('googleapis.com/');
+    if (gmail) m.gmail++;
+    const res = await timed(input, init);
+    if (gmail && res.status === 429) m.refused429++;
+    if (gmail && res.status === 403) m.refused403++;
+    return res;
+  }) as typeof fetch;
 }
 
-function record(env: Env, m: Meter, kind: string, name: string, result: string, ms: number): void {
+/** The scope a piece of work outside a request (an object's method, a Workflow step) charges its calls to. */
+const workScope = (env: Env) => ({ app: APP, requestId: newId(), env: 'production', version: env.APP_VERSION?.slice(0, 7) });
+
+/**
+ * Runs `work` (a Durable Object method or a Workflow step) under its own meter, and writes its
+ * event, its calls and its old point when it ends, however it ends.
+ */
+export function measured<T>(env: Env, kind: 'do' | 'workflow', name: string, work: () => T): T {
+  if (als.getStore()) return work();
+  const m = newMeter();
+  const t0 = performance.now();
+  return withRequest(workScope(env), name, () => {
+    const done = (ok: boolean) => recordWork(env, m, kind, name, ok, performance.now() - t0);
+    let r: T;
+    try {
+      r = als.run(m, work);
+    } catch (e) {
+      done(false);
+      throw e;
+    }
+    // A method that answers at once is measured at once, and stays synchronous for its callers.
+    if (!(r instanceof Promise)) {
+      done(true);
+      return r;
+    }
+    return r.then(
+      (v) => {
+        done(true);
+        return v;
+      },
+      (e) => {
+        done(false);
+        throw e;
+      },
+    ) as T;
+  });
+}
+
+function rowsOf(m: Meter): [number, number] {
   let read = 0;
   let written = 0;
+  for (const c of m.cursors) {
+    read += c.rowsRead;
+    written += c.rowsWritten;
+  }
+  return [read, written];
+}
+
+/** Called inside the work's scope: its calls, its event, Gmail's refusals and the old point. */
+function recordWork(env: Env, m: Meter, kind: string, name: string, ok: boolean, ms: number): void {
   try {
-    for (const c of m.cursors) {
-      read += c.rowsRead;
-      written += c.rowsWritten;
-    }
-    env.TELEMETRY?.writeDataPoint({
-      indexes: [kind],
-      blobs: [kind, name, result, env.APP_VERSION.slice(0, 7)],
-      doubles: [ms, read, written, m.r2a, m.r2b, m.fetches, m.gmail, m.gmailRefused],
-    });
+    const [read, written] = rowsOf(m);
+    const calls = requestCalls().reduce((n, [, c]) => n + c.n, 0);
+    flushCalls();
+    meterEvent({ event: kind, code: name, ok, ms, counts: [read, written, calls] });
+    refusals(m, name);
+    oldPoint(env, m, kind, name, ok ? 'ok' : 'error', ms, read, written);
   } catch {
     // Telemetry never breaks the work it measures.
   }
 }
 
-/** An API path with its ids taken out, so one route is one name: /api/accounts/:id/messages/:id. */
-export function routeName(method: string, path: string): string {
-  const parts = path.split('/').map((p) => (/^[0-9a-f]{12,}$|^\d+$|@|^[A-Za-z0-9_-]{20,}$/i.test(decodeURIComponent(p)) ? ':id' : p));
-  return `${method} ${parts.join('/')}`;
+function refusals(m: Meter, code: string): void {
+  if (m.refused429 || m.refused403) meterEvent({ event: 'gmail.refused', code, ok: false, counts: [m.refused429, m.refused403] });
+}
+
+/** The old point (mailcellar_telemetry, #145), written alongside until the new data is confirmed. */
+function oldPoint(env: Env, m: Meter, kind: string, name: string, result: string, ms: number, read: number, written: number): void {
+  env.TELEMETRY?.writeDataPoint({
+    indexes: [kind],
+    blobs: [kind, name, result, env.APP_VERSION.slice(0, 7)],
+    doubles: [ms, read, written, m.r2a, m.r2b, m.fetches, m.gmail, m.refused429 + m.refused403],
+  });
 }
 
 /**
@@ -113,8 +195,12 @@ export function countRows(sql: SqlStorage): void {
   }) as SqlStorage['exec'];
 }
 
-/** The env with its raw files bucket counted, operation by operation, toward the current meter. */
+/**
+ * The env every part sees (the Worker, each object, the Workflow): its bindings metered by Lumen,
+ * and its raw files bucket counted by billing class for the old points. Wires the meters once.
+ */
 export function meteredEnv(env: Env): Env {
+  wire(env);
   const bucket = env.ARCHIVE;
   const archive = new Proxy(bucket, {
     get(target, prop, receiver) {
@@ -130,24 +216,132 @@ export function meteredEnv(env: Env): Env {
       };
     },
   });
-  return { ...env, ARCHIVE: archive };
+  return meteredBindings({ ...env, ARCHIVE: archive }, { kinds: KINDS, skip: ['METRICS', 'TELEMETRY'] });
 }
 
-/** Counts every outgoing request toward the current meter, and Gmail's calls and refusals apart. Call once per isolate. */
-let fetchCounted = false;
-export function countFetches(): void {
-  if (fetchCounted) return;
-  fetchCounted = true;
-  const original = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const m = als.getStore();
-    if (!m) return original(input, init);
-    m.fetches++;
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    const gmail = url.includes('googleapis.com/');
-    if (gmail) m.gmail++;
-    const res = await original(input, init);
-    if (gmail && (res.status === 429 || res.status === 403)) m.gmailRefused++;
-    return res;
-  }) as typeof fetch;
+/** A path as a template: emails, tokens and ids folded, the app's hashed files one route. */
+export function routeOf(url: URL): string {
+  const p = url.pathname;
+  if (p.startsWith('/app/assets/')) return '/app/assets/*';
+  return foldRoute(p)
+    .split('/')
+    .map((seg) => (seg.includes('@') || seg.includes('%40') ? ':email' : /^a[A-Za-z0-9_-]{22}$/.test(seg) || seg.length > 40 ? ':id' : seg))
+    .join('/');
+}
+
+const isApi = (p: string) => p.startsWith('/api/') || p === '/mcp';
+
+/** The old point's name for a request: `GET /api/accounts/:id`, or `GET page`. */
+const oldName = (method: string, url: URL) => (isApi(url.pathname) ? `${method} ${routeOf(url)}` : `${method} page`);
+
+/**
+ * The Worker's entry, metered: the request in scope while `handle` runs (its binding calls charged
+ * to it), then `Server-Timing` on the answer, one `call` event per call code, the request point
+ * and the old point. Telemetry never changes the answer or holds it up: every write is a few
+ * in-memory calls, and a failure in it is swallowed.
+ */
+export async function meteredRequest(request: Request, env: Env, handle: (env: Env) => Promise<Response>): Promise<Response> {
+  const url = new URL(request.url);
+  const metered = meteredEnv(env);
+  const route = routeOf(url);
+  const scope = { app: APP, requestId: newId(), env: 'production', version: env.APP_VERSION?.slice(0, 7) };
+  const m = newMeter();
+  const t0 = performance.now();
+  return withRequest(scope, route, () =>
+    als.run(m, async () => {
+      const end = (res: Response | undefined) => {
+        try {
+          return finish(request, url, env, m, route, scope, res, performance.now() - t0) ?? res;
+        } catch {
+          return res;
+        }
+      };
+      let res: Response;
+      try {
+        res = await handle(metered);
+      } catch (e) {
+        end(undefined);
+        throw e;
+      }
+      return end(res) as Response;
+    }),
+  );
+}
+
+function finish(
+  request: Request,
+  url: URL,
+  env: Env,
+  m: Meter,
+  route: string,
+  scope: { app: string; requestId: string; env: string; version?: string },
+  res: Response | undefined,
+  ms: number,
+): Response | undefined {
+  let out = res;
+  if (out && out.status !== 101) {
+    try {
+      out.headers.set('server-timing', serverTiming(ms));
+    } catch {
+      // A response with fixed headers (assets, a redirect): copy it once.
+      out = new Response(out.body, out);
+      out.headers.set('server-timing', serverTiming(ms));
+    }
+  }
+  flushCalls();
+  refusals(m, route);
+  const cf = (request as { cf?: { colo?: string; country?: string } }).cf;
+  const status = out?.status ?? 500;
+  meterRequest({
+    surface: isApi(url.pathname) ? 'api' : 'site',
+    method: request.method,
+    route,
+    status,
+    ms,
+    outcome: out ? undefined : 'exception',
+    callerKind: request.headers.get('cf-access-client-id') ? 'service' : request.headers.get('cf-access-jwt-assertion') ? 'session' : 'anon',
+    colo: cf?.colo,
+    country: cf?.country,
+    bytesIn: Number(request.headers.get('content-length')) || 0,
+    bytesOut: Number(out?.headers.get('content-length')) || 0,
+    scope,
+  });
+  const [read, written] = rowsOf(m);
+  oldPoint(env, m, 'http', oldName(request.method, url), String(status), ms, read, written);
+  return out;
+}
+
+/** `POST /api/t`: a batch of the browser's points, checked and written as they are. */
+export async function clientPoints(request: Request): Promise<Response> {
+  let body: unknown = null;
+  try {
+    body = await request.json();
+  } catch {}
+  meterClientBatch(body, { app: APP });
+  return new Response(null, { status: 204 });
+}
+
+const CODE = /^[A-Za-z0-9_.:/$-]{1,64}$/;
+
+/**
+ * `POST /api/client-error`: a crash a page or card caught (Lumen's RouteError and LumenBoundary).
+ * One `client_error` event (where it happened) and one line in Workers Logs with the message and
+ * stack, so it can be found and fixed; the path's ids are folded and its query dropped.
+ */
+export async function clientError(request: Request): Promise<Response> {
+  let b: Record<string, unknown> = {};
+  try {
+    b = (await request.json()) as Record<string, unknown>;
+  } catch {}
+  const str = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
+  const where = CODE.test(str(b.where, 64)) ? str(b.where, 64) : 'page';
+  let path = '';
+  try {
+    path = routeOf(new URL(str(b.path, 500), 'https://x'));
+  } catch {}
+  meterEvent({ event: 'client_error', code: where, ok: false, ref: path.slice(0, 96) });
+  console.error(
+    JSON.stringify({ event: 'client_error', app: APP, where, path, build: str(b.build, 80), outcome: str(b.outcome, 40), message: str(b.message, 500), stack: str(b.stack, 2000) }),
+  );
+  return new Response(null, { status: 204 });
 }
