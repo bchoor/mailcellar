@@ -94,15 +94,18 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
   const scale = Math.max(b.limit, used);
   const parts = show === 'mine' ? [{ name: 'mailcellar', value: mine, mine: true }] : b.parts.length ? b.parts : [{ name: 'Account', value: b.used, mine: false }];
   const stop = b.stop ?? 1;
-  const warn = b.hard ? pct >= stop * 100 : pct > 100;
+  // Storage past the allowance mostly held by other apps: not MailCellar's alarm. The row leads
+  // with MailCellar's own figure; the account's total is the quiet line under it.
+  const others = !b.hard && show === 'all' && pct > 100 && mine < used / 2;
+  const warn = others ? false : b.hard ? pct >= stop * 100 : pct > 100;
   return (
     <div className={ROW}>
       <span className="min-w-0 sm:truncate">
         {b.label}
-        {/* Over the allowance with other apps' use: say whose it is, and MailCellar's own share. */}
-        {show === 'all' && pct > 100 && mine < used && (
+        {others && (
           <span className="block text-xs whitespace-normal text-muted-foreground">
-            All apps · MailCellar {b.unit(mine)}
+            All apps: {b.unit(used)}
+            {b.cost ? ` · ${usd(b.cost)}` : ''}
           </span>
         )}
       </span>
@@ -114,8 +117,14 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
         {used > b.limit && <div className="absolute inset-y-0 w-0.5 bg-foreground" style={{ left: `${(b.limit / scale) * 100}%` }} title="Free allowance" />}
       </div>
       <span className={`text-right tabular-nums ${warn ? 'text-loss' : 'text-muted-foreground'}`}>
-        {b.unit(used)} / {b.unit(b.limit)} · {pct}%
-        {show === 'all' && b.cost ? ` · ${usd(b.cost)}` : ''}
+        {others ? (
+          `MailCellar ${b.unit(mine)}`
+        ) : (
+          <>
+            {b.unit(used)} / {b.unit(b.limit)} · {pct}%
+            {show === 'all' && b.cost ? ` · ${usd(b.cost)}` : ''}
+          </>
+        )}
       </span>
     </div>
   );

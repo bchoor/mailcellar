@@ -317,8 +317,12 @@ export class QuotaDO extends DurableObject<Env> {
   private spendSavedAt = 0;
   /** Cloudflare's figures, as last read. */
   private spendCf: { use: SpendUse; at: number; tried: number } | null = null;
-  /** DO rows written each hour, as last read; in memory only (read again after a restart). */
-  private doHours: { at: string; written: number }[] = [];
+  /** DO rows written each hour, as last read: kept with the other figures, so a restart (a deploy) still has them. */
+  private doHoursKept: { at: string; written: number }[] | null = null;
+  private get doHours(): { at: string; written: number }[] {
+    this.doHoursKept ??= JSON.parse(this.meta('do_hours') ?? '[]') as { at: string; written: number }[];
+    return this.doHoursKept;
+  }
 
   private ownSpend(): SpendUse {
     if (!this.spendOurs) {
@@ -554,7 +558,8 @@ export class QuotaDO extends DurableObject<Env> {
         this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO cloudflare VALUES (?, ?, ?, ?)`, m, this.start(m, now), cf[m], this.ours(m, now));
       this.setMeta('parts', JSON.stringify(cf.parts ?? {}));
       this.setMeta('levels', JSON.stringify(cf.levels ?? {}));
-      this.doHours = cf.doHours ?? [];
+      this.doHoursKept = cf.doHours ?? [];
+      this.setMeta('do_hours', JSON.stringify(this.doHoursKept));
       this.setMeta('read_at', now.toISOString());
       this.setMeta('read_error', null);
     } catch (e) {
