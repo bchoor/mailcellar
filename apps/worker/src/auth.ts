@@ -57,7 +57,20 @@ async function accessKey(env: Env, kid: string): Promise<CryptoKey | null> {
   return accessKeys.keys.get(kid) ?? null;
 }
 
-/** The email in a valid Cloudflare Access token for one of these applications, or null. */
+/** The email a service token acts as: SERVICE_IDENTITIES lists `clientId=email` pairs, comma-separated. */
+export function serviceTokenEmail(raw: string | undefined, clientId: string | undefined): string | null {
+  if (!clientId) return null;
+  for (const pair of (raw ?? '').split(',')) {
+    const [id, email] = pair.split('=').map((x) => x.trim().toLowerCase());
+    if (id && id === clientId.toLowerCase() && email?.includes('@')) return email;
+  }
+  return null;
+}
+
+/**
+ * The email in a valid Cloudflare Access token for one of these applications, or null. A service
+ * token carries no email: only one listed in SERVICE_IDENTITIES acts as the person it names.
+ */
 async function verifyAccess(token: string, env: Env, audiences: string[]): Promise<string | null> {
   try {
     const [head, body, sig] = token.split('.');
@@ -67,11 +80,11 @@ async function verifyAccess(token: string, env: Env, audiences: string[]): Promi
     if (!key) return null;
     const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, fromB64url(sig), new TextEncoder().encode(`${head}.${body}`));
     if (!ok) return null;
-    const claims = json<{ aud?: string | string[]; iss?: string; exp?: number; email?: string }>(fromB64url(body));
+    const claims = json<{ aud?: string | string[]; iss?: string; exp?: number; email?: string; common_name?: string }>(fromB64url(body));
     const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
     if (!aud.some((a) => a && audiences.includes(a)) || claims.iss !== env.ACCESS_TEAM_DOMAIN) return null;
-    if ((claims.exp ?? 0) * 1000 < Date.now() || !claims.email) return null;
-    return claims.email;
+    if ((claims.exp ?? 0) * 1000 < Date.now()) return null;
+    return claims.email || serviceTokenEmail(env.SERVICE_IDENTITIES, claims.common_name);
   } catch {
     return null;
   }
