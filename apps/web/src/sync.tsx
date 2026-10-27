@@ -66,6 +66,8 @@ const backfillQuery = {
   },
   refetchInterval: (q: { state: { data?: BackfillStatus } }) => (syncing(q.state.data) ? 5_000 : busy(q.state.data) ? 15_000 : false),
   refetchIntervalInBackground: false,
+  // Coming back to the tab after a minute asks again; a moved indexed count refreshes that mailbox's pages (cache.ts).
+  staleTime: 60_000,
 } as const;
 
 /** Each account's sync, and the backfill's one state. */
