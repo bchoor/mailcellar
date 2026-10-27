@@ -21,7 +21,7 @@ export interface Env {
   /** Google OAuth client: Worker secrets in production, .dev.vars locally. Never in the repo. */
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
-  /** Cloudflare Access in front of the site: the team domain and this app's audience tag. */
+  /** Cloudflare Access in front of the app (/app, /api): the team domain and the app's audience tag (a comma list is allowed). */
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
   /** The MCP server's own Access application (/mcp, with Managed OAuth): its audience tag. Unset: /mcp is off. */

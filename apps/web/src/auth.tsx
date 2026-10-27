@@ -44,7 +44,7 @@ function takeParam(name: string): string | null {
   return value;
 }
 
-/** Coming back from Google lands on `/?settings=accounts`: open Settings there. */
+/** Coming back from Google lands on `/app/?settings=accounts`: open Settings there. */
 export function SettingsFromUrl() {
   const { openSettings } = useShell();
   useEffect(() => {
