@@ -66,6 +66,7 @@ import { BUCKET, endLaneFile, FLIGHT, freshLane, readLane, rememberCopied, saveL
 import { GmailError } from './gmail';
 import { keepImporting, type ArchiveRecord } from './import';
 import { accountQuota } from './quota';
+import { countRows, measureObject, meteredEnv } from './telemetry';
 
 /**
  * Ordered schema migrations for the mailbox's SQLite database. Each entry runs once,
@@ -381,7 +382,8 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
+    super(ctx, meteredEnv(env));
+    countRows(ctx.storage.sql);
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
       this.refillSearch();
@@ -3019,6 +3021,9 @@ export function messageTest(filters: MessageFilter[], labels: { id: string; name
   });
   return (m) => tests.every((t) => t(m));
 }
+
+// Every call, alarm included, writes its time and rows to telemetry.
+measureObject(MailboxDO);
 
 /**
  * A search box's words as a condition on messages: each word in the envelope's index or the body's

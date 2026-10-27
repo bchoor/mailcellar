@@ -8,6 +8,8 @@
   "name": "mailcellar",
   "main": "apps/worker/src/index.ts",
   "compatibility_date": "2026-10-01",
+  // AsyncLocalStorage, so telemetry.ts can tie each SQLite statement and request to the work it belongs to.
+  "compatibility_flags": ["nodejs_als"],
   "workers_dev": false,
   "preview_urls": false,
   "keep_vars": true,
@@ -44,6 +46,8 @@
   ],
   "workflows": [{ "name": "mailcellar-sync", "binding": "SYNC", "class_name": "SyncWorkflow" }],
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
+  // One data point per request, Durable Object call and Workflow step: time, rows, raw file ops, Gmail calls (telemetry.ts).
+  "analytics_engine_datasets": [{ "binding": "TELEMETRY", "dataset": "mailcellar_telemetry" }],
   // The private tunnel to the self-hosted email API (Settings ▸ Email, Private tunnel): a Workers VPC
   // service on the tunnel of the machine that runs it.
   "vpc_services": [{ "binding": "FREESEND", "service_id": "01a17b11-701f-7850-8e65-bd0ff4436cc0" }],
