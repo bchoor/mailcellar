@@ -52,16 +52,15 @@ import { daySpan, localDay, type Period, periodOf, periodSpan, periods } from '.
 // Sizes stay exact here and round only when shown, so a total matches the sum of its rows.
 // Decimal units, as format.ts writes sizes.
 const KB = 1000;
-const MB = KB * 1000;
 const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
 const DAY = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 /** A sortable ISO day for the value, `Sep 29, 2026` on screen. */
 const dayText = (ts: number) => DAY.format(new Date(ts));
 
-// Gmail's system labels come as INBOX, SENT, CATEGORY_PROMOTIONS: shown as Inbox, Sent, Promotions.
+// Gmail's system labels come as INBOX, CATEGORY_PROMOTIONS, YELLOW_STAR: shown as Inbox, Promotions, Yellow star.
 export function labelName(l: { name: string; type: string }) {
   if (l.type !== 'system') return l.name;
-  const word = l.name.replace(/^CATEGORY_/, '').toLowerCase();
+  const word = l.name.replace(/^CATEGORY_/, '').replaceAll('_', ' ').toLowerCase();
   return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
@@ -221,7 +220,8 @@ const view = (name: string, over: Record<string, unknown>): CustomViewConfig => 
 });
 const TABLE = { id: 'table', kind: 'table', style: 'table', w: 6 };
 const n = { key: 'n', label: 'Messages', icon: MailIcon, value: (r: { n: number }) => r.n, format: 'rounded', aggregate: 'sum' } as const;
-const size = { key: 'size_mb', label: 'Size (MB)', icon: HardDriveIcon, value: (r: { bytes: number }) => r.bytes / MB, format: 'rounded', aggregate: 'sum' } as const;
+// Each size reads in its own unit (812 KB, 45.2 MB, 13.1 GB); the key stays for saved views.
+const size = { key: 'size_mb', label: 'Size', icon: HardDriveIcon, value: (r: { bytes: number }) => r.bytes, format: 'bytes', aggregate: 'sum' } as const;
 
 // Overview and Time: one row a month.
 const MONTHS: ViewDomain<MonthRow> = {
@@ -243,7 +243,7 @@ const LABELS: ViewDomain<LabelRow> = {
   // A message carries several labels, so a sum across labels counts it more than once: no Total.
   fields: [
     { key: 'label', label: 'Label', icon: TagIcon, value: (r) => labelName(r), format: 'text', filterable: true, groupable: true },
-    { key: 'type', label: 'Type', icon: TagIcon, value: (r) => (r.type === 'system' ? 'Built-in' : 'Yours'), format: 'text', filterable: true, groupable: true },
+    { key: 'type', label: 'Type', icon: TagIcon, value: (r) => (r.type === 'system' ? 'Built-in' : 'Yours'), format: 'text', filterable: true, groupable: true, hideOnPhone: true },
     { ...n, aggregate: undefined },
     { ...size, aggregate: undefined },
   ],
@@ -266,11 +266,11 @@ const SENDERS: ViewDomain<SenderRow> = {
   text: (r) => [r.addr, r.name],
   fields: [
     { key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.addr, format: 'text', filterable: true },
-    { key: 'name', label: 'Name', icon: UserIcon, value: (r) => r.name, format: 'text' },
+    { key: 'name', label: 'Name', icon: UserIcon, value: (r) => r.name, format: 'text', hideOnPhone: true },
     { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.addr.split('@')[1] ?? '', format: 'text', filterable: true, groupable: true },
     n,
     size,
-    { key: 'first', label: 'First email', icon: CalendarIcon, value: (r) => day(r.firstTs), format: 'text', render: (r) => dayText(r.firstTs) },
+    { key: 'first', label: 'First email', icon: CalendarIcon, value: (r) => day(r.firstTs), format: 'text', render: (r) => dayText(r.firstTs), hideOnPhone: true },
     { key: 'last', label: 'Latest email', icon: CalendarIcon, value: (r) => day(r.lastTs), format: 'text', render: (r) => dayText(r.lastTs) },
   ],
 } as ViewDomain<SenderRow>;
@@ -370,16 +370,17 @@ const MESSAGES: ViewDomain<MessageView> = {
         </span>
       ),
     },
-    { key: 'category', label: 'Category', icon: InboxIcon, value: (r) => r.category, format: 'text', filterable: true, groupable: true },
+    { key: 'category', label: 'Category', icon: InboxIcon, value: (r) => r.category, format: 'text', filterable: true, groupable: true, hideOnPhone: true },
     {
       key: 'is', label: 'Read', icon: MailOpenIcon, value: (r) => (r.unread ? 'Unread' : 'Read'), format: 'text', filterable: true, groupable: true,
       // is:spam and is:trash, as in Gmail, offered when the page has such mail.
       values: (r) => [r.unread ? 'Unread' : 'Read', ...FOLDERS.filter((f) => r.labels.includes(f.id)).map((f) => f.name)],
     },
     { key: 'period', label: 'Period', icon: CalendarClockIcon, value: (r) => r.period, format: 'text', filterable: true, groupable: true },
-    { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.chips.map((c) => c.name).join(', '), values: (r) => r.chips.map((c) => c.name), format: 'text', filterable: true, groupable: true, render: (r) => <Chips chips={r.chips} /> },
-    { key: 'size_kb', label: 'Size (KB)', icon: HardDriveIcon, value: (r) => Math.max(1, r.size / KB), format: 'rounded', aggregate: 'sum', filterable: true },
-    { key: 'attachments', label: 'Attachments', icon: PaperclipIcon, value: (r) => r.attachments, format: 'rounded', aggregate: 'sum', filterable: true },
+    { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.chips.map((c) => c.name).join(', '), values: (r) => r.chips.map((c) => c.name), format: 'text', filterable: true, groupable: true, render: (r) => <Chips chips={r.chips} />, hideOnPhone: true },
+    { key: 'size_kb', label: 'Size', icon: HardDriveIcon, value: (r) => r.size, format: 'bytes', aggregate: 'sum', filterable: true },
+    // None reads as a dash, so the few messages with files stand out.
+    { key: 'attachments', label: 'Attachments', icon: PaperclipIcon, value: (r) => r.attachments, format: 'rounded', aggregate: 'sum', filterable: true, hideOnPhone: true, render: (r) => r.attachments || <span className="num text-muted-foreground">—</span> },
   ],
 } as ViewDomain<MessageView>;
 
