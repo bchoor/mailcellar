@@ -24,6 +24,9 @@ export interface Env {
   /** Cloudflare Access in front of the app (/app, /api): the team domain and the app's audience tag (a comma list is allowed). */
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
+  /** An Access: Apps and Policies Edit token (a Worker secret): keeps the app's own Access rule
+   *  listing exactly the people let in (access-sync.ts). Unset: no sync; the rule is kept by hand. */
+  CF_ACCESS_TOKEN?: string;
   /** The MCP server's own Access application (/mcp, with Managed OAuth): its audience tag. Unset: /mcp is off. */
   MCP_ACCESS_AUD?: string;
   /**
