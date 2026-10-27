@@ -41,6 +41,8 @@ export interface Env {
   SUITE_LIST_URL?: string;
   SUITE_PREFS_COOKIE?: string;
   SUITE_PREFS_DOMAIN?: string;
+  /** Access service tokens and the person each acts as, `clientId=email` comma-separated (headless page checks). Unset: none. */
+  SERVICE_IDENTITIES?: string;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
   DEV_USER_EMAIL?: string;
 }
