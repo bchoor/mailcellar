@@ -1,6 +1,6 @@
 // The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
 // mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
-import { type FilterToken, LumenLayout, type LumenTab, LumenTabs, LumenSavedWidget, type ServerGroups, Tile, TileRow, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
+import { type FilterToken, LumenLayout, type LumenTab, LumenTabs, LumenSavedWidget, type ServerGroups, Tile, TileRow, useIsMobile, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
@@ -759,7 +759,11 @@ export function MessagesPage() {
   const byCategory = tab !== 'all' && config.columns.includes('category');
   // A Pivot shape shows as a table: the server pages these rows.
   const flat = config.shape === 'pivot' ? { ...config, shape: 'table' as const } : config;
-  const shown = byCategory ? { ...flat, columns: flat.columns.filter((c) => c !== 'category') } : flat;
+  const kept = byCategory ? { ...flat, columns: flat.columns.filter((c) => c !== 'category') } : flat;
+  // A phone has room for one column and a bit: the subject leads, then the sender, so a row says what it is.
+  const phone = useIsMobile();
+  const lead = ['subject', 'from'].filter((c) => kept.columns.includes(c));
+  const shown = phone ? { ...kept, columns: [...lead, ...kept.columns.filter((c) => !lead.includes(c))] } : kept;
   const at = config.columns.indexOf('category');
   const onConfig = (next: typeof config) =>
     setConfig(
