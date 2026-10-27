@@ -66,7 +66,8 @@ export function domainOf(addr: string): string {
 export const monthOf = (ts: number) => new Date(ts).toISOString().slice(0, 7);
 
 /** The archive pages and the rows each one reads, newest or biggest first. */
-export interface MonthRow { month: string; n: number; bytes: number }
+/** `labelled`: messages with at least one of the person's own labels (not Inbox, Starred or a category). */
+export interface MonthRow { month: string; n: number; bytes: number; labelled: number }
 export interface LabelRow { id: string; name: string; type: 'system' | 'user'; n: number; bytes: number }
 export interface DomainRow { domain: string; n: number; bytes: number }
 export interface SenderRow { addr: string; name: string; n: number; bytes: number; firstTs: number; lastTs: number }
