@@ -229,6 +229,58 @@ function tally(into: Tally, key: string, m: IndexedMessage, name = '') {
   into.set(key, t);
 }
 
+/** A message as the sender, domain and label totals count it. */
+type Counted = { ts: number; size: number; fromAddr: string; fromName: string; labels: string[] };
+
+/**
+ * Add (+1) or take away (-1) these messages' shares of the sender, domain and label totals.
+ * The totals only ever move by such shares: nothing recounts the mailbox to keep them right.
+ * Taking away leaves a sender's first and last dates as they were; a total that reaches 0 goes.
+ */
+function moveRollups(run: (query: string, ...args: (string | number)[]) => void, rows: Iterable<Counted>, sign: 1 | -1): void {
+  const senders: Tally = new Map();
+  const domains: Tally = new Map();
+  const labels: Tally = new Map();
+  for (const r of rows) {
+    const m = { ts: r.ts, size: r.size } as IndexedMessage;
+    tally(senders, r.fromAddr.toLowerCase(), m, r.fromName);
+    tally(domains, domainOf(r.fromAddr), m);
+    for (const l of r.labels) tally(labels, l, m);
+  }
+  if (sign < 0) {
+    for (const [table, key, t] of [['senders', 'addr', senders], ['domains', 'domain', domains], ['labels', 'id', labels]] as const)
+      for (const [k, x] of t) {
+        run(`UPDATE ${table} SET n = n - ?, bytes = max(0, bytes - ?) WHERE ${key} = ?`, x.n, x.bytes, k);
+        run(`DELETE FROM ${table} WHERE ${key} = ? AND n <= 0`, k);
+      }
+    return;
+  }
+  for (const [addr, t] of senders)
+    run(
+      `INSERT INTO senders VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (addr) DO UPDATE SET
+         name = CASE WHEN excluded.last_ts >= last_ts THEN excluded.name ELSE name END,
+         n = n + excluded.n, bytes = bytes + excluded.bytes,
+         first_ts = min(first_ts, excluded.first_ts), last_ts = max(last_ts, excluded.last_ts)`,
+      addr, t.name, t.n, t.bytes, t.first, t.last,
+    );
+  for (const [domain, t] of domains)
+    run(
+      `INSERT INTO domains VALUES (?, ?, ?) ON CONFLICT (domain) DO UPDATE SET
+         n = n + excluded.n, bytes = bytes + excluded.bytes`,
+      domain, t.n, t.bytes,
+    );
+  // A label Gmail has not named yet keeps its ID as its name until putLabels or nameLabels runs.
+  for (const [id, t] of labels)
+    run(
+      `INSERT INTO labels VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET
+         n = n + excluded.n, bytes = bytes + excluded.bytes`,
+      id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
+    );
+}
+
+/** Bump to recount every mailbox's sender, domain and label totals once (rebuildRollups). 2: totals move by shares from here on. */
+const ROLLUPS_V = 2;
+
 /**
  * A mailbox's backfill status, kept as one meta row ('status') and in memory: every month's
  * counts and states, the latest jobs, the census and the index's progress. It is the only thing
@@ -456,10 +508,7 @@ export class MailboxDO extends DurableObject<Env> {
       const run = (query: string, ...args: (string | number)[]) => {
         written += sql.exec(query, ...args).rowsWritten;
       };
-      const senders: Tally = new Map();
-      const domains: Tally = new Map();
       const months: Tally = new Map();
-      const labels: Tally = new Map();
       for (const r of rows) {
         run(
           `INSERT INTO message_fts (message_fts, rowid, subject, from_addr, from_name, snippet, labels) VALUES ('delete', CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
@@ -468,17 +517,13 @@ export class MailboxDO extends DurableObject<Env> {
         if (r.body) run(`DELETE FROM body_fts WHERE rowid = CAST(? AS INTEGER)`, ftsRowid(r.id));
         if (attachIndexed(r.attach)) run(`DELETE FROM attach_fts WHERE rowid = CAST(? AS INTEGER)`, ftsRowid(r.id));
         run(`DELETE FROM messages WHERE id = ?`, r.id);
-        const m = { ts: r.ts, size: r.size } as IndexedMessage;
-        tally(senders, r.from_addr.toLowerCase(), m);
-        tally(domains, domainOf(r.from_addr), m);
-        tally(months, monthOf(r.ts), m);
-        for (const l of r.labels.split(' ').filter(Boolean)) tally(labels, l, m);
+        tally(months, monthOf(r.ts), { ts: r.ts, size: r.size } as IndexedMessage);
       }
-      for (const [table, key, t] of [['senders', 'addr', senders], ['domains', 'domain', domains], ['months', 'month', months], ['labels', 'id', labels]] as const)
-        for (const [k, x] of t) {
-          run(`UPDATE ${table} SET n = n - ?, bytes = max(0, bytes - ?) WHERE ${key} = ?`, x.n, x.bytes, k);
-          run(`DELETE FROM ${table} WHERE ${key} = ? AND n <= 0`, k);
-        }
+      moveRollups(run, rows.map((r) => ({ ts: r.ts, size: r.size, fromAddr: r.from_addr, fromName: r.from_name, labels: r.labels.split(' ').filter(Boolean) })), -1);
+      for (const [k, x] of months) {
+        run(`UPDATE months SET n = n - ?, bytes = max(0, bytes - ?) WHERE month = ?`, x.n, x.bytes, k);
+        run(`DELETE FROM months WHERE month = ? AND n <= 0`, k);
+      }
       run(`DELETE FROM meta WHERE key = 'drop_spam'`);
       if (rows.length) written += this.changed(months.keys());
       console.log(JSON.stringify({ dropSpam: { removed: rows.length, rowsRead: read, rowsWritten: written } }));
@@ -1163,8 +1208,14 @@ export class MailboxDO extends DurableObject<Env> {
           id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
         );
     });
+    written += this.putMeta('rollups_v', ROLLUPS_V);
     this.count({ do_rows_read: cursor.rowsRead, do_rows_written: written });
     return { rowsRead: cursor.rowsRead, rowsWritten: written };
+  }
+
+  /** Whether the sender, domain and label totals were recounted since ROLLUPS_V last changed: one keyed read. */
+  async rollupsCurrent(): Promise<boolean> {
+    return this.meta<number>('rollups_v') === ROLLUPS_V;
   }
 
   /** Messages in the index, from the status row. */
@@ -1176,7 +1227,7 @@ export class MailboxDO extends DurableObject<Env> {
     return Object.values(this.status().months).reduce((t, m) => t + m.indexed, 0);
   }
 
-  /** Take a month out of the index, to build it again from Basin. Rollups follow at the next rebuildRollups. */
+  /** Take a month out of the index, to build it again from Basin, and its messages' shares out of the totals. */
   async unindexMonth(month: string): Promise<{ removed: number; rowsWritten: number }> {
     const sql = this.ctx.storage.sql;
     const after = Date.parse(`${month}-01T00:00:00Z`);
@@ -1184,8 +1235,8 @@ export class MailboxDO extends DurableObject<Env> {
     return this.ctx.storage.transactionSync(() => {
       let written = 0;
       const rows = sql
-        .exec<{ id: string; subject: string; from_addr: string; from_name: string; snippet: string; labels: string; body: number | null; attach: string | null }>(
-          `SELECT id, subject, from_addr, from_name, snippet, labels, body, attach FROM messages WHERE ts >= ? AND ts < ?`, after, before,
+        .exec<{ id: string; ts: number; size: number; subject: string; from_addr: string; from_name: string; snippet: string; labels: string; body: number | null; attach: string | null }>(
+          `SELECT id, ts, size, subject, from_addr, from_name, snippet, labels, body, attach FROM messages WHERE ts >= ? AND ts < ?`, after, before,
         )
         .toArray();
       for (const m of rows) {
@@ -1197,6 +1248,7 @@ export class MailboxDO extends DurableObject<Env> {
         if (attachIndexed(m.attach)) written += sql.exec(`DELETE FROM attach_fts WHERE rowid = CAST(? AS INTEGER)`, ftsRowid(m.id)).rowsWritten;
       }
       written += sql.exec(`DELETE FROM messages WHERE ts >= ? AND ts < ?`, after, before).rowsWritten;
+      moveRollups((query, ...args) => void (written += sql.exec(query, ...args).rowsWritten), rows.map((r) => ({ ts: r.ts, size: r.size, fromAddr: r.from_addr, fromName: r.from_name, labels: r.labels.split(' ').filter(Boolean) })), -1);
       written += sql.exec(`DELETE FROM months WHERE month = ?`, month).rowsWritten;
       written += sql.exec(`UPDATE basin_months SET indexed_at = NULL WHERE month = ?`, month).rowsWritten;
       const book = this.status();
@@ -1701,22 +1753,20 @@ export class MailboxDO extends DurableObject<Env> {
 
   /**
    * Index a batch of messages in one transaction. Messages already indexed are skipped,
-   * so a retried batch never double-counts. Rollups are written once a batch, not once a
-   * message, which S4 measured at a third of the write budget. Without `rollups` (the index
-   * built from Basin) only the month count is kept up; rebuildRollups adds the rest once,
-   * when backfill is done, since a sender in every month would be written once a month.
+   * so a retried batch never double-counts. Each added message's share goes into the month,
+   * sender, domain and label totals, written once a batch, not once a message (S4 measured
+   * per-message writes at a third of the write budget). `newMail` is mail in a month already
+   * indexed; without it (a month copied or imported) the batch's months show as indexing.
    */
-  async ingest(batch: IndexedMessage[], rollups = true): Promise<IngestResult> {
+  async ingest(batch: IndexedMessage[], newMail = true): Promise<IngestResult> {
     const sql = this.ctx.storage.sql;
     return this.ctx.storage.transactionSync(() => {
       let rowsWritten = 0;
       const run = (query: string, ...args: (string | number)[]) => {
         rowsWritten += sql.exec(query, ...args).rowsWritten;
       };
-      const senders: Tally = new Map();
-      const domains: Tally = new Map();
       const months: Tally = new Map();
-      const labels: Tally = new Map();
+      const counted: Counted[] = [];
       const addedIds: string[] = [];
       // Find what's indexed already with one keyed read a message: an insert that conflicts reads
       // about seven rows, so indexing a month again (a recount) cost seven reads a message for nothing.
@@ -1746,49 +1796,26 @@ export class MailboxDO extends DurableObject<Env> {
         );
         if (m.body) run(`INSERT INTO body_fts (rowid, body) VALUES (CAST(? AS INTEGER), ?)`, ftsRowid(m.id), m.body);
         tally(months, monthOf(m.ts), m);
-        if (!rollups) continue;
-        tally(senders, m.fromAddr.toLowerCase(), m, m.fromName);
-        tally(domains, domainOf(m.fromAddr), m);
-        for (const l of m.labels) tally(labels, l, m);
+        counted.push(m);
       }
-      for (const [addr, t] of senders)
-        run(
-          `INSERT INTO senders VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (addr) DO UPDATE SET
-             name = CASE WHEN excluded.last_ts >= last_ts THEN excluded.name ELSE name END,
-             n = n + excluded.n, bytes = bytes + excluded.bytes,
-             first_ts = min(first_ts, excluded.first_ts), last_ts = max(last_ts, excluded.last_ts)`,
-          addr, t.name, t.n, t.bytes, t.first, t.last,
-        );
-      for (const [domain, t] of domains)
-        run(
-          `INSERT INTO domains VALUES (?, ?, ?) ON CONFLICT (domain) DO UPDATE SET
-             n = n + excluded.n, bytes = bytes + excluded.bytes`,
-          domain, t.n, t.bytes,
-        );
+      moveRollups(run, counted, 1);
       for (const [month, t] of months)
         run(
           `INSERT INTO months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET
              n = n + excluded.n, bytes = bytes + excluded.bytes`,
           month, t.n, t.bytes,
         );
-      // New mail (rollups) in a month already built from Basin: it is in Basin too, so count it as
+      // New mail in a month already built from Basin: it is in Basin too, so count it as
       // copied. The month's copied count is otherwise only set when its index is built.
-      if (rollups)
+      if (newMail)
         for (const [month, t] of months)
           run(`UPDATE basin_months SET copied = copied + ? WHERE month = ? AND indexed_at IS NOT NULL`, t.n, month);
-      // A label Gmail has not named yet keeps its ID as its name until putLabels or nameLabels runs.
-      for (const [id, t] of labels)
-        run(
-          `INSERT INTO labels VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET
-             n = n + excluded.n, bytes = bytes + excluded.bytes`,
-          id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
-        );
       const added = addedIds.length;
-      // Built from Basin (no rollups): the batch's months are indexing, and no longer waiting.
+      // A month copied or imported: the batch's months are indexing, and no longer waiting.
       const touched = new Set(batch.map((m) => monthOf(m.ts)));
-      if (added || (!rollups && batch.length)) {
+      if (added || (!newMail && batch.length)) {
         const book = this.status();
-        if (!rollups) {
+        if (!newMail) {
           for (const m of touched) if (!book.indexing.includes(m)) book.indexing.push(m);
           book.indexWait = null;
         }

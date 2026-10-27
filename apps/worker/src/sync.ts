@@ -428,8 +428,7 @@ export const INDEX_CHUNK = 500;
 /**
  * Finish a landed month: copying indexed its messages as it went, so this checks the mailbox
  * against Gmail's list of the month, forgets what's missing (copying the month again fetches
- * it), and marks the month done. Once no month is left, senders, domains and labels are
- * counted again. Returns as the old index build did, so callers keep working.
+ * it), and marks the month done. Returns as the old index build did, so callers keep working.
  */
 export async function runIndex(env: Env, user: UserId, account: string, month: string, _from = 0): Promise<{ indexed: number; next: number | null; resumesAt: string | null }> {
   const mailbox = accountMailbox(env, user, account);
@@ -443,8 +442,9 @@ export async function runIndex(env: Env, user: UserId, account: string, month: s
   if (missing.length) await forgetMissing(env, user, account, month, missing);
   await mailbox.markIndexed(month, have);
   const quota = accountQuota(env);
-  // Senders, domains and labels once backfill is done, not once a month.
-  if (!(await mailbox.hasQueued()) && !(await mailbox.indexPending())) {
+  // Copying keeps the sender, domain and label totals; they are recounted from every message
+  // only once after ROLLUPS_V changes, when backfill is done.
+  if (!(await mailbox.rollupsCurrent()) && !(await mailbox.hasQueued()) && !(await mailbox.indexPending())) {
     const n = await mailbox.indexedCount();
     const full = await quota.reserve({ do_rows_read: n, do_rows_written: Math.ceil(n / 4) });
     if (!full) {
