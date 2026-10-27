@@ -45,9 +45,6 @@
   "workflows": [{ "name": "mailcellar-sync", "binding": "SYNC", "class_name": "SyncWorkflow" }],
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
   "observability": { "enabled": true },
-  // Workers Paid (2026-10-25): runs estimate their CPU at a third of 30 s, and estimates have run
-  // low before, so the cap is 2 minutes. Remove if the account goes back to Free (WORKERS_PLAN).
-  "limits": { "cpu_ms": 120000 },
   // wrangler dev keeps localhost as the request's origin (not the route's host), so the
   // Google sign-in redirect matches the client's http://localhost:8787 callback.
   "dev": { "port": 8787, "host": "localhost:8787" }
