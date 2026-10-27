@@ -11,7 +11,8 @@ import { useQuery } from '@tanstack/react-query';
 import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-group';
 import { DownloadIcon, ImageIcon, LayoutGridIcon, ListIcon, MailIcon, PaperclipIcon, UserIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { bytes, type Chip } from './archive';
+import { type Chip } from './archive';
+import { bytes } from './format';
 import { AttachmentGrid, AttachmentPreview, kindIcon, kindOf } from './attachment-preview';
 
 const who = (a: MailAddress) => (a.name && a.name !== a.address ? `${a.name} <${a.address}>` : a.address);

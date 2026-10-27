@@ -12,10 +12,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { ArchiveIcon, FileUpIcon, PauseIcon, PlayIcon, PlusIcon } from 'lucide-react';
 import { useState, useSyncExternalStore } from 'react';
+import { bytes, count, day } from './format';
 
-const fmt = (n: number) => n.toLocaleString('en-US');
-const gb = (bytes: number) => (bytes < 1024 ** 3 ? `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB` : `${(bytes / 1024 ** 3).toFixed(1)} GB`);
-const added = (iso: string) => new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 const minutes = (s: number) => (s < 90 ? 'about a minute' : `about ${Math.round(s / 60)} min`);
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1);
 
@@ -118,7 +116,7 @@ async function resume(id: string, file: File, done: () => void): Promise<void> {
   if (!res.ok) throw new Error(`Upload not found (${res.status})`);
   const at = (await res.json()) as { bytes: number; partSize: number; parts: number; sent: number[]; status: string };
   if (at.status !== 'uploading') return done();
-  if (file.size !== at.bytes) throw new Error(`That file is ${gb(file.size)}; this upload is ${gb(at.bytes)}. Choose the same file.`);
+  if (file.size !== at.bytes) throw new Error(`That file is ${bytes(file.size)}; this upload is ${bytes(at.bytes)}. Choose the same file.`);
   const sent = new Set(at.sent);
   const u: Upload = {
     id, file, partSize: at.partSize, parts: at.parts,
@@ -146,7 +144,7 @@ function FilePick({ file, onFile, prompt }: { file: File | null; onFile: (f: Fil
       {file ? (
         <>
           <span className="font-medium">{file.name}</span>
-          <span className="text-muted-foreground">{gb(file.size)} · tap to choose another</span>
+          <span className="text-muted-foreground">{bytes(file.size)} · tap to choose another</span>
         </>
       ) : (
         <>
@@ -188,7 +186,7 @@ export function ArchiveRow({ a, open, onOpenChange }: { a: ConnectedAccount; ope
   return (
     <IntegrationRow
       name={a.email}
-      meta={`mbox archive · ${x.file} · ${gb(x.bytes)} · added ${added(a.addedAt)}`}
+      meta={`mbox archive · ${x.file} · ${bytes(x.bytes)} · added ${day(a.addedAt)}`}
       badge={<Badge variant={status.variant}>{status.label}</Badge>}
       open={open}
       onOpenChange={onOpenChange}
@@ -199,7 +197,7 @@ export function ArchiveRow({ a, open, onOpenChange }: { a: ConnectedAccount; ope
             <div className="grid grid-cols-[1fr_auto] items-center gap-3 text-sm">
               <Progress value={pct} className="h-2" />
               <span className="tabular-nums text-muted-foreground">
-                {gb(sent)} of {gb(x.bytes)} · {pct}%
+                {bytes(sent)} of {bytes(x.bytes)} · {pct}%
               </span>
             </div>
             <p className="text-sm text-muted-foreground">
@@ -221,7 +219,7 @@ export function ArchiveRow({ a, open, onOpenChange }: { a: ConnectedAccount; ope
         )}
         {!uploading && (
           <p className="text-sm text-muted-foreground">
-            {x.status === 'failed' ? 'The import stopped.' : x.messages === null ? `Reading the file. ${fmt(x.imported)} messages imported so far.` : `${fmt(x.imported)} of ${fmt(x.messages)} messages imported.`}{' '}
+            {x.status === 'failed' ? 'The import stopped.' : x.messages === null ? `Reading the file. ${count(x.imported)} messages imported so far.` : `${count(x.imported)} of ${count(x.messages)} messages imported.`}{' '}
             <Link to="/backfill" search={{ mailbox: a.email }} className="underline" onClick={closeSettings}>
               Open Backfill
             </Link>

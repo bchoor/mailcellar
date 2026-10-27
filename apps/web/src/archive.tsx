@@ -45,26 +45,18 @@ import {
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
+import { bytes, count, monthName } from './format';
 import { MessageDrawer } from './message-drawer';
 import { daySpan, localDay, type Period, periodOf, periodSpan, periods } from './period';
 
 // Sizes stay exact here and round only when shown, so a total matches the sum of its rows.
-const KB = 1024;
-const MB = KB * 1024;
+// Decimal units, as format.ts writes sizes.
+const KB = 1000;
+const MB = KB * 1000;
 const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
 const DAY = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 /** A sortable ISO day for the value, `Sep 29, 2026` on screen. */
 const dayText = (ts: number) => DAY.format(new Date(ts));
-const MONTH = new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
-/** `2026-09` → `Sep 2026`. */
-const monthName = (month: string) => MONTH.format(new Date(`${month}-01T00:00:00Z`));
-export const count = (n: number) => n.toLocaleString('en-US');
-/** Bytes as people read them: 812 KB, 977 MB, 1.2 GB. */
-export function bytes(b: number) {
-  if (b >= 1024 * MB) return `${(b / (1024 * MB)).toFixed(1)} GB`;
-  if (b >= MB) return `${Math.round(b / MB)} MB`;
-  return b ? `${Math.max(1, Math.round(b / KB))} KB` : '0 KB';
-}
 
 // Gmail's system labels come as INBOX, SENT, CATEGORY_PROMOTIONS: shown as Inbox, Sent, Promotions.
 export function labelName(l: { name: string; type: string }) {
@@ -414,7 +406,7 @@ export function OverviewPage() {
   const months = useArchive('months');
   const labels = useArchive('labels');
   const domains = useArchive('domains');
-  const senders = useArchive('senders');
+  const totals = useArchive('totals');
   const load = useLumenLoad(months);
   const labelsLoad = useLumenLoad(labels);
   const domainsLoad = useLumenLoad(domains);
@@ -455,10 +447,11 @@ export function OverviewPage() {
           id: 'totals', title: 'In your archive', kind: 'own', w: 6, link: false,
           children: (
             <TileRow className="grid grid-cols-2 lg:flex">
-              <Tile className="lg:flex-1" label="Messages" value={count(total)} />
-              <Tile className="lg:flex-1" label="Size" value={bytes(size)} />
-              <Tile className="lg:flex-1" label="Senders" value={senders.data ? count(senders.data.length) : '—'} />
-              <Tile className="lg:flex-1" label="Years" value={count(years.size)} caption={first ? `since ${monthName(first)}` : undefined} />
+              {/* A dash until the numbers load, never a 0 that isn't true. */}
+              <Tile className="lg:flex-1" label="Messages" value={months.data ? count(total) : '—'} />
+              <Tile className="lg:flex-1" label="Size" value={months.data ? bytes(size) : '—'} />
+              <Tile className="lg:flex-1" label="Senders" value={totals.data?.[0] ? count(totals.data[0].senders) : '—'} />
+              <Tile className="lg:flex-1" label="Years" value={months.data ? count(years.size) : '—'} caption={first ? `since ${monthName(first)}` : undefined} />
             </TileRow>
           ),
         },

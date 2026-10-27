@@ -8,6 +8,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LogOutIcon, PlusIcon, RefreshCwIcon, ShieldAlertIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { AddArchive, ArchiveRow } from './archive-import';
+import { day } from './format';
 
 /** Signed in with Access, but not let in (the API answers 403 not_invited). */
 export class NotInvitedError extends Error {
@@ -81,7 +82,6 @@ export function NoIdentity() {
 const Mark = ({ ok }: { ok: boolean }) =>
   ok ? <span className="text-gain">✓</span> : <span className="text-loss">✗</span>;
 
-const added = (iso: string) => new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 
 export function AccountsSettings() {
   const me = useMe();
@@ -105,7 +105,7 @@ export function AccountsSettings() {
           <IntegrationRow
             key={a.id}
             name={a.email}
-            meta={`Gmail · added ${added(a.addedAt)} · ${a.modify ? 'Read ✓ · Modify ✓' : 'Read only'}`}
+            meta={`Gmail · added ${day(a.addedAt)} · ${a.modify ? 'Read ✓ · Modify ✓' : 'Read only'}`}
             badge={<TestBadge test={a.test} ok="Connected" />}
             open={open === a.id}
             onOpenChange={(o: boolean) => setOpen(o ? a.id : null)}
