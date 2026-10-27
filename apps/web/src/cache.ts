@@ -1,7 +1,8 @@
 // Pages paint at once from the answers last saved on this device, then refresh in the background.
 // Mail data (rollups, message lists) is kept until its mailbox's indexed count moves, which the
 // backfill status (polled while anything copies) reports; everything else refreshes once per load.
-import type { PersistedClient, Persister, PersistQueryClientOptions } from '@tanstack/react-query-persist-client';
+import { savedAnswers } from '@columenlabs/lumen-ui';
+import type { PersistedClient, PersistQueryClientOptions } from '@tanstack/react-query-persist-client';
 import type { Query, QueryClient } from '@tanstack/react-query';
 import type { BackfillStatus, Me } from '@mailcellar/schema';
 
@@ -15,53 +16,8 @@ const MEMORY_ONLY = new Set(['message', 'attachment-text', 'found']);
 
 const isMailData = (q: Query) => MAIL_DATA.has(q.queryKey[0] as string);
 
-/** How long the first paint waits for the saved answers before asking the server. */
-const RESTORE_MS = 1500;
-
-/** The saved answers: one IndexedDB record, kept as an object (no JSON round trip), written at most once a second. */
-function indexedDbPersister(): Persister {
-  const db = new Promise<IDBDatabase>((resolve, reject) => {
-    const open = indexedDB.open('mailcellar', 1);
-    open.onupgradeneeded = () => open.result.createObjectStore('cache');
-    open.onsuccess = () => resolve(open.result);
-    open.onerror = () => reject(open.error);
-    open.onblocked = () => reject(new Error('cache blocked'));
-  });
-  const run = <T>(mode: IDBTransactionMode, op: (s: IDBObjectStore) => IDBRequest) =>
-    db.then(
-      (d) =>
-        new Promise<T>((resolve, reject) => {
-          const tx = d.transaction('cache', mode);
-          const req = op(tx.objectStore('cache'));
-          tx.oncomplete = () => resolve(req.result as T);
-          tx.onerror = () => reject(tx.error);
-          // An aborted transaction (storage full, the browser gave up) fires only abort, never error.
-          tx.onabort = () => reject(tx.error ?? new Error('cache aborted'));
-        }),
-    );
-  let next: PersistedClient | null = null;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return {
-    persistClient: (client) => {
-      next = client;
-      timer ??= setTimeout(() => {
-        timer = undefined;
-        void run('readwrite', (s) => s.put(next, 'queries')).catch(() => {});
-      }, 1000);
-    },
-    // The app shows nothing until the restore settles, and a stuck read (another tab's write, a
-    // broken store) would leave it blank for good: past RESTORE_MS it starts from nothing instead.
-    restoreClient: () =>
-      Promise.race([
-        run<PersistedClient | undefined>('readonly', (s) => s.get('queries')),
-        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), RESTORE_MS)),
-      ]),
-    removeClient: () => run('readwrite', (s) => s.delete('queries')),
-  };
-}
-
-const noop: Persister = { persistClient: () => {}, restoreClient: async () => undefined, removeClient: () => {} };
-const persister = typeof indexedDB === 'undefined' ? noop : indexedDbPersister();
+// The kit's persister: a restore that has not answered in 1.5 s gives up and the app asks the server.
+const persister = savedAnswers<PersistedClient>({ name: 'mailcellar' });
 
 export const persistOptions: Omit<PersistQueryClientOptions, 'queryClient'> = {
   persister,
