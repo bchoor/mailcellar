@@ -843,7 +843,8 @@ function Jobs({ id, rate, copying, history }: { id: string; rate: number | null;
   const each = rate && now.length ? rate / now.length : null;
   const rows: { m: MonthCoverage; stage: Stage; left?: string; action?: RowAction }[] = [
     ...failed.map((m) => ({ m, stage: 'failed' as const, left: m.error ? shortError(m.error) : 'Failed', action: { label: 'Retry', primary: true, busy: inFlight === m.month, disabled: inFlight !== null, run: () => void retry(m.month) } })),
-    ...now.map((m) => ({ m, stage: 'copying' as const, left: each ? `${duration(left(m) / each)} left` : undefined, action: { label: 'Stop', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) } })),
+    // A month fully copied stays Copying until its lane lets go; it reads Finishing meanwhile.
+    ...now.map((m) => ({ m, stage: 'copying' as const, left: copyable(m) !== null && !left(m) ? 'Finishing' : each ? `${duration(left(m) / each)} left` : '—', action: { label: 'Stop', busy: inFlight === m.month, disabled: inFlight !== null, run: () => void unqueue(m.month, [m.month]) } })),
     ...halting.map((m) => ({ m, stage: 'stopping' as const, action: { label: 'Stop', busy: true, run: () => {} } })),
     ...indexJobs.map((m) => ({
       m,
@@ -1093,19 +1094,13 @@ export function BackfillPage() {
               },
               {
                 // One card for all copying: new mail (Check for new mail, the schedule) and older
-                // months (picked on the map below) run as jobs with one Running now, queue and history.
+                // months (picked on the map below) run as jobs; Running now here, the queue and history in Jobs.
                 id: 'sync', title: 'Copy mail', icon: HourglassIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
                 tools: <RefreshTool keys={[BACKFILL_KEY]} />,
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
                   return (
-                    <div key={a.id} className="flex flex-col gap-5">
-                      <AccountSync id={a.id} archive={a.kind === 'archive'} sync={a.sync} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} running={a.running} last={a.history?.[0]} />
-                      <div className="flex flex-col gap-3 border-t pt-4">
-                        <span className="text-sm font-medium">Jobs</span>
-                        <Jobs id={a.id} rate={a.sync.ratePerMin} copying={a.sync.months} history={a.history ?? []} />
-                      </div>
-                    </div>
+                    <AccountSync key={a.id} id={a.id} archive={a.kind === 'archive'} sync={a.sync} copy={copyState(data, a, quota.data?.meters)} index={indexState(a, quota.data?.meters)} meters={quota.data?.meters ?? []} sizes={a.sizes} doHours={quota.data?.doHours} running={a.running} last={a.history?.[0]} />
                   );
                 },
               },
@@ -1114,6 +1109,15 @@ export function BackfillPage() {
                 children: (f: FilterToken[]) => {
                   const a = followed(data.accounts, f);
                   return <AccountCoverageMap key={a.id} id={a.id} email={a.email} archive={a.kind === 'archive'} rate={a.sync.ratePerMin} copying={a.sync.months} />;
+                },
+              },
+              {
+                // The account's queue by month and its finished jobs, last on the page.
+                id: 'jobs', title: 'Jobs', icon: ListChecksIcon, kind: 'widget' as const, color: 'teal' as const, w: 6, reads: ['mailbox'],
+                tools: <RefreshTool keys={[BACKFILL_KEY]} />,
+                children: (f: FilterToken[]) => {
+                  const a = followed(data.accounts, f);
+                  return <Jobs key={a.id} id={a.id} rate={a.sync.ratePerMin} copying={a.sync.months} history={a.history ?? []} />;
                 },
               },
             ]
