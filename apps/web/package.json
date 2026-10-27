@@ -13,6 +13,7 @@
     "@columenlabs/lumen-ui-types": "0.1.89",
     "@mailcellar/schema": "workspace:*",
     "@tanstack/react-query": "5.103.2",
+    "@tanstack/react-query-persist-client": "5.103.2",
     "@tanstack/react-router": "1.170.39",
     "lucide-react": "^1.61.0",
     "pdfjs-dist": "5.4.296",

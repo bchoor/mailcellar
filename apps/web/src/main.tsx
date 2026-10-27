@@ -11,7 +11,8 @@ import {
 } from '@columenlabs/lumen-ui';
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@columenlabs/lumen-ui/ui/sidebar';
 import { TooltipProvider } from '@columenlabs/lumen-ui/ui/tooltip';
-import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
+import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
 import {
   Outlet,
   RouterProvider,
@@ -30,6 +31,7 @@ import type { Suite } from '@mailcellar/schema';
 import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { EmailSettings, InvitePage, NotInvited, PEOPLE_SECTIONS, PeoplePage } from './admin';
+import { forgetOnSignOut, keepFresh, persistOptions } from './cache';
 import { AccountsSettings, NoIdentity, NotInvitedError, SettingsFromUrl, useMe } from './auth';
 import { MessagesPage, OverviewPage, PanesPage } from './archive';
 import { FiltersPage, SubscriptionsPage } from './gmail-pages';
@@ -226,7 +228,8 @@ const router = createRouter({
   basepath: __SINGLE_FILE__ ? '/' : '/app',
   history: __SINGLE_FILE__ ? createMemoryHistory({ initialEntries: ['/'] }) : createBrowserHistory(),
 });
-const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+// Answers stay fresh until something says otherwise (cache.ts); an unused one is let go after 30 minutes.
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: 30 * 60_000 } } });
 // Adding, removing or uploading a mailbox changes /api/me; the backfill's kept answer is then
 // out of date (staleTime is Infinity), so Backfill would miss the new mailbox until a reload.
 let lastMe: unknown;
@@ -237,12 +240,13 @@ queryClient.getQueryCache().subscribe((e) => {
   lastMe = me;
 });
 
+forgetOnSignOut();
 createRoot(document.getElementById('root') as HTMLElement).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
+    <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions} onSuccess={() => keepFresh(queryClient)} onError={() => keepFresh(queryClient)}>
       <TooltipProvider>
         <RouterProvider router={router} />
       </TooltipProvider>
-    </QueryClientProvider>
+    </PersistQueryClientProvider>
   </StrictMode>,
 );

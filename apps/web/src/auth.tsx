@@ -21,6 +21,8 @@ export class NotInvitedError extends Error {
 export function useMe() {
   return useQuery({
     queryKey: ['me'],
+    // Asked again on coming back to the tab after a minute: a removed mailbox or a sign-out shows.
+    staleTime: 60_000,
     retry: (n, e) => !(e instanceof NotInvitedError) && n < 3,
     queryFn: async (): Promise<Me | null> => {
       const res = await fetch('/api/me');

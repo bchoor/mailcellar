@@ -10,7 +10,8 @@ const single = process.env.SINGLEFILE === '1';
 export default defineConfig({
   plugins: [react(), tailwindcss(), ...(single ? [viteSingleFile()] : [])],
   base: single ? '/' : '/app/',
-  define: { __SINGLE_FILE__: JSON.stringify(single) },
+  // __BUILD__ names this build (the commit Workers Builds deploys), so answers saved by an older build are dropped.
+  define: { __SINGLE_FILE__: JSON.stringify(single), __BUILD__: JSON.stringify(process.env.WORKERS_CI_COMMIT_SHA ?? String(Date.now())) },
   build: single
     ? { assetsInlineLimit: 100_000_000, cssCodeSplit: false, chunkSizeWarningLimit: 100_000 }
     : {
