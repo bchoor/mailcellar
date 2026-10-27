@@ -43,7 +43,8 @@ jobs:
           fetch-depth: 0 # the build lists merged PRs from git history; the upgrade starts from the base branch
       - uses: ./.github/actions/setup-bun
       - name: Install the browser
-        run: bunx playwright install chromium || bunx playwright install --with-deps chromium
+        # The browser and the system libraries it needs (the runner is a bare Linux box).
+        run: bunx playwright install --with-deps chromium
       - run: bun run build
       # A pull request upgrades from the branch it merges into, like the deploy will.
       - name: e2e
