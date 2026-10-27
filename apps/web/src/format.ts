@@ -41,15 +41,6 @@ export function moment(at: string | number | Date): string {
   return `${d.toLocaleDateString('en-US', { timeZone, month: 'short', day: 'numeric' })}, ${t}`;
 }
 
-/** A message's time in a list, short as a mail app's: `1:31 AM PT` today, `Yesterday`, `Oct 26`, `Oct 26, 2025`. */
-export function listTime(at: string | number | Date): string {
-  const d = new Date(at);
-  const timeZone = zone();
-  if (daysFrom(d, timeZone, 0)) return d.toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', timeZoneName: 'shortGeneric' });
-  if (daysFrom(d, timeZone, -1)) return 'Yesterday';
-  return d.toLocaleDateString('en-US', { timeZone, month: 'short', day: 'numeric', ...(thisYear(d, timeZone) ? {} : { year: 'numeric' }) });
-}
-
 /** A day: `Oct 25, 2026`. */
 export const day = (at: string | number | Date) =>
   new Date(at).toLocaleDateString('en-US', { timeZone: zone(), month: 'short', day: 'numeric', year: 'numeric' });

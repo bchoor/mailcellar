@@ -743,7 +743,7 @@ function JobHistory({ history }: { history: JobRecord[] }) {
                 {moment(r.startedAt)} · {took(Date.parse(r.endedAt) - Date.parse(r.startedAt))} · {count(r.copied)} msgs
               </div>
             </TableCell>
-            <TableCell className="hidden whitespace-nowrap py-2 text-xs text-muted-foreground sm:table-cell">{moment(r.startedAt)}</TableCell>
+            <TableCell className="hidden whitespace-nowrap py-2 tabular-nums sm:table-cell">{moment(r.startedAt)}</TableCell>
             <TableCell className="hidden whitespace-nowrap py-2 text-right tabular-nums sm:table-cell">{took(Date.parse(r.endedAt) - Date.parse(r.startedAt))}</TableCell>
             <TableCell className="hidden py-2 text-right tabular-nums sm:table-cell">{count(r.copied)}</TableCell>
             <TableCell className="py-2">

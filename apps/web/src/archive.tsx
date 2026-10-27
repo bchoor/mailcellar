@@ -45,7 +45,7 @@ import {
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
-import { bytes, count, listTime, moment, monthName } from './format';
+import { bytes, count, moment, monthName } from './format';
 import { MessageDrawer } from './message-drawer';
 import { daySpan, localDay, type Period, periodOf, periodSpan, periods } from './period';
 
@@ -220,7 +220,7 @@ const view = (name: string, over: Record<string, unknown>): CustomViewConfig => 
   ...customViewConfigSchema.parse(over),
 });
 const TABLE = { id: 'table', kind: 'table', style: 'table', w: 6 };
-const n = { key: 'n', label: 'Messages', icon: MailIcon, value: (r: { n: number }) => r.n, format: 'rounded', aggregate: 'sum' } as const;
+const n = { key: 'n', label: 'Messages', icon: MailIcon, value: (r: { n: number }) => r.n, format: 'rounded', aggregate: 'sum', cardUnit: 'msgs' } as const;
 // Each size reads in its own unit (812 KB, 45.2 MB, 13.1 GB); the key stays for saved views.
 const size = { key: 'size_mb', label: 'Size', icon: HardDriveIcon, value: (r: { bytes: number }) => r.bytes, format: 'bytes', aggregate: 'sum' } as const;
 
@@ -346,7 +346,7 @@ const MESSAGES: ViewDomain<MessageView> = {
   text: (r) => [r.subject, r.fromAddr, r.fromName],
   fields: [
     // The day in the person's time zone, like Period.
-    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.day, format: 'text', render: (r) => <time dateTime={new Date(r.ts).toISOString()} title={moment(r.ts)}>{listTime(r.ts)}</time> },
+    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.day, format: 'text', render: (r) => <time dateTime={new Date(r.ts).toISOString()} >{moment(r.ts)}</time> },
     {
       key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.fromAddr, format: 'text', filterable: true, groupable: true,
       // Unread: a dot and bold, as in Gmail.

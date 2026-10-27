@@ -6,7 +6,7 @@ import { quotaStop, type LevelMeter, type QuotaMeter, type QuotaOverview, type Q
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CloudIcon, PauseIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useState, useSyncExternalStore } from 'react';
-import { bytes, count, moment } from './format';
+import { count, moment } from './format';
 
 const usd = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
 const date = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -97,7 +97,15 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
   const warn = b.hard ? pct >= stop * 100 : pct > 100;
   return (
     <div className={ROW}>
-      <span className="min-w-0 sm:truncate">{b.label}</span>
+      <span className="min-w-0 sm:truncate">
+        {b.label}
+        {/* Over the allowance with other apps' use: say whose it is, and MailCellar's own share. */}
+        {show === 'all' && pct > 100 && mine < used && (
+          <span className="block text-xs whitespace-normal text-muted-foreground">
+            All apps · MailCellar {b.unit(mine)}
+          </span>
+        )}
+      </span>
       <div className="relative order-last col-span-2 flex h-2 overflow-hidden rounded-full bg-muted sm:order-none sm:col-span-1" role="img" aria-label={`${b.label}: ${parts.map((p) => `${partName(p)} ${b.unit(p.value)}`).join(', ')}`}>
         {parts.map((p) => (
           <div key={p.name} className="h-full" style={{ width: `${(p.value / scale) * 100}%`, background: color(p) }} title={`${partName(p)}: ${b.unit(p.value)}`} />
@@ -114,7 +122,16 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
 }
 
 const meterBar = (m: QuotaMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, hard: m.hard, stop: quotaStop(m.metric), cost: m.cost, unit: count, parts: m.parts.length ? m.parts : [{ name: 'mailcellar', value: m.ours, mine: true }, { name: 'Account', value: m.used - m.ours, mine: false }] });
-const levelBar = (m: LevelMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, cost: m.cost, unit: m.unit === 'bytes' ? bytes : count, parts: m.parts });
+/** Stored bytes as Cloudflare counts its limits (a GB is 2^30 bytes), so they read 10 GB and 5 GB as its pricing names them. */
+function cfBytes(b: number): string {
+  for (const [unit, name] of [[2 ** 40, 'TB'], [2 ** 30, 'GB'], [2 ** 20, 'MB']] as const) {
+    if (b < unit) continue;
+    const v = b / unit;
+    return `${v < 100 ? Number(v.toFixed(1)) : count(Math.round(v))} ${name}`;
+  }
+  return `${count(Math.round(b / 1024))} KB`;
+}
+const levelBar = (m: LevelMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, cost: m.cost, unit: m.unit === 'bytes' ? cfBytes : count, parts: m.parts });
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
