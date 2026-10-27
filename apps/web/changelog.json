@@ -1,5 +1,42 @@
 [
   {
+    "tag": "v0.0.14",
+    "sha": "796c5c62b2fc7972e1c4eafbb03e8a2b5830cc67",
+    "published_at": "2026-10-27T03:43:22Z",
+    "takeaways": [
+      {
+        "text": "**Public landing page, with the app moved to /app**: At the site's root address, visitors now see a public page with the film, a how-to video, costs and open-source info, while the app itself lives under /app and old links redirect there.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Live running jobs and finished-job history**: On the Sync card, a new \"Running now\" list shows each sync and backfill in progress with what it is doing and a ticking timer, and the renamed Jobs card (formerly Backfills) has a Finished filter for past results.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Invited people can now sign in**: In Admin ▸ People, every invite, removal or access change now updates the Cloudflare Access rule so invited people can get a sign-in code. The page shows the sync status.",
+        "types": [
+          "feature"
+        ]
+      },
+      {
+        "text": "**Email linked to FreeSend over the tunnel**: In Settings ▸ Email, the Private tunnel route now defaults to the FreeSend server's name, the badge reads \"Linked\" or \"Not linked to MailCellar\", and Send test shows the email server's own error message.",
+        "types": [
+          "improvement"
+        ]
+      },
+      {
+        "text": "**Every phone popup can be closed**: On a phone, each sheet, drawer, picker and dialog now has a close ×, closes on a tap outside, and can be swiped down from the grab handle.",
+        "types": [
+          "fix"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.13",
     "sha": "e1c0bc8f14de82e1e26d9dce8376b76b89b651f6",
     "published_at": "2026-10-26T18:52:03Z",
