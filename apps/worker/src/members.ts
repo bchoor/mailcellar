@@ -41,7 +41,7 @@ const emailOptions = (env: Env): EmailOptions => ({
     {
       id: 'tunnel',
       label: 'Private tunnel',
-      state: env.FREESEND ? 'Connected' : 'Not set up',
+      state: env.FREESEND ? 'Linked' : 'Not linked to MailCellar',
       url: 'http://localhost:5000/api',
       urlInfo: 'As seen from the tunnel’s machine, so localhost is that machine itself.',
       where: 'the tunnel’s machine',
