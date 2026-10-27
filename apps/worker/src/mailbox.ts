@@ -1,4 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
+import type { Email } from 'postal-mime';
+import { detailOf, fileOf, readMail, textOf, type MessageFile, type MessageText } from './message';
 import {
   ARCHIVE_LIMIT,
   GMAIL_SCOPES,
@@ -39,6 +41,7 @@ import {
   monthNow,
   SYNC_STALE_MS,
   type ScheduleRun,
+  type MessageDetail,
   type UserId,
   asUserId,
   nextRun,
@@ -964,6 +967,26 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /** Where a message's raw bytes are: its raw file, and offset and length there (-1 for a file of one). One keyed read. */
+  /** The last message parsed here: a burst of requests for one message (its attachments' previews) parses it once. */
+  private lastMail: { id: string; mail: Promise<Email | null> } | null = null;
+
+  /** One message's detail, plain text or attachment, parsed from its raw file here (where CPU is not cut at 10 ms). */
+  async messagePart(user: UserId, account: string, id: string, want: { part: 'detail' | 'text' } | { part: 'file'; index: number }): Promise<MessageDetail | MessageText | MessageFile | null> {
+    let last = this.lastMail;
+    if (last?.id !== id) {
+      const read = this.location(id).then((at) => readMail(this.env, user, account, id, at));
+      last = this.lastMail = { id, mail: read };
+      // A failed read is tried again next time, not kept.
+      read.catch(() => {
+        if (this.lastMail?.mail === read) this.lastMail = null;
+      });
+    }
+    const mail = await last.mail;
+    if (!mail) return null;
+    if (want.part === 'file') return fileOf(mail, want.index);
+    return want.part === 'detail' ? detailOf(mail) : textOf(mail);
+  }
+
   async location(id: string): Promise<{ key: string; offset: number; len: number } | null> {
     const cursor = this.ctx.storage.sql.exec<{ raw_key: string | null; raw_offset: number | null; raw_len: number | null }>(
       `SELECT raw_key, raw_offset, raw_len FROM messages WHERE id = ?`, id,

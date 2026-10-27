@@ -1,5 +1,7 @@
 // One message opened from the Messages page. Its mailbox row says which raw file holds it and at
-// which bytes (one keyed DO read); only those bytes are read, then parsed here. No Gmail call.
+// which bytes; only those bytes are read, then parsed in its mailbox's Durable Object, which keeps
+// the last message it parsed: a burst of requests for one message (its attachments' previews)
+// parses it once. No Gmail call.
 import { mailboxName, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
 import PostalMime, { type Address, type Attachment, type Email } from 'postal-mime';
 import type { Env } from './env';
@@ -8,14 +10,11 @@ import { htmlToText } from './gmail';
 /** Inline images past this many bytes, all told, stay as cid: links rather than data URLs. */
 const INLINE_MAX = 4 * 1024 * 1024;
 
-/** Where the message's bytes are: whole of `key`, or `len` bytes at `offset`. Mail with no location sits in a file of its own. */
-async function locate(env: Env, user: UserId, account: string, id: string): Promise<{ key: string; offset: number; len: number }> {
-  return (await env.MAILBOX.getByName(mailboxName(user, account)).location(id)) ?? { key: r2Keys.raw(user, account, id), offset: -1, len: -1 };
-}
+type Location = { key: string; offset: number; len: number } | null;
 
-/** The message's own bytes, or null when no raw file holds it. */
-async function rawBytes(env: Env, user: UserId, account: string, id: string): Promise<Uint8Array | null> {
-  const at = await locate(env, user, account, id);
+/** The message's own bytes, or null when no raw file holds it. Mail with no location sits in a file of its own. */
+async function rawBytes(env: Env, user: UserId, account: string, id: string, location: Location): Promise<Uint8Array | null> {
+  const at = location ?? { key: r2Keys.raw(user, account, id), offset: -1, len: -1 };
   // Locations point inside this person's prefix; anything else is refused.
   if (!at.key.startsWith(r2Keys.prefix(user))) return null;
   const obj = await env.ARCHIVE.get(at.key, at.offset >= 0 && at.len >= 0 ? { range: { offset: at.offset, length: at.len } } : undefined);
@@ -24,7 +23,13 @@ async function rawBytes(env: Env, user: UserId, account: string, id: string): Pr
   return new Uint8Array(await obj.arrayBuffer());
 }
 
-const parse = (raw: Uint8Array) => PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' });
+/** The message parsed, or null when no raw file holds it. Runs in the mailbox's Durable Object (MailboxDO.mail). */
+export async function readMail(env: Env, user: UserId, account: string, id: string, location: Location): Promise<Email | null> {
+  const raw = await rawBytes(env, user, account, id, location);
+  return raw ? PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' }) : null;
+}
+
+const mailbox = (env: Env, user: UserId, account: string) => env.MAILBOX.getByName(mailboxName(user, account));
 
 function addresses(list: Address[] | undefined): MailAddress[] {
   return (list ?? []).flatMap((a) => (a.group ? a.group : [a])).map((a) => ({ name: a.name ?? '', address: a.address ?? '' }));
@@ -58,9 +63,11 @@ function inlineImages(mail: Email): string | null {
 
 /** GET /api/accounts/:id/messages/:mid?month=: the message, parsed; null when no raw file holds it. */
 export async function openMessage(env: Env, user: UserId, account: string, id: string, month: string): Promise<MessageDetail | null> {
-  const raw = await rawBytes(env, user, account, id);
-  if (!raw) return null;
-  const mail = await parse(raw);
+  return mailbox(env, user, account).messagePart(user, account, id, { part: 'detail' }) as Promise<MessageDetail | null>;
+}
+
+/** The message as the app shows it: headers, HTML with its images in place, attachments. */
+export function detailOf(mail: Email): MessageDetail {
   const from = addresses(mail.from ? [mail.from] : undefined)[0] ?? null;
   const date = mail.date && !Number.isNaN(Date.parse(mail.date)) ? new Date(mail.date).toISOString() : null;
   const attachments: MessageAttachment[] = listed(mail).map(({ a, index }) => ({
@@ -76,10 +83,14 @@ export async function openMessage(env: Env, user: UserId, account: string, id: s
 }
 
 /** The message for a reader with no screen (the MCP server): headers, attachments, and its body as plain text. */
-export async function messageText(env: Env, user: UserId, account: string, id: string): Promise<(Omit<MessageDetail, 'html' | 'text'> & { body: string }) | null> {
-  const raw = await rawBytes(env, user, account, id);
-  if (!raw) return null;
-  const mail = await parse(raw);
+export async function messageText(env: Env, user: UserId, account: string, id: string): Promise<MessageText | null> {
+  return mailbox(env, user, account).messagePart(user, account, id, { part: 'text' }) as Promise<MessageText | null>;
+}
+
+export type MessageText = Omit<MessageDetail, 'html' | 'text'> & { body: string };
+export type MessageFile = { filename: string; mimeType: string; bytes: Uint8Array };
+
+export function textOf(mail: Email): MessageText {
   const date = mail.date && !Number.isNaN(Date.parse(mail.date)) ? new Date(mail.date).toISOString() : null;
   return {
     from: addresses(mail.from ? [mail.from] : undefined)[0] ?? null,
@@ -91,10 +102,12 @@ export async function messageText(env: Env, user: UserId, account: string, id: s
 }
 
 /** One attachment's name, type and bytes; null when the message or the attachment isn't there. */
-export async function attachmentFile(env: Env, user: UserId, account: string, id: string, index: number): Promise<{ filename: string; mimeType: string; bytes: Uint8Array } | null> {
-  const raw = await rawBytes(env, user, account, id);
-  if (!raw) return null;
-  const a = (await parse(raw)).attachments[index];
+export async function attachmentFile(env: Env, user: UserId, account: string, id: string, index: number): Promise<MessageFile | null> {
+  return mailbox(env, user, account).messagePart(user, account, id, { part: 'file', index }) as Promise<MessageFile | null>;
+}
+
+export function fileOf(mail: Email, index: number): MessageFile | null {
+  const a = mail.attachments[index];
   if (!a) return null;
   return { filename: a.filename || `attachment-${index + 1}`, mimeType: a.mimeType.split(';')[0].trim().toLowerCase(), bytes: bytesOf(a) };
 }
