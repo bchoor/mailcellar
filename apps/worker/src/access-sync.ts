@@ -1,6 +1,6 @@
 // Keeps Cloudflare Access in step with the people list, so a sign-in code goes only to people let
 // in. It edits one rule: the allow rule that belongs to the app's own Access application (found by
-// ACCESS_AUD). A shared, reusable rule is never touched: changing it would open every app using it.
+// ACCESS_AUD), and signs out anyone it drops. A shared, reusable rule is never touched: changing it would open every app using it.
 import { can, type Person, type SyncStatus } from '@columenlabs/lumen-ui-types/people';
 import type { Env } from './env';
 import { adminEmails, MAIL_SCOPE, SCOPES } from './people';
@@ -61,7 +61,15 @@ async function run(env: Env, people: Person[]): Promise<SyncStatus> {
         require: rule.require ?? [],
       }),
     });
-    return status(true, `${emails.length} ${emails.length === 1 ? 'person' : 'people'} can sign in`);
+    // Someone taken off the rule is also signed out of Cloudflare Access now, not when their session runs out.
+    const was = rule.include.flatMap((r) => ('email' in r ? [(r as { email: { email: string } }).email.email.toLowerCase()] : []));
+    const gone = was.filter((e) => !emails.includes(e));
+    const stuck: string[] = [];
+    for (const email of gone) {
+      await cf('organizations/revoke_user', { method: 'POST', body: JSON.stringify({ email }) }).catch(() => stuck.push(email));
+    }
+    const count = `${emails.length} ${emails.length === 1 ? 'person' : 'people'} can sign in`;
+    return stuck.length ? status(false, `${count}; could not sign out ${stuck.join(', ')}`) : status(true, count);
   } catch (e) {
     return status(false, e instanceof Error ? e.message : 'Sign-in sync failed');
   }
