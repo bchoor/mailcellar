@@ -190,11 +190,19 @@ export const MIGRATIONS: readonly string[] = [
    );
    ALTER TABLE messages ADD COLUMN attach TEXT;
    CREATE INDEX messages_attach ON messages (attach) WHERE attachments > 0;`,
+  // 19: labelled mail per month (Bikram, 2026-10-27): messages with at least one of the person's
+  // own labels. Ingest keeps it from now on; the constructor counts mail already in once.
+  `ALTER TABLE months ADD COLUMN labelled INTEGER NOT NULL DEFAULT 0;
+   INSERT INTO meta (key, value) VALUES ('labelled_fill', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
 ];
 
 /** Gmail labels whose mail MailCellar doesn't keep: the index never takes it in. */
 const NOT_KEPT = ['SPAM', 'TRASH'];
 const notKept = (labels: string[]) => labels.some((l) => NOT_KEPT.includes(l));
+/** Whether a message has one of the person's own labels: Gmail names those IDs Label_N (system labels and categories are upper case). */
+const labelled = (labels: string[]) => labels.some((l) => l.startsWith('Label_'));
+/** The same test in SQL, on the messages table's space-separated labels. */
+const LABELLED_SQL = `' ' || labels LIKE '% Label\\_%' ESCAPE '\\'`;
 
 /** What count_messages groups by. */
 export type CountDim = 'sender' | 'domain' | 'label' | 'recipient' | 'month' | 'year';
@@ -471,6 +479,7 @@ export class MailboxDO extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
       this.refillSearch();
+      this.fillLabelled();
       this.dropSample();
       await this.dropSpam();
       // A user's mailbox that just started (a deploy, say) doesn't know what is going on: the
@@ -530,7 +539,9 @@ export class MailboxDO extends DurableObject<Env> {
         written += sql.exec(query, ...args).rowsWritten;
       };
       const months: Tally = new Map();
+      const marked = new Map<string, number>();
       for (const r of rows) {
+        if (labelled(r.labels.split(' '))) marked.set(monthOf(r.ts), (marked.get(monthOf(r.ts)) ?? 0) + 1);
         run(
           `INSERT INTO message_fts (message_fts, rowid, subject, from_addr, from_name, snippet, labels) VALUES ('delete', CAST(? AS INTEGER), ?, ?, ?, ?, ?)`,
           ftsRowid(r.id), r.subject, r.from_addr, r.from_name, r.snippet, r.labels,
@@ -542,12 +553,36 @@ export class MailboxDO extends DurableObject<Env> {
       }
       moveRollups(run, rows.map((r) => ({ ts: r.ts, size: r.size, fromAddr: r.from_addr, fromName: r.from_name, labels: r.labels.split(' ').filter(Boolean) })), -1);
       for (const [k, x] of months) {
-        run(`UPDATE months SET n = n - ?, bytes = max(0, bytes - ?) WHERE month = ?`, x.n, x.bytes, k);
+        run(`UPDATE months SET n = n - ?, bytes = max(0, bytes - ?), labelled = max(0, labelled - ?) WHERE month = ?`, x.n, x.bytes, marked.get(k) ?? 0, k);
         run(`DELETE FROM months WHERE month = ? AND n <= 0`, k);
       }
       run(`DELETE FROM meta WHERE key = 'drop_spam'`);
       if (rows.length) written += this.changed(months.keys());
       console.log(JSON.stringify({ dropSpam: { removed: rows.length, rowsRead: read, rowsWritten: written } }));
+      this.count({ do_rows_read: read, do_rows_written: written });
+    });
+  }
+
+  /**
+   * After migration 19: count each month's labelled mail once. Reads each message row once (by
+   * the ts index, a month at a time) and writes one row a month that has any.
+   */
+  private fillLabelled(): void {
+    const sql = this.ctx.storage.sql;
+    if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'labelled_fill'`).toArray().length) return;
+    this.ctx.storage.transactionSync(() => {
+      const cursor = sql.exec(
+        `UPDATE months SET labelled = (
+           SELECT count(*) FROM messages
+           WHERE ts >= unixepoch(months.month || '-01') * 1000
+             AND ts < unixepoch(months.month || '-01', '+1 month') * 1000
+             AND ${LABELLED_SQL}
+         ) WHERE labelled = 0`,
+      );
+      const done = sql.exec(`DELETE FROM meta WHERE key = 'labelled_fill'`);
+      const read = cursor.rowsRead + done.rowsRead;
+      const written = cursor.rowsWritten + done.rowsWritten;
+      console.log(JSON.stringify({ fillLabelled: { rowsRead: read, rowsWritten: written } }));
       this.count({ do_rows_read: read, do_rows_written: written });
     });
   }
@@ -1825,6 +1860,7 @@ export class MailboxDO extends DurableObject<Env> {
         rowsWritten += sql.exec(query, ...args).rowsWritten;
       };
       const months: Tally = new Map();
+      const marked = new Map<string, number>();
       const counted: Counted[] = [];
       const addedIds: string[] = [];
       // Find what's indexed already with one keyed read a message: an insert that conflicts reads
@@ -1855,6 +1891,7 @@ export class MailboxDO extends DurableObject<Env> {
         );
         if (m.body) run(`INSERT INTO body_fts (rowid, body) VALUES (CAST(? AS INTEGER), ?)`, ftsRowid(m.id), m.body);
         tally(months, monthOf(m.ts), m);
+        if (labelled(m.labels)) marked.set(monthOf(m.ts), (marked.get(monthOf(m.ts)) ?? 0) + 1);
         counted.push(m);
       }
       // Sender, domain and label totals: a batch of 25 touched about two rows a message there, as
@@ -1873,9 +1910,9 @@ export class MailboxDO extends DurableObject<Env> {
       }
       for (const [month, t] of months)
         run(
-          `INSERT INTO months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET
-             n = n + excluded.n, bytes = bytes + excluded.bytes`,
-          month, t.n, t.bytes,
+          `INSERT INTO months (month, n, bytes, labelled) VALUES (?, ?, ?, ?) ON CONFLICT (month) DO UPDATE SET
+             n = n + excluded.n, bytes = bytes + excluded.bytes, labelled = labelled + excluded.labelled`,
+          month, t.n, t.bytes, marked.get(month) ?? 0,
         );
       // New mail in a month already built from Basin: it is in Basin too, so count it as
       // copied. The month's copied count is otherwise only set when its index is built.
@@ -1978,7 +2015,7 @@ export class MailboxDO extends DurableObject<Env> {
       case 'totals':
         return rows(`SELECT (SELECT count(*) FROM senders) AS senders, (SELECT count(*) FROM domains) AS domains`);
       case 'months':
-        return rows(`SELECT month, n, bytes FROM months ORDER BY month`);
+        return rows(`SELECT month, n, bytes, labelled FROM months ORDER BY month`);
       case 'labels':
         return rows(`SELECT id, name, type, n, bytes FROM labels WHERE n > 0 ORDER BY n DESC`);
       case 'domains':

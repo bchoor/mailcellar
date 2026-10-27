@@ -233,6 +233,9 @@ const MONTHS: ViewDomain<MonthRow> = {
     { key: 'date', label: 'Month', icon: CalendarIcon, value: (r) => `${r.month}-01`, format: 'text', render: (r) => monthName(r.month) },
     { key: 'year', label: 'Year', icon: CalendarClockIcon, value: (r) => r.month.slice(0, 4), format: 'text', filterable: true, groupable: true },
     n,
+    // Labelled: at least one of the person's own labels. A month saved before the count has none.
+    { ...n, key: 'labelled', label: 'Labelled', icon: TagIcon, value: (r) => r.labelled ?? 0 },
+    { ...n, key: 'unlabelled', label: 'Unlabelled', icon: MailIcon, value: (r) => r.n - (r.labelled ?? 0) },
     size,
   ],
 } as ViewDomain<MonthRow>;
@@ -417,7 +420,8 @@ export function OverviewPage() {
       columns: ['date', 'n', 'size_mb'],
       sort: { key: 'date', desc: true },
       // The month table lives on Time; Overview keeps the totals and the shape.
-      cards: [{ id: 'per_year', title: 'Messages per year', kind: 'chart', style: 'bars', date: 'date', values: ['n'], bucket: 'year', agg: 'sum', w: 6 }],
+      // Labelled and unlabelled stack to the year's total; a tap on the legend shows either alone.
+      cards: [{ id: 'per_year', title: 'Messages per year', kind: 'chart', style: 'stacked_bars', date: 'date', values: ['labelled', 'unlabelled'], bucket: 'year', agg: 'sum', w: 6 }],
     }),
   );
   const rows = months.data ?? [];
