@@ -241,15 +241,32 @@ type Counted = { ts: number; size: number; fromAddr: string; fromName: string; l
  * Taking away leaves a sender's first and last dates as they were; a total that reaches 0 goes.
  */
 function moveRollups(run: (query: string, ...args: (string | number)[]) => void, rows: Iterable<Counted>, sign: 1 | -1): void {
-  const senders: Tally = new Map();
-  const domains: Tally = new Map();
-  const labels: Tally = new Map();
+  writeRollups(run, rollupShares(rows), sign);
+}
+
+/** The sender, domain and label totals of some messages, before they are written. */
+interface Shares { n: number; senders: Tally; domains: Tally; labels: Tally }
+
+function rollupShares(rows: Iterable<Counted>, into: Shares = { n: 0, senders: new Map(), domains: new Map(), labels: new Map() }): Shares {
   for (const r of rows) {
     const m = { ts: r.ts, size: r.size } as IndexedMessage;
-    tally(senders, r.fromAddr.toLowerCase(), m, r.fromName);
-    tally(domains, domainOf(r.fromAddr), m);
-    for (const l of r.labels) tally(labels, l, m);
+    tally(into.senders, r.fromAddr.toLowerCase(), m, r.fromName);
+    tally(into.domains, domainOf(r.fromAddr), m);
+    for (const l of r.labels) tally(into.labels, l, m);
+    into.n++;
   }
+  return into;
+}
+
+/** Messages whose shares wait in one row before the totals are written (MailboxDO.settleRollups). */
+const ROLLUP_EVERY = 2000;
+
+/** Shares as one meta row, and back. */
+const sharesJson = (s: Shares) => ({ n: s.n, senders: [...s.senders], domains: [...s.domains], labels: [...s.labels] });
+const sharesOf = (j: ReturnType<typeof sharesJson>): Shares => ({ n: j.n, senders: new Map(j.senders), domains: new Map(j.domains), labels: new Map(j.labels) });
+
+function writeRollups(run: (query: string, ...args: (string | number)[]) => void, shares: Shares, sign: 1 | -1): void {
+  const { senders, domains, labels } = shares;
   if (sign < 0) {
     for (const [table, key, t] of [['senders', 'addr', senders], ['domains', 'domain', domains], ['labels', 'id', labels]] as const)
       for (const [k, x] of t) {
@@ -485,6 +502,7 @@ export class MailboxDO extends DurableObject<Env> {
    * stays and the next start tries again. Basin keeps its rows.
    */
   private async dropSpam(): Promise<void> {
+    this.settleRollups();
     const sql = this.ctx.storage.sql;
     if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'drop_spam'`).toArray().length) return;
     const cursor = sql.exec<{ id: string; ts: number; from_addr: string; from_name: string; subject: string; snippet: string; size: number; labels: string; body: number | null; attach: string | null }>(
@@ -1230,7 +1248,10 @@ export class MailboxDO extends DurableObject<Env> {
            WHERE n != excluded.n OR bytes != excluded.bytes`,
           id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
         );
+      // Every message is counted above, so shares still waiting would count twice.
+      run(`DELETE FROM meta WHERE key = 'rollups_waiting'`);
     });
+    this.waiting = null;
     written += this.putMeta('rollups_v', ROLLUPS_V);
     this.count({ do_rows_read: cursor.rowsRead, do_rows_written: written });
     return { rowsRead: cursor.rowsRead, rowsWritten: written };
@@ -1252,6 +1273,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** Take a month out of the index, to build it again from Basin, and its messages' shares out of the totals. */
   async unindexMonth(month: string): Promise<{ removed: number; rowsWritten: number }> {
+    this.settleRollups();
     const sql = this.ctx.storage.sql;
     const after = Date.parse(`${month}-01T00:00:00Z`);
     const before = Date.parse(`${addMonths(month, 1)}-01T00:00:00Z`);
@@ -1345,6 +1367,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** Record the mailbox's labels, so the Labels page can name them. Counts are kept. */
   async putLabels(labels: MailLabel[]): Promise<void> {
+    this.settleRollups();
     const sql = this.ctx.storage.sql;
     this.kept.clear();
     this.ctx.storage.transactionSync(() => {
@@ -1359,6 +1382,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** Give indexed labels Gmail's current names; writes only the rows whose name changed. */
   async nameLabels(labels: GmailLabels): Promise<void> {
+    this.settleRollups();
     const sql = this.ctx.storage.sql;
     let written = 0;
     this.ctx.storage.transactionSync(() => {
@@ -1570,6 +1594,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   /** The labels the index holds, by ID, with their names: an archive's Labels (it has no Gmail to ask). */
   async labelMap(): Promise<GmailLabels> {
+    this.settleRollups();
     const cursor = this.ctx.storage.sql.exec<{ id: string; name: string; type: string }>(`SELECT id, name, type FROM labels`);
     const out: GmailLabels = {};
     for (const l of cursor) out[l.id] = { name: l.name, type: l.type === 'system' ? 'system' : 'user' };
@@ -1783,6 +1808,16 @@ export class MailboxDO extends DurableObject<Env> {
    * indexed; without it (a month copied or imported) the batch's months show as indexing.
    */
   async ingest(batch: IndexedMessage[], newMail = true): Promise<IngestResult> {
+    try {
+      return this.ingestBatch(batch, newMail);
+    } catch (e) {
+      // Rolled back: the waiting shares are read again from their row.
+      this.waiting = undefined;
+      throw e;
+    }
+  }
+
+  private ingestBatch(batch: IndexedMessage[], newMail: boolean): IngestResult {
     const sql = this.ctx.storage.sql;
     return this.ctx.storage.transactionSync(() => {
       let rowsWritten = 0;
@@ -1822,7 +1857,20 @@ export class MailboxDO extends DurableObject<Env> {
         tally(months, monthOf(m.ts), m);
         counted.push(m);
       }
-      moveRollups(run, counted, 1);
+      // Sender, domain and label totals: a batch of 25 touched about two rows a message there, as
+      // most of its senders differ. Their shares wait in one row and are written together, once
+      // ROLLUP_EVERY messages have come in or before anything reads or takes away from the totals.
+      if (counted.length) {
+        const shares = rollupShares(counted, structuredClone(this.waitingShares() ?? undefined));
+        if (shares.n >= ROLLUP_EVERY) {
+          writeRollups(run, shares, 1);
+          run(`DELETE FROM meta WHERE key = 'rollups_waiting'`);
+          this.waiting = null;
+        } else {
+          rowsWritten += this.putMeta('rollups_waiting', sharesJson(shares));
+          this.waiting = shares;
+        }
+      }
       for (const [month, t] of months)
         run(
           `INSERT INTO months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET
@@ -1848,6 +1896,30 @@ export class MailboxDO extends DurableObject<Env> {
       }
       return { added, skipped: batch.length - added, rowsWritten, addedIds };
     });
+  }
+
+  /** Shares waiting to be added to the totals (ingest), kept in memory once read; undefined until read. */
+  private waiting: Shares | null | undefined;
+  private waitingShares(): Shares | null {
+    if (this.waiting === undefined) {
+      const j = this.meta<ReturnType<typeof sharesJson>>('rollups_waiting');
+      this.waiting = j ? sharesOf(j) : null;
+    }
+    return this.waiting;
+  }
+
+  /** Write the waiting shares into the sender, domain and label totals: before anything reads or takes away from them. */
+  private settleRollups(): void {
+    if (!this.waitingShares()) return;
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      let written = 0;
+      const run = (query: string, ...args: (string | number)[]) => void (written += sql.exec(query, ...args).rowsWritten);
+      writeRollups(run, this.waiting!, 1);
+      run(`DELETE FROM meta WHERE key = 'rollups_waiting'`);
+      this.count({ do_rows_written: written });
+    });
+    this.waiting = null;
   }
 
   /**
@@ -1890,6 +1962,7 @@ export class MailboxDO extends DurableObject<Env> {
    * `q` searches subject, sender, snippet and labels; each word must match.
    */
   async archive<V extends ArchiveView>(view: V, q = ''): Promise<ArchiveRows[V][]> {
+    if (view !== 'months' && view !== 'messages') this.settleRollups();
     return this.keep(`archive:${view}:${q}`, () => this.readArchive(view, q));
   }
 
@@ -2047,6 +2120,7 @@ export class MailboxDO extends DurableObject<Env> {
     }
     if (q.attachments) where.push('attachments > 0');
     if (q.label) {
+      this.settleRollups();
       const v = q.label;
       const c = sql.exec<{ id: string }>(`SELECT id FROM labels WHERE id = ? OR id = ? OR lower(name) = ?`, v, v.toUpperCase(), v.toLowerCase());
       const ids = c.toArray().map((r) => r.id);
@@ -2158,6 +2232,7 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   async messageGroups(by: MessageGroupBy, filtered: boolean, after: string | null): Promise<MessageGroups> {
+    this.settleRollups();
     const sql = this.ctx.storage.sql;
     let read = 0;
     const exec = <R extends Record<string, SqlStorageValue>>(query: string, ...args: (string | number)[]) => {
