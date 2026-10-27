@@ -9,6 +9,7 @@ import { bodySnippets } from './search';
 import { accountQuota } from './quota';
 import { archiveApi, removeArchive } from './archive-api';
 import { accountMailbox } from './sync';
+import { countFetches, measured, meteredEnv, routeName } from './telemetry';
 
 export { MailboxDO } from './mailbox';
 export { QuotaDO } from './quota';
@@ -27,38 +28,47 @@ async function appPage(request: Request, env: Env, url: URL): Promise<Response> 
 
 // Static assets serve the public page and the app's files; /api/*, /mcp and the app's pages reach
 // this handler (run_worker_first).
+countFetches();
+
 export default {
-  async fetch(request, env): Promise<Response> {
+  fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === '/api/health' && request.method === 'GET') {
-      const body: Health = { ok: true, service: 'mailcellar', version: env.APP_VERSION };
-      return Response.json(body);
-    }
-    if (url.pathname === '/api/releases' && request.method === 'GET') return releases(request, env, url);
-    // The MCP server: its own Access application, its own checks (mcp.ts).
-    if (url.pathname === '/mcp') return mcp(request, env, url);
-    if (url.pathname === '/app' || url.pathname.startsWith('/app/')) return appPage(request, env, url);
-    if (OLD_APP_PATH.test(url.pathname)) return Response.redirect(new URL(`/app${url.pathname}${url.search}`, url).href, 301);
-    if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
-    // A change must come from this app's own pages; this refuses other sites' requests outright.
-    if (request.method !== 'GET' && request.headers.get('origin') !== url.origin)
-      return Response.json({ error: 'bad_origin' }, { status: 403 });
-    // Cloudflare Access names the person; everything below is their own mailbox, reached only through them.
-    const who = await identity(request, env);
-    if (!who) return Response.json({ error: 'no_identity' }, { status: 401, headers: noStore });
-    // Signed in is not the same as let in: only admins and the guest list are (members.ts).
-    const pass = await admit(env, who.email);
-    if (!pass) return Response.json({ error: 'not_invited', email: who.email }, { status: 403, headers: noStore });
-    const people = await peopleApi(request, env, url, who.email, pass.admin);
-    if (people) return people;
-    if (request.method === 'GET') {
-      if (url.pathname === '/api/accounts/connect') return connect(url, env);
-      if (url.pathname === '/api/auth/callback') return callback(request, env, url, who);
-    }
-    const res = await mailboxApi(request, env, url, who, pass.admin);
-    return res ?? Response.json({ error: 'not_found' }, { status: 404 });
+    // The API's requests are measured by route; the app's pages and files by kind.
+    const name = url.pathname.startsWith('/api/') || url.pathname === '/mcp' ? routeName(request.method, url.pathname) : `${request.method} page`;
+    const metered = meteredEnv(env);
+    return measured(metered, 'http', name, () => handle(request, metered, url), (r) => String(r.status));
   },
 } satisfies ExportedHandler<Env>;
+
+async function handle(request: Request, env: Env, url: URL): Promise<Response> {
+  if (url.pathname === '/api/health' && request.method === 'GET') {
+    const body: Health = { ok: true, service: 'mailcellar', version: env.APP_VERSION };
+    return Response.json(body);
+  }
+  if (url.pathname === '/api/releases' && request.method === 'GET') return releases(request, env, url);
+  // The MCP server: its own Access application, its own checks (mcp.ts).
+  if (url.pathname === '/mcp') return mcp(request, env, url);
+  if (url.pathname === '/app' || url.pathname.startsWith('/app/')) return appPage(request, env, url);
+  if (OLD_APP_PATH.test(url.pathname)) return Response.redirect(new URL(`/app${url.pathname}${url.search}`, url).href, 301);
+  if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
+  // A change must come from this app's own pages; this refuses other sites' requests outright.
+  if (request.method !== 'GET' && request.headers.get('origin') !== url.origin)
+    return Response.json({ error: 'bad_origin' }, { status: 403 });
+  // Cloudflare Access names the person; everything below is their own mailbox, reached only through them.
+  const who = await identity(request, env);
+  if (!who) return Response.json({ error: 'no_identity' }, { status: 401, headers: noStore });
+  // Signed in is not the same as let in: only admins and the guest list are (members.ts).
+  const pass = await admit(env, who.email);
+  if (!pass) return Response.json({ error: 'not_invited', email: who.email }, { status: 403, headers: noStore });
+  const people = await peopleApi(request, env, url, who.email, pass.admin);
+  if (people) return people;
+  if (request.method === 'GET') {
+    if (url.pathname === '/api/accounts/connect') return connect(url, env);
+    if (url.pathname === '/api/auth/callback') return callback(request, env, url, who);
+  }
+  const res = await mailboxApi(request, env, url, who, pass.admin);
+  return res ?? Response.json({ error: 'not_found' }, { status: 404 });
+}
 
 const noStore = { 'cache-control': 'no-store' };
 
