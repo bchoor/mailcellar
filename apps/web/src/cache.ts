@@ -15,6 +15,9 @@ const MEMORY_ONLY = new Set(['message', 'attachment-text', 'found']);
 
 const isMailData = (q: Query) => MAIL_DATA.has(q.queryKey[0] as string);
 
+/** How long the first paint waits for the saved answers before asking the server. */
+const RESTORE_MS = 1500;
+
 /** The saved answers: one IndexedDB record, kept as an object (no JSON round trip), written at most once a second. */
 function indexedDbPersister(): Persister {
   const db = new Promise<IDBDatabase>((resolve, reject) => {
@@ -22,6 +25,7 @@ function indexedDbPersister(): Persister {
     open.onupgradeneeded = () => open.result.createObjectStore('cache');
     open.onsuccess = () => resolve(open.result);
     open.onerror = () => reject(open.error);
+    open.onblocked = () => reject(new Error('cache blocked'));
   });
   const run = <T>(mode: IDBTransactionMode, op: (s: IDBObjectStore) => IDBRequest) =>
     db.then(
@@ -31,6 +35,8 @@ function indexedDbPersister(): Persister {
           const req = op(tx.objectStore('cache'));
           tx.oncomplete = () => resolve(req.result as T);
           tx.onerror = () => reject(tx.error);
+          // An aborted transaction (storage full, the browser gave up) fires only abort, never error.
+          tx.onabort = () => reject(tx.error ?? new Error('cache aborted'));
         }),
     );
   let next: PersistedClient | null = null;
@@ -43,7 +49,13 @@ function indexedDbPersister(): Persister {
         void run('readwrite', (s) => s.put(next, 'queries')).catch(() => {});
       }, 1000);
     },
-    restoreClient: () => run<PersistedClient | undefined>('readonly', (s) => s.get('queries')),
+    // The app shows nothing until the restore settles, and a stuck read (another tab's write, a
+    // broken store) would leave it blank for good: past RESTORE_MS it starts from nothing instead.
+    restoreClient: () =>
+      Promise.race([
+        run<PersistedClient | undefined>('readonly', (s) => s.get('queries')),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), RESTORE_MS)),
+      ]),
     removeClient: () => run('readwrite', (s) => s.delete('queries')),
   };
 }
