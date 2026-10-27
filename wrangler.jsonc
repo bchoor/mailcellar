@@ -44,6 +44,9 @@
   ],
   "workflows": [{ "name": "mailcellar-sync", "binding": "SYNC", "class_name": "SyncWorkflow" }],
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
+  // The private tunnel to the self-hosted email API (Settings ▸ Email, Private tunnel): a Workers VPC
+  // service on the tunnel of the machine that runs it.
+  "vpc_services": [{ "binding": "FREESEND", "service_id": "01a17b11-701f-7850-8e65-bd0ff4436cc0" }],
   "observability": { "enabled": true },
   // Workers Paid (2026-10-25): runs estimate their CPU at a third of 30 s, and estimates have run
   // low before, so the cap is 2 minutes. Remove if the account goes back to Free (WORKERS_PLAN).
