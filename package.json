@@ -11,9 +11,12 @@
     "build": "bun run --filter=@mailcellar/web build",
     "type-check": "bun run --filter='*' type-check",
     "check": "bun run type-check && bun run build",
+    "e2e": "bash scripts/e2e.sh",
+    "smoke": "bun scripts/smoke.mjs",
     "deploy": "bun run build && wrangler deploy"
   },
   "devDependencies": {
+    "playwright": "1.63.0",
     "wrangler": "4.152.0"
   }
 }

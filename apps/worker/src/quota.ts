@@ -543,7 +543,7 @@ export class QuotaDO extends DurableObject<Env> {
 
   private setMeta(key: string, value: string | null) {
     if (value === null) this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, key);
-    else this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO meta VALUES (?, ?)`, key, value);
+    else this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`, key, value);
   }
 
   /** Read Cloudflare's figures at most once every `every` ms, whether the last try worked or not. */
@@ -555,7 +555,7 @@ export class QuotaDO extends DurableObject<Env> {
     try {
       const cf = await quotaDeps.readCloudflare(this.env, this.plan, now, this.billing(now), this.names());
       for (const m of metrics)
-        this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO cloudflare VALUES (?, ?, ?, ?)`, m, this.start(m, now), cf[m], this.ours(m, now));
+        this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO cloudflare (metric, period, value, ours) VALUES (?, ?, ?, ?)`, m, this.start(m, now), cf[m], this.ours(m, now));
       this.setMeta('parts', JSON.stringify(cf.parts ?? {}));
       this.setMeta('levels', JSON.stringify(cf.levels ?? {}));
       this.doHoursKept = cf.doHours ?? [];
@@ -626,7 +626,7 @@ export class QuotaDO extends DurableObject<Env> {
     for (const m of entries.includes('do_rows_written') ? entries : [...entries, 'do_rows_written' as const]) {
       const value = (use[m] ?? 0) + (m === 'do_rows_written' ? own : 0);
       this.ctx.storage.sql.exec(
-        `INSERT INTO usage VALUES (?, ?, ?) ON CONFLICT (period, metric) DO UPDATE SET value = value + excluded.value`,
+        `INSERT INTO usage (period, metric, value) VALUES (?, ?, ?) ON CONFLICT (period, metric) DO UPDATE SET value = value + excluded.value`,
         now.toISOString().slice(0, 10), m, value,
       );
     }

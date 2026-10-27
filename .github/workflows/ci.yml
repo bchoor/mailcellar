@@ -31,3 +31,23 @@ jobs:
       - run: bun run build
       - name: Bundle the Worker (no upload)
         run: bunx wrangler deploy --dry-run --outdir "${RUNNER_TEMP}/worker"
+
+  e2e:
+    name: e2e (production build, real-shaped mailbox, upgrade from main)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, openship, linux]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the build lists merged PRs from git history; the upgrade starts from the base branch
+      - uses: ./.github/actions/setup-bun
+      - name: Install the browser
+        # The browser and the system libraries it needs (the runner is a bare Linux box).
+        run: bunx playwright install --with-deps chromium
+      - run: bun run build
+      # A pull request upgrades from the branch it merges into, like the deploy will.
+      - name: e2e
+        env:
+          E2E_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+        run: bash scripts/e2e.sh
