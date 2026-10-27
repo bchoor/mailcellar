@@ -11,5 +11,12 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), ...(single ? [viteSingleFile()] : [])],
   base: single ? '/' : '/app/',
   define: { __SINGLE_FILE__: JSON.stringify(single) },
-  build: single ? { assetsInlineLimit: 100_000_000, cssCodeSplit: false, chunkSizeWarningLimit: 100_000 } : { outDir: 'dist/app' },
+  build: single
+    ? { assetsInlineLimit: 100_000_000, cssCodeSplit: false, chunkSizeWarningLimit: 100_000 }
+    : {
+        outDir: 'dist/app',
+        // Icons used by both the app and a lazy part went out as one file each (33 tiny requests
+        // before first paint); they now share one. Icons only a lazy part uses stay with it.
+        rolldownOptions: { output: { codeSplitting: { groups: [{ name: 'icons', test: /node_modules[\\/]lucide-react/, minShareCount: 2 }] } } },
+      },
 });
