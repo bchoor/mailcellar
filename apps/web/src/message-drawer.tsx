@@ -26,7 +26,7 @@ function frameDoc(html: string, images: boolean) {
   const csp = `default-src 'none'; style-src 'unsafe-inline'; font-src data:; img-src data:${images ? ' https: http:' : ''}`;
   // A refresh tag would load a page into the frame; the CSP above doesn't cover navigation.
   const body = html.replace(/<meta[^>]+http-equiv\s*=\s*["']?refresh[^>]*>/gi, '');
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="referrer" content="no-referrer"><base target="_blank"><style>html,body{margin:0;background:#fff;color:#111}body{padding:16px;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}img{max-width:100%;height:auto}</style></head><body>${body}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="referrer" content="no-referrer"><base target="_blank"><style>html,body{margin:0;background:#fff;color:#111}body{padding:16px;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}img{max-width:100%;height:auto}pre{white-space:pre-wrap}</style></head><body>${body}</body></html>`;
 }
 
 /** The HTML body at its own height, so the drawer scrolls it with the headers. */
@@ -37,13 +37,29 @@ function HtmlBody({ html, images }: { html: string; images: boolean }) {
     const frame = ref.current;
     if (!frame) return;
     let observer: ResizeObserver | null = null;
+    let width = 0;
+    // A message laid out wider than the frame (a fixed 600px table) zooms out to its width, as
+    // mail apps do, so nothing runs off the right edge; measured again when the frame's width changes.
+    const shrink = (doc: Document) => {
+      if (frame.clientWidth === width) return;
+      width = frame.clientWidth;
+      doc.body.style.zoom = '';
+      const over = doc.documentElement.scrollWidth / doc.documentElement.clientWidth;
+      if (over > 1.01) doc.body.style.zoom = String(Math.floor(100 / over) / 100);
+    };
     const fit = () => {
       const doc = frame.contentDocument;
       if (!doc?.documentElement) return;
+      width = 0;
+      shrink(doc);
       setHeight(Math.max(120, doc.documentElement.scrollHeight));
       observer?.disconnect();
-      observer = new ResizeObserver(() => setHeight(Math.max(120, doc.documentElement.scrollHeight)));
+      observer = new ResizeObserver(() => {
+        shrink(doc);
+        setHeight(Math.max(120, doc.documentElement.scrollHeight));
+      });
       observer.observe(doc.body);
+      observer.observe(frame);
     };
     frame.addEventListener('load', fit);
     return () => {
