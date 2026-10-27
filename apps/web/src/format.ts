@@ -21,11 +21,11 @@ const zone = () => getPrefs().timeZone;
 const sameDay = (a: Date, b: Date, timeZone: string) =>
   a.toLocaleDateString('en-US', { timeZone }) === b.toLocaleDateString('en-US', { timeZone });
 
-/** A moment: `9:14 AM PDT` today, `Oct 25, 9:14 AM PDT` another day this year, `Oct 25, 2025, 9:14 AM PST` before. */
+/** A moment: `9:14 AM PT` today, `Oct 25, 9:14 AM PT` another day this year, `Oct 25, 2025, 9:14 AM PT` before (the zone's generic name: PT, never PDT or PST). */
 export function moment(at: string | number | Date): string {
   const d = new Date(at);
   const timeZone = zone();
-  const t = d.toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  const t = d.toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', timeZoneName: 'shortGeneric' });
   const now = new Date();
   if (sameDay(d, now, timeZone)) return t;
   const thisYear = d.toLocaleDateString('en-US', { timeZone, year: 'numeric' }) === now.toLocaleDateString('en-US', { timeZone, year: 'numeric' });

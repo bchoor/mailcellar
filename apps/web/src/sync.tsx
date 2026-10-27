@@ -307,7 +307,7 @@ function RunningJob({ job, now }: { job: ActiveJob; now: number }) {
   );
 }
 
-/** A finished job in one line: `New mail · done 9:16 AM PDT · 34 messages in 1m 12s`. */
+/** A finished job in one line: `New mail · done 9:16 AM PT · 34 messages in 1m 12s`. */
 function lastJob(r: JobRecord): string {
   const what = jobName(r);
   const result = r.result === 'done' ? 'done' : r.result === 'failed' ? 'failed' : 'stopped';
