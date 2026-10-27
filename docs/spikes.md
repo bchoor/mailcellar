@@ -4,6 +4,39 @@ De-risking tests from the build plan. Each one answers a question the design res
 so we find the wall before we build into it. Phase 1 covers S4, S5, S6 and S9; phase 2
 (the backfill) covers S1, S2, S3, S7 and S8.
 
+## S10: DO rows written per copied message — done (2026-10-27)
+
+Copying a 82K-mail mailbox showed **5.3 rows written a message** in `ingest` (12,848 rows for
+2,408 messages), so Free's 100,000 rows a day copy about 18,000 messages a day. Re-measured in
+local workerd with the shipped schema and 5,000 messages shaped like a real mailbox (real sender,
+label and date sequence, synthetic bodies), copied month by month in batches of 25 as lanes do.
+Rows are each statement's `rowsWritten`, summed per message.
+
+| Design | Rows / msg | Senders, domains, labels |
+| --- | --- | --- |
+| Shipped: totals updated every batch of 25 | 7.77 | 3.60 |
+| Batches of 100 | 6.60 | 2.54 |
+| One FTS table for envelope and body | 6.77 | 3.60 |
+| Totals wait in one row, written every 500 messages | 5.60 | 1.42 |
+| Totals wait in one row, written every 2,000 messages (shipped) | **4.98** | **0.80** |
+| Same, plus one FTS table | 3.98 | 0.80 |
+| Shipped, once the on-demand sort indexes exist | 10.79 | 3.60 |
+
+A batch of 25 has about 19 senders, 17 domains and 16 labels, and each update of a sender or
+domain also moves its row in the `n` index, so the totals were half of every write. Waiting for
+2,000 messages leaves about one row in six. Search, a page by date, a count and the Senders page
+take the same time in every design (p95 13-15 ms locally; search reads ~12k rows for a common
+word either way), since nothing they read changed.
+
+**Decisions**
+
+- `ingest` (copy, live sync and import) adds each batch's sender, domain and label shares to one
+  waiting row; the totals are written when 2,000 messages wait, and before anything reads or takes
+  away from them (`settleRollups`). Month counts stay live.
+- One FTS table would save one more row a message but means rebuilding every existing mailbox's
+  search, more than a day's writes for a 100k mailbox: not now.
+- The sort indexes built on demand cost a row a message each from then on; worth revisiting.
+
 ## S9: CI on OpenShip — done (2026-10-24)
 
 Type-check, build, test and `wrangler deploy --dry-run` run green on the self-hosted
