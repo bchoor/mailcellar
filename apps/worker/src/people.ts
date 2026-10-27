@@ -8,7 +8,7 @@ import type { Env } from './env';
 export const SCOPES: Scope[] = [
   {
     id: 'mail',
-    name: 'MailCellar',
+    name: 'App access',
     icon: 'mail',
     // An invite to MailCellar is an invite to use it.
     inviteLevel: 'use',
