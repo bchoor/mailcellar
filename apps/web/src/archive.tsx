@@ -198,8 +198,9 @@ function Chips({ chips }: { chips: Chip[] }) {
   return (
     <span className="flex max-w-56 items-center gap-1 overflow-hidden">
       {shown.map((c) => (
-        <Badge key={c.name} variant={c.bg ? 'default' : 'secondary'} className="max-w-28 truncate" style={c.bg ? { background: c.bg, color: c.fg } : undefined} title={c.name}>
-          {c.name}
+        // A badge centres its content, so a long name is cut on both sides: the name ends in an ellipsis instead.
+        <Badge key={c.name} variant={c.bg ? 'default' : 'secondary'} className="min-w-0 max-w-28 justify-start" style={c.bg ? { background: c.bg, color: c.fg } : undefined} title={c.name}>
+          <span className="truncate">{c.name}</span>
         </Badge>
       ))}
       {rest.length > 0 && (
