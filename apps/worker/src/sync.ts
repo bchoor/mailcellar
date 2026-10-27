@@ -630,16 +630,18 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
 
 /** The steps of a run, each one writing its time and use to telemetry, named by the step. */
 function measuredSteps(env: Env, step: WorkflowStep): WorkflowStep {
-  return new Proxy(step, {
-    get(target, prop, receiver) {
-      const v = Reflect.get(target, prop, receiver);
-      if (prop !== 'do' || typeof v !== 'function') return typeof v === 'function' ? v.bind(target) : v;
-      return (name: string, ...rest: unknown[]) => {
-        const callback = rest.pop() as () => Promise<unknown>;
-        return (v as (...a: unknown[]) => unknown).call(target, name, ...rest, () => measured(env, 'workflow', name, callback));
-      };
+  // The step is an RPC stub: its methods are called as methods, never through .call, .apply or
+  // .bind (a stub takes those for RPC methods of the same name).
+  const stub = step as unknown as { do: (...args: unknown[]) => Promise<unknown> };
+  return {
+    do: (name: string, ...rest: unknown[]) => {
+      const callback = rest.pop() as () => Promise<unknown>;
+      return stub.do(name, ...rest, () => measured(env, 'workflow', name, callback));
     },
-  });
+    sleep: (name: string, duration: Parameters<WorkflowStep['sleep']>[1]) => step.sleep(name, duration),
+    sleepUntil: (name: string, timestamp: Parameters<WorkflowStep['sleepUntil']>[1]) => step.sleepUntil(name, timestamp),
+    waitForEvent: (name: string, options: Parameters<WorkflowStep['waitForEvent']>[1]) => step.waitForEvent(name, options),
+  } as WorkflowStep;
 }
 
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
