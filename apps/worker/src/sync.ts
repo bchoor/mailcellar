@@ -13,6 +13,7 @@ import { measured, meteredEnv } from './telemetry';
 import { accountQuota, type QuotaUse } from './quota';
 import { runCommit, runLane } from './copy';
 import { runImport } from './import';
+import { runAttachments } from './attachments';
 import { runBodies, runRecipients } from './bodies';
 import { BATCH_SIZE, b64urlBytes, batchGet, addedSince, GmailError, indexRow, labels, listPage, packBySize, profile, type RawMessage } from './gmail';
 
@@ -646,6 +647,14 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     super(ctx, meteredEnv(env));
   }
 
+  /** Start the attachment pass for mail copied since attachment search; its own runs, so a slow file never holds the sync. */
+  private async startAttachments(user: UserId, account: string): Promise<string | null> {
+    if (!(await accountMailbox(this.env, user, account).attachTodo(1, 'new')).length) return null;
+    const id = `${account}-attach-${Date.now().toString(36)}`;
+    await syncDeps.launch(this.env, { user, account, attachments: 'new' }, id);
+    return id;
+  }
+
   async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<unknown> {
     step = measuredSteps(this.env, step);
     const { names } = event.payload;
@@ -675,6 +684,15 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
       await step.do('next run', () => syncDeps.launch(this.env, { user, account, bodies: true }, r.nextId!));
       return r;
     }
+    if (event.payload.attachments) {
+      // The attachment pass (attachments.ts): runs chain like the body pass's, each taking the next unread mail.
+      const scope = event.payload.attachments;
+      const r = await step.do('attachments', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runAttachments(this.env, user, account, runId, scope));
+      if (!r.nextId) return r;
+      if (r.resumesAt) await step.sleepUntil('wait for the daily guard', new Date(r.resumesAt));
+      await step.do('next run', () => syncDeps.launch(this.env, { user, account, attachments: scope }, r.nextId!));
+      return r;
+    }
     if (event.payload.recipients) {
       // The recipients pass (bodies.ts): runs chain like the body pass's.
       const r = await step.do('recipients', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runRecipients(this.env, user, account, runId));
@@ -686,6 +704,8 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     if (event.payload.import) {
       // An archive's import: each run saves its progress to a raw file and names the next run.
       const r = await step.do('import', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runImport(this.env, user, account, runId));
+      // Once imported, the archive's attachments go in search.
+      if (!r.nextId && r.phase === 'done') await step.do('attachments', () => this.startAttachments(user, account));
       if (!r.nextId) return r;
       if (r.resumesAt) await step.sleepUntil('wait before trying again', new Date(r.resumesAt));
       await step.do('next run', () => syncDeps.launch(this.env, { user, account, import: true }, r.nextId!));
@@ -725,7 +745,11 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
     // Gmail and the daily limit are handled inside the step (a fresh run retries them, with a
     // fresh request budget); a retry here is for anything unexpected.
     const result = await step.do('copy', { retries: { limit: 1, delay: '1 minute' }, timeout: '15 minutes' }, () => runBatch(this.env, user, account, runId));
-    if (!result.more) return result;
+    if (!result.more) {
+      // New mail is in: its attachments (and backfill's since the last sync) go in search, in a run of their own.
+      if (result.phase !== 'error' && result.phase !== 'replaced') await step.do('attachments', () => this.startAttachments(user, account));
+      return result;
+    }
     if (result.resumesAt) await step.sleepUntil('wait before trying again', new Date(result.resumesAt));
     // Hand over to a fresh run, so the next batch gets its own request budget.
     await step.do('next run', async () => {

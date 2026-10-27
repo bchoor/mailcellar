@@ -52,7 +52,7 @@ export function ftsRowid(id: GmailId): string {
  * SQL: the message IDs an FTS5 table's MATCH ? finds, for `id IN (...)`. A rowid prints back as
  * hex two ways: bare for a Gmail ID, zero padded to 16 for an imported ID (which can start with 0).
  */
-export function ftsIds(table: 'message_fts' | 'body_fts'): string {
+export function ftsIds(table: 'message_fts' | 'body_fts' | 'attach_fts'): string {
   return `SELECT printf(f.p, ${table}.rowid) FROM ${table}, (SELECT '%x' AS p UNION ALL SELECT '%016x') f WHERE ${table} MATCH ?`;
 }
 
@@ -82,6 +82,8 @@ export type MessageRow = IndexedMessage & {
   state: MessageState;
   /** Under a text search: the words were found only in the body, so the row's snippet doesn't show them. */
   bodyHit?: boolean;
+  /** Under a text search: the words were found in an attachment's text; the name of the file (the first, if several). */
+  attachHit?: string;
 };
 /** The part of a message's body where a search's words are, and each word's place in it ([start, end) in `text`). */
 export interface BodySnippet {

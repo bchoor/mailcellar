@@ -46,6 +46,8 @@
   ],
   "workflows": [{ "name": "mailcellar-sync", "binding": "SYNC", "class_name": "SyncWorkflow" }],
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
+  // Workers AI's document converter (toMarkdown): attachment text for search. Documents convert at no cost.
+  "ai": { "binding": "AI" },
   // One data point per request, Durable Object call and Workflow step: time, rows, raw file ops, Gmail calls (telemetry.ts).
   "analytics_engine_datasets": [{ "binding": "TELEMETRY", "dataset": "mailcellar_telemetry" }],
   // The private tunnel to the self-hosted email API (Settings ▸ Email, Private tunnel): a Workers VPC

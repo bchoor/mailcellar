@@ -211,7 +211,7 @@ export function parseBatch(text: string, contentType: string) {
 const fromBase64 = (Uint8Array as unknown as { fromBase64?: (s: string, o: { alphabet: string; lastChunkHandling?: string }) => Uint8Array }).fromBase64;
 
 /** Standard base64 as bytes; natively where the runtime has it. */
-function b64Bytes(s: string): Uint8Array {
+export function b64Bytes(s: string): Uint8Array {
   if (fromBase64) return fromBase64(s, { alphabet: 'base64', lastChunkHandling: 'loose' });
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 }
@@ -227,7 +227,7 @@ export function b64urlBytes(s: string): Uint8Array {
 
 /** Bytes as a string, one character a byte (true latin1, unlike TextDecoder's windows-1252). */
 const utf16 = new TextDecoder('utf-16le');
-function binary(bytes: Uint8Array): string {
+export function binary(bytes: Uint8Array): string {
   // Widen each byte to a UTF-16 unit and decode natively: about 8 times faster than String.fromCharCode.
   return utf16.decode(new Uint16Array(bytes));
 }
@@ -274,7 +274,7 @@ export function decodeWords(value: string): string {
 }
 
 /** Header bytes are latin1-decoded; undo that for UTF-8 sent unencoded, which many senders do. */
-function utf8(value: string): string {
+export function utf8(value: string): string {
   if (!/[\x80-\xff]/.test(value)) return value;
   try {
     return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(value, (c) => c.charCodeAt(0)));
@@ -388,7 +388,7 @@ function quotedPrintable(s: string): Uint8Array {
   return out.subarray(0, n);
 }
 
-function decodeBody(body: string, encoding: string, charset: string): string {
+export function decodeBody(body: string, encoding: string, charset: string): string {
   let bytes: Uint8Array;
   const enc = encoding.toLowerCase();
   if (enc === 'base64') {

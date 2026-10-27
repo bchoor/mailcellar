@@ -317,6 +317,16 @@ function Found({ s }: { s: BodySnippet }) {
   );
 }
 
+/** The attachment a search's words were found in, under the subject. */
+function FoundIn({ name }: { name: string }) {
+  return (
+    <span className="flex min-w-0 items-center gap-1 text-xs font-normal text-muted-foreground" style={{ maxWidth: '22rem' }} title={`Found in ${name}`}>
+      <PaperclipIcon className="size-3 shrink-0" aria-hidden />
+      <span className="truncate">In {name}</span>
+    </span>
+  );
+}
+
 /**
  * Body snippets for rows a search matched only in their body, read from their raw files: one
  * request a page of rows, kept a while. Keyed by message ID.
@@ -364,6 +374,7 @@ const MESSAGES: ViewDomain<MessageView> = {
             <Clip text={r.subject} w="22rem" />
           </span>
           {r.found && <Found s={r.found} />}
+          {r.attachHit && <FoundIn name={r.attachHit} />}
         </span>
       ),
     },

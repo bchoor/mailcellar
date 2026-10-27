@@ -169,6 +169,11 @@ export interface SyncParams {
   audit?: string;
   /** Instead of syncing, put mail copied before body search into it, from the raw files (the body pass). */
   bodies?: boolean;
+  /**
+   * Instead of syncing, put the text of document attachments (PDF, Word, Excel, text) in search
+   * (the attachment pass): 'new' for mail copied since attachment search, 'all' for mail copied before too.
+   */
+  attachments?: 'new' | 'all';
   /** Instead of syncing, keep the recipients of mail copied before they were kept, from the raw files' headers (the recipients pass). */
   recipients?: boolean;
   /** Instead of syncing, report how the mailbox's database splits its bytes (the instance's output). Reads only. */
