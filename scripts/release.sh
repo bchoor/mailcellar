@@ -120,6 +120,7 @@ Start with '## Key takeaways': 3 to 5 bullets, each opening with one or more typ
 Write each bullet for a new user who has never seen the change: the sentence must say where it lives, \
 as they would find it, with the page or menu path (e.g. 'In Settings ▸ Accounts, ...', 'On the Senders page, ...'), \
 and name the thing changed in full; a change with no screen says what it affects. \
+Key takeaways are only what a user can notice: leave out CI, build, test and internal-only changes. \
 Then one '## <area>' section per area touched (App, Gmail, Search, Sync, Storage, Infra), \
 a few short bullets each in plain words, merging related PRs. No PR numbers, no file paths. \
 Output only the markdown."
