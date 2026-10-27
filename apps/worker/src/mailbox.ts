@@ -6,6 +6,7 @@ import {
   type ArchiveImport,
   type Me,
   domainOf,
+  ftsIds,
   ftsRowid,
   monthOf,
   type ArchiveRows,
@@ -1926,7 +1927,7 @@ export class MailboxDO extends DurableObject<Env> {
     // Each word in the envelope or the body, as one list of IDs: SQLite seeks those rows by key
     // instead of reading the mailbox (textMatch's OR reads every row).
     for (const w of q.text ? ftsQuery(q.text).split(' ').filter(Boolean) : []) {
-      where.push(`id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ? UNION SELECT printf('%x', rowid) FROM body_fts WHERE body_fts MATCH ?)`);
+      where.push(`id IN (${ftsIds('message_fts')} UNION ${ftsIds('body_fts')})`);
       args.push(w, w);
     }
     const byRcpt = !!q.to || groupBy.includes('recipient');
@@ -2163,7 +2164,7 @@ export class MailboxDO extends DurableObject<Env> {
     // Under a search, whether the envelope holds every word: if not, the row matched on its body.
     const envelope = words ? ftsQuery(text) : '';
     const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
-      subject, snippet, size, attachments, labels, state, rcpt${envelope ? `, id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?) AS envelope` : ''}`;
+      subject, snippet, size, attachments, labels, state, rcpt${envelope ? `, id IN (${ftsIds('message_fts')}) AS envelope` : ''}`;
     const [cmp, dir] = asc ? ['>', 'ASC'] : ['<', 'DESC'];
     // A cursor is the phase, then the last row's keys in that phase's order.
     const from = cursor ? decodeCursor(cursor, phases) : null;
@@ -2189,7 +2190,7 @@ export class MailboxDO extends DurableObject<Env> {
         at ? `(${keys.join(', ')}) ${cmp} (${keys.map(() => '?').join(', ')})` : '1',
         bounded && lo !== null && Number.isFinite(lo) ? 'ts >= ?' : '1',
         bounded && hi !== null && Number.isFinite(hi) ? 'ts < ?' : '1',
-        phaseMatch ? `id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?)` : '1',
+        phaseMatch ? `id IN (${ftsIds('message_fts')})` : '1',
         words?.where ?? '1',
         sender ? 'lower(from_addr) = ?' : '1',
         also ?? '1',
@@ -3034,7 +3035,7 @@ export function textMatch(q: string): { where: string; args: string[] } | null {
   if (!words.length) return null;
   return {
     where: words
-      .map(() => `(id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?) OR id IN (SELECT printf('%x', rowid) FROM body_fts WHERE body_fts MATCH ?))`)
+      .map(() => `(id IN (${ftsIds('message_fts')}) OR id IN (${ftsIds('body_fts')}))`)
       .join(' AND '),
     args: words.flatMap((w) => [w, w]),
   };
