@@ -634,7 +634,11 @@ export class QuotaDO extends DurableObject<Env> {
 
   async overview(every = CF_READ_MS): Promise<QuotaOverview> {
     const now = new Date();
-    await this.refresh(now, every);
+    // Reading Cloudflare takes about 2 s: a page gets the last numbers at once and the next look
+    // gets the new ones. Only the first read, and Refresh, wait for it.
+    const reading = this.refresh(now, every);
+    if (this.meta('read_at') !== null && every === CF_READ_MS) this.ctx.waitUntil(reading);
+    else await reading;
     const stored = this.meta('parts');
     const parts = (stored ? JSON.parse(stored) : {}) as Partial<Record<QuotaMetric, QuotaPart[]>>;
     const meters = metrics.map((m) => {
