@@ -21,15 +21,33 @@ const zone = () => getPrefs().timeZone;
 const sameDay = (a: Date, b: Date, timeZone: string) =>
   a.toLocaleDateString('en-US', { timeZone }) === b.toLocaleDateString('en-US', { timeZone });
 
-/** A moment: `9:14 AM PT` today, `Oct 25, 9:14 AM PT` another day this year, `Oct 25, 2025, 9:14 AM PT` before (the zone's generic name: PT, never PDT or PST). */
+/** The calendar day `d` falls on, `days` from today, in the person's zone. */
+const daysFrom = (d: Date, timeZone: string, days: number) => sameDay(d, new Date(Date.now() + days * 86_400_000), timeZone);
+const thisYear = (d: Date, timeZone: string) =>
+  d.toLocaleDateString('en-US', { timeZone, year: 'numeric' }) === new Date().toLocaleDateString('en-US', { timeZone, year: 'numeric' });
+
+/**
+ * A moment: `1:31 AM PT` today, `Yesterday, 1:31 AM PT` (or `Tomorrow, …`), `Oct 26, 1:31 AM PT`
+ * another day this year, `Oct 26, 2025` before (the zone's generic name: PT, never PDT or PST).
+ */
 export function moment(at: string | number | Date): string {
   const d = new Date(at);
   const timeZone = zone();
+  if (!thisYear(d, timeZone)) return day(d);
   const t = d.toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', timeZoneName: 'shortGeneric' });
-  const now = new Date();
-  if (sameDay(d, now, timeZone)) return t;
-  const thisYear = d.toLocaleDateString('en-US', { timeZone, year: 'numeric' }) === now.toLocaleDateString('en-US', { timeZone, year: 'numeric' });
-  return `${d.toLocaleDateString('en-US', { timeZone, month: 'short', day: 'numeric', ...(thisYear ? {} : { year: 'numeric' }) })}, ${t}`;
+  if (daysFrom(d, timeZone, 0)) return t;
+  if (daysFrom(d, timeZone, -1)) return `Yesterday, ${t}`;
+  if (daysFrom(d, timeZone, 1)) return `Tomorrow, ${t}`;
+  return `${d.toLocaleDateString('en-US', { timeZone, month: 'short', day: 'numeric' })}, ${t}`;
+}
+
+/** A message's time in a list, short as a mail app's: `1:31 AM PT` today, `Yesterday`, `Oct 26`, `Oct 26, 2025`. */
+export function listTime(at: string | number | Date): string {
+  const d = new Date(at);
+  const timeZone = zone();
+  if (daysFrom(d, timeZone, 0)) return d.toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', timeZoneName: 'shortGeneric' });
+  if (daysFrom(d, timeZone, -1)) return 'Yesterday';
+  return d.toLocaleDateString('en-US', { timeZone, month: 'short', day: 'numeric', ...(thisYear(d, timeZone) ? {} : { year: 'numeric' }) });
 }
 
 /** A day: `Oct 25, 2026`. */

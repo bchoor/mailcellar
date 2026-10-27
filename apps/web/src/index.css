@@ -7,6 +7,9 @@
 
 :root[data-app="mailcellar"] { --primary: oklch(0.52 0.13 250); }
 
+/* Numbers in the text font, with tabular figures; monospace stays for code and the build hash. */
+:root[data-app="mailcellar"] { --num-font: var(--app-font); }
+
 /* The month map: copied is a muted green, Copying blue, Indexing violet, Missing a muted tan hatch. */
 :root[data-app="mailcellar"] {
   --cov-full: #3f9462; --cov-high: #93c8a6; --cov-low: #d2e9da;

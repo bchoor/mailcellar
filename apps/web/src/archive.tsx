@@ -45,7 +45,7 @@ import {
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
-import { bytes, count, monthName } from './format';
+import { bytes, count, listTime, moment, monthName } from './format';
 import { MessageDrawer } from './message-drawer';
 import { daySpan, localDay, type Period, periodOf, periodSpan, periods } from './period';
 
@@ -346,7 +346,7 @@ const MESSAGES: ViewDomain<MessageView> = {
   text: (r) => [r.subject, r.fromAddr, r.fromName],
   fields: [
     // The day in the person's time zone, like Period.
-    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.day, format: 'text', render: (r) => dayText(Date.parse(`${r.day}T00:00:00Z`)) },
+    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.day, format: 'text', render: (r) => <time dateTime={new Date(r.ts).toISOString()} title={moment(r.ts)}>{listTime(r.ts)}</time> },
     {
       key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.fromAddr, format: 'text', filterable: true, groupable: true,
       // Unread: a dot and bold, as in Gmail.
