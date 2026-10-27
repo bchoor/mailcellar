@@ -38,7 +38,7 @@ jobs:
   dry-run:
     # Pull requests from forks never run on the self-hosted runner.
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, openship, linux, arm64]
+    runs-on: [self-hosted, openship, linux]
     permissions:
       contents: read
     timeout-minutes: 15
@@ -53,7 +53,7 @@ jobs:
 
   release:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && vars.RELEASE_ON_MERGE != 'false')
-    runs-on: [self-hosted, openship, linux, arm64]
+    runs-on: [self-hosted, openship, linux]
     permissions:
       contents: write
       pull-requests: read # release notes read each PR's description
