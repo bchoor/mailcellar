@@ -14,7 +14,7 @@ Another bucket name works too: set it in `wrangler.jsonc` as both `r2_buckets[0]
 
 ## 2. Plan
 
-`wrangler.jsonc` sets `limits.cpu_ms`, which needs Workers Paid. On Workers Free, remove `limits` and set `WORKERS_PLAN = 'free'` in `packages/schema/src/quota.ts`. The same file holds `PAID_ENDS` (when Paid's budgets end) and `SPEND` (the backfill's spend cap).
+`wrangler.jsonc` has no `limits`: the account is back on Workers Free (since 2026-10-27), which can't take one. On Workers Paid, add `"limits": { "cpu_ms": 120000 }`. `packages/schema/src/quota.ts` holds `WORKERS_PLAN` and `PAID_ENDS` (when Paid's budgets end) and `SPEND` (the backfill's spend cap).
 
 ## 3. First deploy and domain
 
