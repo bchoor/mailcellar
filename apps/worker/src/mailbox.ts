@@ -42,6 +42,7 @@ import {
   SYNC_STALE_MS,
   type ScheduleRun,
   type MessageDetail,
+  type TotalsRow,
   type UserId,
   asUserId,
   nextRun,
@@ -1190,6 +1191,7 @@ export class MailboxDO extends DurableObject<Env> {
    * that changed: after the index is built from Basin, which leaves them out (ingest).
    */
   async rebuildRollups(): Promise<{ rowsRead: number; rowsWritten: number }> {
+    this.totalsKept = null;
     const sql = this.ctx.storage.sql;
     const senders: Tally = new Map();
     const domains: Tally = new Map();
@@ -1868,6 +1870,9 @@ export class MailboxDO extends DurableObject<Env> {
    * One archive page's rows, read from the rollups so no page scans every message.
    * `q` searches subject, sender, snippet and labels; each word must match.
    */
+  /** The totals view, and the message count it was counted at. */
+  private totalsKept: { at: number; row: TotalsRow } | null = null;
+
   async archive<V extends ArchiveView>(view: V, q = ''): Promise<ArchiveRows[V][]> {
     const sql = this.ctx.storage.sql;
     const rows = (query: string, ...args: (string | number)[]) => {
@@ -1877,6 +1882,15 @@ export class MailboxDO extends DurableObject<Env> {
       return out;
     };
     switch (view) {
+      case 'totals': {
+        // Counted once, then kept while the message count stays the same (mail added or taken out moves both).
+        const at = this.indexedTotal();
+        if (this.totalsKept?.at !== at) {
+          const [t] = rows(`SELECT (SELECT count(*) FROM senders) AS senders, (SELECT count(*) FROM domains) AS domains`);
+          this.totalsKept = { at, row: t as unknown as TotalsRow };
+        }
+        return [this.totalsKept.row] as ArchiveRows[V][];
+      }
       case 'months':
         return rows(`SELECT month, n, bytes FROM months ORDER BY month`);
       case 'labels':

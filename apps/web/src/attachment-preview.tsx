@@ -9,7 +9,7 @@ import type { MessageAttachment } from '@mailcellar/schema';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeftIcon, ChevronRightIcon, DownloadIcon, FileIcon, FileTextIcon, ImageIcon } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { bytes } from './archive';
+import { bytes } from './format';
 
 export type Kind = 'image' | 'pdf' | 'text' | 'other';
 const IMAGES = /^image\/(png|jpe?g|gif|webp|avif|bmp)$/i;

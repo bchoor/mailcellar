@@ -14,10 +14,10 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { AtSignIcon, CalendarIcon, FilterIcon, GlobeIcon, ListIcon, MailIcon, NewspaperIcon, UserIcon, ZapIcon } from 'lucide-react';
 import { useState } from 'react';
-import { count, EmptyState } from './archive';
+import { EmptyState } from './archive';
+import { count, day } from './format';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
 
-const DAY = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
 /** One Gmail settings read for the picked mailbox; a refusal throws its words. */
 function useGmail<T>(page: 'filters' | 'subscriptions') {
@@ -97,7 +97,7 @@ const SUBSCRIPTIONS: ViewDomain<Subscription> = {
     { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.addr.split('@')[1] ?? '', format: 'text', filterable: true, groupable: true },
     { key: 'list', label: 'List ID', icon: ListIcon, value: (r) => r.listId ?? '', format: 'text' },
     { key: 'n', label: 'Messages', icon: MailIcon, value: (r) => r.n, format: 'rounded', aggregate: 'sum' },
-    { key: 'last', label: 'Latest', icon: CalendarIcon, value: (r) => new Date(r.lastTs).toISOString().slice(0, 10), format: 'text', render: (r) => DAY.format(new Date(r.lastTs)) },
+    { key: 'last', label: 'Latest', icon: CalendarIcon, value: (r) => new Date(r.lastTs).toISOString().slice(0, 10), format: 'text', render: (r) => day(r.lastTs) },
   ],
 } as ViewDomain<Subscription>;
 

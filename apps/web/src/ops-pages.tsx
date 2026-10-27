@@ -14,8 +14,8 @@ import { useState } from 'react';
 import { FREE_DAILY, PLAN_NAMES, type UsageDay } from '@mailcellar/schema';
 import { EmptyState } from './archive';
 import { AccountLimits, AccountLimitsTools, useQuota } from './quota';
+import { count, moment } from './format';
 
-const fmt = (n: number) => n.toLocaleString('en-US');
 
 // The table: usage the mailboxes measure themselves (/api/usage), per UTC day. The account's
 // limits above it are Cloudflare's own figures (quota.tsx).
@@ -79,7 +79,7 @@ function LimitsCard({ days }: { days: UsageDay[] }) {
   return (
     <div className="flex flex-col gap-4">
       <TileRow>
-        <Tile className="lg:flex-1" label="Messages indexed today" value={fmt(indexed)} />
+        <Tile className="lg:flex-1" label="Messages indexed today" value={count(indexed)} />
         <Tile
           className="lg:flex-1"
           label="Plan"
@@ -88,7 +88,7 @@ function LimitsCard({ days }: { days: UsageDay[] }) {
             quota && !quota.planReadAt
               ? 'taken as Free until Cloudflare billing can be read'
               : plan === 'paid'
-                ? `use past the allowance is billed${quota?.paidPeriodEnd ? `; period ends ${new Date(quota.paidPeriodEnd).toLocaleString()}` : ''}`
+                ? `use past the allowance is billed${quota?.paidPeriodEnd ? `; period ends ${moment(quota.paidPeriodEnd)}` : ''}`
                 : 'daily limits refuse work past them'
           }
         />

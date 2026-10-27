@@ -6,22 +6,11 @@ import { quotaStop, type LevelMeter, type QuotaMeter, type QuotaOverview, type Q
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CloudIcon, PauseIcon, RefreshCwIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useState, useSyncExternalStore } from 'react';
+import { bytes, count, moment } from './format';
 
-const fmt = (n: number) => n.toLocaleString('en-US');
 const usd = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
 const date = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-const time = (iso: string) => new Date(iso).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
 
-/** Bytes in the largest unit that keeps a whole number in front: 1.2 GB, 340 MB. */
-function bytes(n: number): string {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  return `${n < 10 && i ? n.toFixed(1) : fmt(Math.round(n))} ${units[i]}`;
-}
 
 export function useQuota() {
   return useQuery({
@@ -113,7 +102,7 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
         {parts.map((p) => (
           <div key={p.name} className="h-full" style={{ width: `${(p.value / scale) * 100}%`, background: color(p) }} title={`${partName(p)}: ${b.unit(p.value)}`} />
         ))}
-        {b.hard && <div className="absolute inset-y-0 w-px bg-loss" style={{ left: `${stop * 100}%` }} title={`Backfills pause at ${fmt(Math.round(b.limit * stop))}`} />}
+        {b.hard && <div className="absolute inset-y-0 w-px bg-loss" style={{ left: `${stop * 100}%` }} title={`Backfills pause at ${count(Math.round(b.limit * stop))}`} />}
         {used > b.limit && <div className="absolute inset-y-0 w-0.5 bg-foreground" style={{ left: `${(b.limit / scale) * 100}%` }} title="Free allowance" />}
       </div>
       <span className={`text-right tabular-nums ${warn ? 'text-loss' : 'text-muted-foreground'}`}>
@@ -124,8 +113,8 @@ function BarRow({ b, color, show }: { b: Bar; color: Colors; show: Show }) {
   );
 }
 
-const meterBar = (m: QuotaMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, hard: m.hard, stop: quotaStop(m.metric), cost: m.cost, unit: fmt, parts: m.parts.length ? m.parts : [{ name: 'mailcellar', value: m.ours, mine: true }, { name: 'Account', value: m.used - m.ours, mine: false }] });
-const levelBar = (m: LevelMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, cost: m.cost, unit: m.unit === 'bytes' ? bytes : fmt, parts: m.parts });
+const meterBar = (m: QuotaMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, hard: m.hard, stop: quotaStop(m.metric), cost: m.cost, unit: count, parts: m.parts.length ? m.parts : [{ name: 'mailcellar', value: m.ours, mine: true }, { name: 'Account', value: m.used - m.ours, mine: false }] });
+const levelBar = (m: LevelMeter): Bar => ({ label: m.label, used: m.used, limit: m.limit, cost: m.cost, unit: m.unit === 'bytes' ? bytes : count, parts: m.parts });
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -181,7 +170,7 @@ export function AccountLimitsTools() {
       </ToggleGroup>
       <IconButton
         icon={RefreshCwIcon}
-        label={wait > 0 ? `Refresh after ${new Date(data!.refreshAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : 'Refresh'}
+        label={wait > 0 ? `Refresh after ${moment(data!.refreshAt)}` : 'Refresh'}
         busy={refresh.isPending}
         disabled={!data || wait > 0 || refresh.isPending}
         onClick={() => refresh.mutate()}
@@ -206,12 +195,12 @@ export function AccountLimits() {
       {data.paused && (
         <NoteLine
           icon={PauseIcon}
-          title={`${data.paused.metric === 'do_rows_written' ? 'Indexing' : 'Backfills'} paused: ${data.paused.label} is past ${fmt(Math.round((data.meters.find((m) => m.metric === data.paused!.metric)?.limit ?? 0) * quotaStop(data.paused.metric)))} today`}
-          note={`Resumes ${time(data.paused.resumesAt)}, after the limit resets.`}
+          title={`${data.paused.metric === 'do_rows_written' ? 'Indexing' : 'Backfills'} paused: ${data.paused.label} is past ${count(Math.round((data.meters.find((m) => m.metric === data.paused!.metric)?.limit ?? 0) * quotaStop(data.paused.metric)))} today`}
+          note={`Resumes ${moment(data.paused.resumesAt)}, after the limit resets.`}
         />
       )}
       {daily.length > 0 && (
-        <Section title={`Today · resets ${time(daily[0].resetsAt)}`}>
+        <Section title={`Today · resets ${moment(daily[0].resetsAt)}`}>
           {daily.map((m) => <BarRow key={m.metric} b={meterBar(m)} color={color} show={show} />)}
         </Section>
       )}
@@ -228,7 +217,7 @@ export function AccountLimits() {
       {show === 'all' && <Legend keys={keys} />}
       <NoteLine
         icon={CloudIcon}
-        title={data.readAt ? `Whole Cloudflare account, read ${time(data.readAt)}` : 'Counted by MailCellar only'}
+        title={data.readAt ? `Whole Cloudflare account, read ${moment(data.readAt)}` : 'Counted by MailCellar only'}
         note={
           data.readAt
             ? `Every project on the account counts. ${

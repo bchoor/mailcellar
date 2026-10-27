@@ -90,7 +90,10 @@ export interface BodySnippet {
   text: string;
   hits: [number, number][];
 }
+/** How many senders and domains the mailbox has in all (the pages list at most ARCHIVE_LIMIT). */
+export interface TotalsRow { senders: number; domains: number }
 export interface ArchiveRows {
+  totals: TotalsRow;
   months: MonthRow;
   labels: LabelRow;
   domains: DomainRow;
@@ -98,7 +101,7 @@ export interface ArchiveRows {
   messages: MessageRow;
 }
 export type ArchiveView = keyof ArchiveRows;
-export const ARCHIVE_VIEWS: readonly ArchiveView[] = ['months', 'labels', 'domains', 'senders', 'messages'];
+export const ARCHIVE_VIEWS: readonly ArchiveView[] = ['totals', 'months', 'labels', 'domains', 'senders', 'messages'];
 
 /** At most this many rows a page: the rest is reached by search, not by scrolling. */
 export const ARCHIVE_LIMIT = 1000;
