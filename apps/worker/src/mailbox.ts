@@ -42,7 +42,6 @@ import {
   SYNC_STALE_MS,
   type ScheduleRun,
   type MessageDetail,
-  type TotalsRow,
   type UserId,
   asUserId,
   nextRun,
@@ -1191,7 +1190,6 @@ export class MailboxDO extends DurableObject<Env> {
    * that changed: after the index is built from Basin, which leaves them out (ingest).
    */
   async rebuildRollups(): Promise<{ rowsRead: number; rowsWritten: number }> {
-    this.totalsKept = null;
     const sql = this.ctx.storage.sql;
     const senders: Tally = new Map();
     const domains: Tally = new Map();
@@ -1348,6 +1346,7 @@ export class MailboxDO extends DurableObject<Env> {
   /** Record the mailbox's labels, so the Labels page can name them. Counts are kept. */
   async putLabels(labels: MailLabel[]): Promise<void> {
     const sql = this.ctx.storage.sql;
+    this.kept.clear();
     this.ctx.storage.transactionSync(() => {
       for (const l of labels)
         sql.exec(
@@ -1856,6 +1855,8 @@ export class MailboxDO extends DurableObject<Env> {
    * so the meter never under-reports what the free tier counts.
    */
   private count(usage: Partial<Record<UsageMetric, number>>) {
+    // Any write may change what a kept read answered.
+    if (usage.do_rows_written) this.kept.clear();
     const others = Object.entries(usage).filter(([m, v]) => m !== 'do_rows_written' && v);
     const written = (usage.do_rows_written ?? 0) + others.length + 1; // +1: the rows-written row itself
     const day = today();
@@ -1867,13 +1868,32 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   /**
+   * Archive answers kept in memory until the next write (count() with rows written clears them),
+   * so a page shown again reads no rows and meters nothing. The 8 most recently used.
+   */
+  private kept = new Map<string, unknown>();
+  private keep<T>(key: string, read: () => T): T {
+    if (this.kept.has(key)) {
+      const hit = this.kept.get(key) as T;
+      this.kept.delete(key);
+      this.kept.set(key, hit);
+      return hit;
+    }
+    const value = read();
+    this.kept.set(key, value);
+    if (this.kept.size > 8) this.kept.delete(this.kept.keys().next().value as string);
+    return value;
+  }
+
+  /**
    * One archive page's rows, read from the rollups so no page scans every message.
    * `q` searches subject, sender, snippet and labels; each word must match.
    */
-  /** The totals view, and the message count it was counted at. */
-  private totalsKept: { at: number; row: TotalsRow } | null = null;
-
   async archive<V extends ArchiveView>(view: V, q = ''): Promise<ArchiveRows[V][]> {
+    return this.keep(`archive:${view}:${q}`, () => this.readArchive(view, q));
+  }
+
+  private readArchive<V extends ArchiveView>(view: V, q: string): ArchiveRows[V][] {
     const sql = this.ctx.storage.sql;
     const rows = (query: string, ...args: (string | number)[]) => {
       const cursor = sql.exec(query, ...args);
@@ -1882,15 +1902,8 @@ export class MailboxDO extends DurableObject<Env> {
       return out;
     };
     switch (view) {
-      case 'totals': {
-        // Counted once, then kept while the message count stays the same (mail added or taken out moves both).
-        const at = this.indexedTotal();
-        if (this.totalsKept?.at !== at) {
-          const [t] = rows(`SELECT (SELECT count(*) FROM senders) AS senders, (SELECT count(*) FROM domains) AS domains`);
-          this.totalsKept = { at, row: t as unknown as TotalsRow };
-        }
-        return [this.totalsKept.row] as ArchiveRows[V][];
-      }
+      case 'totals':
+        return rows(`SELECT (SELECT count(*) FROM senders) AS senders, (SELECT count(*) FROM domains) AS domains`);
       case 'months':
         return rows(`SELECT month, n, bytes FROM months ORDER BY month`);
       case 'labels':
