@@ -143,7 +143,7 @@ export const MIGRATIONS: readonly string[] = [
   `ALTER TABLE job_months ADD COLUMN finished_at TEXT;`,
   // 10: the slim index (2026-10-24). Search keeps no per-message size row (columnsize = 0) and
   // so no contentless delete: a message is taken out with FTS5's 'delete' command and its text
-  // from messages. That was one DO row written a message. The constructor fills it again.
+  // from messages. That was one DO row written a message. catchUp fills it again.
   `DROP TABLE message_fts;
    CREATE VIRTUAL TABLE message_fts USING fts5 (
      subject, from_addr, from_name, snippet, labels,
@@ -153,7 +153,7 @@ export const MIGRATIONS: readonly string[] = [
   // 11: the status row (2026-10-24) keeps each month's latest backfill state, found by month.
   `CREATE INDEX job_months_month ON job_months (month, job);`,
   // 12: Spam and Trash are not kept (Bikram, 2026-10-24). Live sync had copied some; the
-  // constructor takes them out of the index and deletes their raw files.
+  // catchUp takes them out of the index and deletes their raw files.
   `INSERT INTO meta (key, value) VALUES ('drop_spam', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
   // 13: new mail indexed into a month already built from Basin wasn't added to its copied count
   // (2026-10-25: one mailbox showed 43 short of Gmail with all 43 searchable). Once:
@@ -191,10 +191,15 @@ export const MIGRATIONS: readonly string[] = [
    ALTER TABLE messages ADD COLUMN attach TEXT;
    CREATE INDEX messages_attach ON messages (attach) WHERE attachments > 0;`,
   // 19: labelled mail per month (Bikram, 2026-10-27): messages with at least one of the person's
-  // own labels. Ingest keeps it from now on; the constructor counts mail already in once.
+  // own labels. Ingest keeps it from now on; catchUp counts mail already in, a few months a step.
   `ALTER TABLE months ADD COLUMN labelled INTEGER NOT NULL DEFAULT 0;
    INSERT INTO meta (key, value) VALUES ('labelled_fill', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
 ];
+
+/** Months a step of the labelled count covers (MailboxDO.fillLabelled): a few hundred ms at most. */
+const FILL_MONTHS = 6;
+/** The pause between one-time pass steps (MailboxDO.catchUp), so requests run in between. */
+const CATCH_UP_GAP_MS = 50;
 
 /** Gmail labels whose mail MailCellar doesn't keep: the index never takes it in. */
 const NOT_KEPT = ['SPAM', 'TRASH'];
@@ -285,7 +290,7 @@ function writeRollups(run: (query: string, ...args: (string | number)[]) => void
   }
   for (const [addr, t] of senders)
     run(
-      `INSERT INTO senders VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (addr) DO UPDATE SET
+      `INSERT INTO senders (addr, name, n, bytes, first_ts, last_ts) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (addr) DO UPDATE SET
          name = CASE WHEN excluded.last_ts >= last_ts THEN excluded.name ELSE name END,
          n = n + excluded.n, bytes = bytes + excluded.bytes,
          first_ts = min(first_ts, excluded.first_ts), last_ts = max(last_ts, excluded.last_ts)`,
@@ -293,14 +298,14 @@ function writeRollups(run: (query: string, ...args: (string | number)[]) => void
     );
   for (const [domain, t] of domains)
     run(
-      `INSERT INTO domains VALUES (?, ?, ?) ON CONFLICT (domain) DO UPDATE SET
+      `INSERT INTO domains (domain, n, bytes) VALUES (?, ?, ?) ON CONFLICT (domain) DO UPDATE SET
          n = n + excluded.n, bytes = bytes + excluded.bytes`,
       domain, t.n, t.bytes,
     );
   // A label Gmail has not named yet keeps its ID as its name until putLabels or nameLabels runs.
   for (const [id, t] of labels)
     run(
-      `INSERT INTO labels VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET
+      `INSERT INTO labels (id, name, type, n, bytes) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET
          n = n + excluded.n, bytes = bytes + excluded.bytes`,
       id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
     );
@@ -476,12 +481,11 @@ export class MailboxDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, meteredEnv(env));
     countRows(ctx.storage.sql);
+    // Only the schema and the waiting rollups hold the first request; both are quick. Never add a
+    // pass over the mailbox's rows or a network call here: a request waits on all of it.
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
-      this.refillSearch();
-      this.fillLabelled();
-      this.dropSample();
-      await this.dropSpam();
+      this.settleRollups();
       // A user's mailbox that just started (a deploy, say) doesn't know what is going on: the
       // watchdog looks within WATCH_MS, and keeps looking while something is.
       if (this.userId()) {
@@ -489,6 +493,46 @@ export class MailboxDO extends DurableObject<Env> {
         if (at === null || at > Date.now() + WATCH_MS) await ctx.storage.setAlarm(Date.now() + WATCH_MS);
       }
     });
+    this.catchUp();
+  }
+
+  /** A pass from a migration is running: catchUp starts it at most once per start. */
+  private catchingUp = false;
+
+  /**
+   * The one-time passes migrations ask for (their meta flags), after start and a small step at a
+   * time, so requests run between steps. A flag stays until its pass is done: a restart picks up
+   * where it stood.
+   */
+  private catchUp(): void {
+    if (this.catchingUp) return;
+    this.catchingUp = true;
+    const step = async () => {
+      try {
+        if (await this.catchUpStep()) return void setTimeout(step, CATCH_UP_GAP_MS);
+      } catch (e) {
+        console.error('catch-up', e);
+      }
+      this.catchingUp = false;
+    };
+    setTimeout(step, 0);
+  }
+
+  /** One step of the first pass still to do. Whether there is more to do now. */
+  private async catchUpStep(): Promise<boolean> {
+    const flag = (key: string) => this.ctx.storage.sql.exec(`SELECT 1 FROM meta WHERE key = ?`, key).toArray().length > 0;
+    if (flag('sample')) {
+      this.dropSample();
+      return true;
+    }
+    if (flag('fts_refill')) {
+      this.refillSearch();
+      return true;
+    }
+    // A raw file delete that failed leaves the flag; the next start tries again.
+    if (flag('drop_spam')) return this.dropSpam();
+    if (flag('labelled_fill')) return this.fillLabelled();
+    return false;
   }
 
   /**
@@ -510,10 +554,10 @@ export class MailboxDO extends DurableObject<Env> {
    * raw files (live sync wrote one file a message). Raw files go first: if R2 fails, the flag
    * stays and the next start tries again. Basin keeps its rows.
    */
-  private async dropSpam(): Promise<void> {
+  private async dropSpam(): Promise<boolean> {
     this.settleRollups();
     const sql = this.ctx.storage.sql;
-    if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'drop_spam'`).toArray().length) return;
+    if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'drop_spam'`).toArray().length) return false;
     const cursor = sql.exec<{ id: string; ts: number; from_addr: string; from_name: string; subject: string; snippet: string; size: number; labels: string; body: number | null; attach: string | null }>(
       `SELECT id, ts, from_addr, from_name, subject, snippet, size, labels, body, attach FROM messages
        WHERE ' ' || labels || ' ' LIKE '% SPAM %' OR ' ' || labels || ' ' LIKE '% TRASH %'`,
@@ -530,7 +574,7 @@ export class MailboxDO extends DurableObject<Env> {
         for (let i = 0; i < keys.length; i += 1000) await this.env.ARCHIVE.delete(keys.slice(i, i + 1000));
       } catch (e) {
         console.log(JSON.stringify({ dropSpam: { error: String(e) } }));
-        return;
+        return false;
       }
     }
     this.ctx.storage.transactionSync(() => {
@@ -561,30 +605,49 @@ export class MailboxDO extends DurableObject<Env> {
       console.log(JSON.stringify({ dropSpam: { removed: rows.length, rowsRead: read, rowsWritten: written } }));
       this.count({ do_rows_read: read, do_rows_written: written });
     });
+    return true;
   }
 
   /**
-   * After migration 19: count each month's labelled mail once. Reads each message row once (by
-   * the ts index, a month at a time) and writes one row a month that has any.
+   * After migration 19: count labelled mail for the next FILL_MONTHS months (the flag holds the
+   * last month done). Each month reads its own messages by the ts index and writes its one row,
+   * so a step is short however big the mailbox. Whether months are left.
    */
-  private fillLabelled(): void {
+  private fillLabelled(): boolean {
     const sql = this.ctx.storage.sql;
-    if (!sql.exec(`SELECT 1 FROM meta WHERE key = 'labelled_fill'`).toArray().length) return;
+    const flag = sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'labelled_fill'`).toArray()[0];
+    if (!flag) return false;
+    const after = flag.value === 'true' ? '' : flag.value;
+    const months = sql
+      .exec<{ month: string }>(`SELECT month FROM months WHERE month > ? ORDER BY month LIMIT ?`, after, FILL_MONTHS)
+      .toArray()
+      .map((r) => r.month);
+    const more = months.length === FILL_MONTHS;
     this.ctx.storage.transactionSync(() => {
-      const cursor = sql.exec(
-        `UPDATE months SET labelled = (
-           SELECT count(*) FROM messages
-           WHERE ts >= unixepoch(months.month || '-01') * 1000
-             AND ts < unixepoch(months.month || '-01', '+1 month') * 1000
-             AND ${LABELLED_SQL}
-         ) WHERE labelled = 0`,
-      );
-      const done = sql.exec(`DELETE FROM meta WHERE key = 'labelled_fill'`);
-      const read = cursor.rowsRead + done.rowsRead;
-      const written = cursor.rowsWritten + done.rowsWritten;
-      console.log(JSON.stringify({ fillLabelled: { rowsRead: read, rowsWritten: written } }));
+      let read = 0;
+      let written = 0;
+      const run = (query: string, ...args: string[]) => {
+        const c = sql.exec(query, ...args);
+        c.toArray();
+        read += c.rowsRead;
+        written += c.rowsWritten;
+      };
+      for (const m of months)
+        run(
+          `UPDATE months SET labelled = (
+             SELECT count(*) FROM messages
+             WHERE ts >= unixepoch(months.month || '-01') * 1000
+               AND ts < unixepoch(months.month || '-01', '+1 month') * 1000
+               AND ${LABELLED_SQL}
+           ) WHERE month = ?`,
+          m,
+        );
+      if (more) run(`UPDATE meta SET value = ? WHERE key = 'labelled_fill'`, months[months.length - 1]);
+      else run(`DELETE FROM meta WHERE key = 'labelled_fill'`);
+      console.log(JSON.stringify({ fillLabelled: { months: months.length, done: !more, rowsRead: read, rowsWritten: written } }));
       this.count({ do_rows_read: read, do_rows_written: written });
     });
+    return more;
   }
 
   /** After migration 10: put every indexed message back in search. */
@@ -1266,20 +1329,20 @@ export class MailboxDO extends DurableObject<Env> {
       };
       for (const [addr, t] of senders)
         run(
-          `INSERT INTO senders VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (addr) DO UPDATE SET
+          `INSERT INTO senders (addr, name, n, bytes, first_ts, last_ts) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (addr) DO UPDATE SET
              name = excluded.name, n = excluded.n, bytes = excluded.bytes, first_ts = excluded.first_ts, last_ts = excluded.last_ts
            WHERE n != excluded.n OR bytes != excluded.bytes OR name != excluded.name`,
           addr, t.name, t.n, t.bytes, t.first, t.last,
         );
       for (const [domain, t] of domains)
         run(
-          `INSERT INTO domains VALUES (?, ?, ?) ON CONFLICT (domain) DO UPDATE SET n = excluded.n, bytes = excluded.bytes
+          `INSERT INTO domains (domain, n, bytes) VALUES (?, ?, ?) ON CONFLICT (domain) DO UPDATE SET n = excluded.n, bytes = excluded.bytes
            WHERE n != excluded.n OR bytes != excluded.bytes`,
           domain, t.n, t.bytes,
         );
       for (const [id, t] of labels)
         run(
-          `INSERT INTO labels VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET n = excluded.n, bytes = excluded.bytes
+          `INSERT INTO labels (id, name, type, n, bytes) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET n = excluded.n, bytes = excluded.bytes
            WHERE n != excluded.n OR bytes != excluded.bytes`,
           id, id, /^[A-Z_]+$/.test(id) ? 'system' : 'user', t.n, t.bytes,
         );
@@ -1529,7 +1592,7 @@ export class MailboxDO extends DurableObject<Env> {
       let written = 0;
       for (const [month, n] of Object.entries(months))
         written += sql.exec(
-          `INSERT INTO gmail_months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
+          `INSERT INTO gmail_months (month, n, counted_at) VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
           month, n, at,
         ).rowsWritten;
       const job = sql.exec<{ id: number }>(`INSERT INTO jobs (created_at, label) VALUES (?, ?) RETURNING id`, at, label).toArray()[0].id;
@@ -1639,7 +1702,7 @@ export class MailboxDO extends DurableObject<Env> {
 
   async putMonthCount(month: string, n: number): Promise<void> {
     const { rowsWritten } = this.ctx.storage.sql.exec(
-      `INSERT INTO gmail_months VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
+      `INSERT INTO gmail_months (month, n, counted_at) VALUES (?, ?, ?) ON CONFLICT (month) DO UPDATE SET n = excluded.n, counted_at = excluded.counted_at`,
       month, n, new Date().toISOString(),
     );
     this.count({ do_rows_written: rowsWritten + this.changed([month]) });
@@ -1971,7 +2034,7 @@ export class MailboxDO extends DurableObject<Env> {
     const day = today();
     for (const [metric, value] of [...others, ['do_rows_written', written] as const])
       this.ctx.storage.sql.exec(
-        `INSERT INTO usage_days VALUES (?, ?, ?) ON CONFLICT (day, metric) DO UPDATE SET value = value + excluded.value`,
+        `INSERT INTO usage_days (day, metric, value) VALUES (?, ?, ?) ON CONFLICT (day, metric) DO UPDATE SET value = value + excluded.value`,
         day, metric, value,
       );
   }
@@ -3069,7 +3132,7 @@ export class MailboxDO extends DurableObject<Env> {
     const prev = sql.exec<{ change: string }>(`SELECT change FROM schedules WHERE id = ?`, id).toArray()[0];
     const merged = { ...(prev ? JSON.parse(prev.change) : {}), ...checked };
     const { rowsWritten } = sql.exec(
-      `INSERT INTO schedules VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET change = excluded.change`,
+      `INSERT INTO schedules (id, change) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET change = excluded.change`,
       id, JSON.stringify(merged),
     );
     this.count({ do_rows_written: rowsWritten });

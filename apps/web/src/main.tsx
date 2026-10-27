@@ -8,6 +8,7 @@ import {
   SchedulesSection,
   type ScheduleItem,
   type ScheduleRun,
+  watchNewBuilds,
 } from '@columenlabs/lumen-ui';
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@columenlabs/lumen-ui/ui/sidebar';
 import { TooltipProvider } from '@columenlabs/lumen-ui/ui/tooltip';
@@ -239,6 +240,10 @@ queryClient.getQueryCache().subscribe((e) => {
   if (lastMe !== undefined && me !== lastMe) void queryClient.invalidateQueries({ queryKey: ['backfill'] });
   lastMe = me;
 });
+
+// A tab open across a deploy: a page file the deploy removed reloads onto the new build, and a
+// tab in view offers Reload when a new build is out. Every page's files load up front.
+if (!__SINGLE_FILE__) watchNewBuilds(router);
 
 forgetOnSignOut();
 createRoot(document.getElementById('root') as HTMLElement).render(
