@@ -92,7 +92,7 @@ const SUBSCRIPTIONS: ViewDomain<Subscription> = {
   rowKey: (r) => r.addr,
   text: (r) => [r.addr, r.name, r.listId ?? ''],
   fields: [
-    { key: 'name', label: 'Name', icon: UserIcon, value: (r) => r.name, format: 'text' },
+    { key: 'name', label: 'Name', icon: UserIcon, value: (r) => r.name || r.addr.split('@')[0], format: 'text' },
     { key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.addr, format: 'text', filterable: true },
     { key: 'domain', label: 'Domain', icon: GlobeIcon, value: (r) => r.addr.split('@')[1] ?? '', format: 'text', filterable: true, groupable: true },
     { key: 'list', label: 'List ID', icon: ListIcon, value: (r) => r.listId ?? '', format: 'text' },
