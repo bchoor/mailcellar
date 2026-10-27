@@ -45,6 +45,14 @@ const emailOptions = (env: Env): EmailOptions => ({
       url: 'http://send.icaruslab.dev/api',
       urlInfo: 'The server’s own name: the tunnel takes the request to that machine, which passes it on by name.',
       where: 'the tunnel’s machine',
+      // The tunnel always lands on that machine's web gateway (port 80), which picks the app by
+      // name: a port or a bare IP in the address would never reach it.
+      checkUrl: (u) => {
+        const { hostname, port } = new URL(u);
+        return port || /^[\d.]+$|^localhost$|^\[/.test(hostname)
+          ? 'Use the server’s name with no port, like http://send.icaruslab.dev/api: the tunnel reaches it by name.'
+          : null;
+      },
       fetch: () => (env.FREESEND ? (req) => env.FREESEND!.fetch(req) : null),
     },
     { id: 'public', label: 'Public internet', url: 'https://api.resend.com' },
