@@ -2,9 +2,10 @@
 // whether they are let in (Lumen's people kit, kept in QuotaDO). ADMIN_EMAILS are built-in
 // admins; everyone else needs an invite. With no ADMIN_EMAILS there is no list, and Access alone decides.
 import { type EmailOptions, type PeopleApi, peopleRoutes } from '@columenlabs/lumen-people';
-import { can, type EmailCheck, type Person } from '@columenlabs/lumen-ui-types/people';
+import { can, type EmailCheck, type Person, type SyncStatus } from '@columenlabs/lumen-ui-types/people';
 import type { Env } from './env';
 import { adminEmails, INVITE_DAYS, MAIL_SCOPE, type PeopleOp, SCOPES } from './people';
+import { syncAccess } from './access-sync';
 import { accountQuota, type StoredEmailRow } from './quota';
 
 /** How long a Worker trusts what the list said about someone: a removal takes effect within this. */
@@ -80,6 +81,11 @@ export async function peopleApi(request: Request, env: Env, url: URL, email: str
     link: (token) => `${url.origin}/app/invite/${token}`,
     // No mailer of its own: the invites go out through Admin ▸ Email's settings.
     email: emailOptions(env),
+    // Cloudflare Access sends a sign-in code only to the people this list lets in.
+    sync: {
+      run: async () => syncAccess(env, (await service(env).list()) as Person[]),
+      status: async () => (await accountQuota(env).accessSync()) as SyncStatus | null,
+    },
     removeSteps: () => [{ label: 'Their mail', outcome: 'Stays in MailCellar. Inviting them again gives it back.' }],
   });
   const res = await routes(request);
