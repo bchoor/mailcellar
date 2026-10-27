@@ -271,6 +271,8 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
       (MESSAGE_PAGE_SIZES as readonly number[]).includes(size) ? size : 50,
       url.searchParams.get('asc') === '1',
       (MESSAGE_SORTS as readonly string[]).includes(url.searchParams.get('sort') ?? '') ? (url.searchParams.get('sort') as MessageSort) : 'date',
+      // A jump to any page (the page footer): the rows before it, with no cursor.
+      Math.max(0, Math.min(Number.parseInt(url.searchParams.get('skip') ?? '0', 10) || 0, 1e7)),
     );
     return Response.json(page, { headers: noStore });
   }

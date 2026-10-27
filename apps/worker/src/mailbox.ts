@@ -2329,7 +2329,14 @@ export class MailboxDO extends DurableObject<Env> {
    * a rare filter returns a partial page and a cursor that keeps searching instead of reading the
    * whole mailbox.
    */
-  async messagePage(filters: MessageFilter[], cursor: string | null, size: number, asc: boolean, sort: MessageSort = 'date'): Promise<MessagePage> {
+  async messagePage(
+    filters: MessageFilter[],
+    cursor: string | null,
+    size: number,
+    asc: boolean,
+    sort: MessageSort = 'date',
+    skip = 0,
+  ): Promise<MessagePage> {
     const sql = this.ctx.storage.sql;
     let read = 0;
     const exec = <R extends Record<string, SqlStorageValue>>(query: string, ...args: (string | number)[]) => {
@@ -2367,6 +2374,43 @@ export class MailboxDO extends DurableObject<Env> {
     const hi = spans.length ? Math.min(...spans.map((x) => x[1])) : null;
     // The order as phases read one after another (Attachments: with, then without; Category: each).
     const phases = sortPhases(by, asc, by === 'category' && !labelIds.length ? exec<{ id: string; n: number }>(`SELECT id, n FROM labels`) : labelIds, this.indexedTotal());
+    // A jump to a page (no cursor, `skip` rows in). By date with no filter, the months' counts find
+    // the month the page starts in: the read seeks to it and skips that month's rows only. Another
+    // counted, one-phase order past its middle reads from the other end instead.
+    let anchor: SortKey | null = null;
+    if (skip && !cursor) {
+      const all = this.filteredTotal(filters, labelIds, exec);
+      if (all !== null) {
+        skip = Math.min(skip, Math.max(0, Math.floor((all - 1) / size) * size));
+        if (!filters.length && by === 'date' && phases.length === 1) {
+          const months = Object.entries(this.status().months)
+            .filter(([, m]) => m.indexed > 0)
+            .map(([month, m]) => [month, m.indexed] as const)
+            .sort(([a], [b]) => (asc ? a.localeCompare(b) : b.localeCompare(a)));
+          let before = 0;
+          for (const [month, n] of months) {
+            if (before + n > skip) {
+              if (before) {
+                // Newest first: rows before the next month's start; oldest first: from this month's start.
+                anchor = asc ? [Date.parse(`${month}-01T00:00:00Z`) - 1, '~'] : [Date.parse(`${addMonths(month, 1)}-01T00:00:00Z`), ''];
+                skip -= before;
+              }
+              break;
+            }
+            before += n;
+          }
+        } else if (phases.length === 1 && skip * 2 + size > all) {
+          const end = Math.min(skip + size, all);
+          const back = await this.messagePage(filters, null, end - skip, !asc, sort, all - end);
+          back.rows.reverse();
+          const last = back.rows.at(-1);
+          return { ...back, next: end < all && last ? JSON.stringify(keyOf(phases[0].keys, last)) : null, partial: false };
+        }
+      }
+    }
+    // The rows a page reads: the skipped ones too, then one more to know a page follows.
+    const need = (cursor ? 0 : skip) + size;
+    const budget = SCAN_BUDGET + (need - size) * 4;
     // Under a search, whether the envelope holds every word: if not, the row matched on its body or an attachment.
     const envelope = words ? ftsQuery(text) : '';
     const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
@@ -2377,13 +2421,13 @@ export class MailboxDO extends DurableObject<Env> {
     // A cursor is the phase, then the last row's keys in that phase's order.
     const from = cursor ? decodeCursor(cursor, phases) : null;
     let p = from?.[0] ?? 0;
-    let at: SortKey | null = from ? from.slice(1) : null;
+    let at: SortKey | null = from ? from.slice(1) : anchor;
     const rows: MessageRow[] = [];
     const ends: SortKey[] = [];
     let scanned = 0;
     let more = true;
     let last: SortKey | null = null;
-    while (rows.length <= size && scanned < SCAN_BUDGET && (more || p < phases.length - 1)) {
+    while (rows.length <= need && scanned < budget && (more || p < phases.length - 1)) {
       if (!more) {
         // This phase is read to its end: the next starts from its top.
         p++;
@@ -2393,7 +2437,7 @@ export class MailboxDO extends DurableObject<Env> {
       const { keys, where: also, test, label } = phases[p];
       const phaseMatch = [match, label ? `labels : "${label}"` : ''].filter(Boolean).join(' ');
       const bounded = keys[0] === 'ts';
-      const chunk = rest.length || test ? SCAN_CHUNK : size + 1 - rows.length;
+      const chunk = rest.length || test ? SCAN_CHUNK : need + 1 - rows.length;
       const where = [
         at ? `(${keys.join(', ')}) ${cmp} (${keys.map(() => '?').join(', ')})` : '1',
         bounded && lo !== null && Number.isFinite(lo) ? 'ts >= ?' : '1',
@@ -2429,14 +2473,15 @@ export class MailboxDO extends DurableObject<Env> {
         if (!keep(m) || (test && !test(m))) continue;
         rows.push(m);
         ends.push([p, ...last]);
-        if (rows.length > size) break;
+        if (rows.length > need) break;
       }
       at = last;
     }
-    const full = rows.length > size;
-    if (full) rows.length = size;
-    const end = full ? ends[size - 1] : more ? (last ? [p, ...last] : null) : p < phases.length - 1 ? [p + 1] : null;
+    const full = rows.length > need;
+    if (full) rows.length = need;
+    const end = full ? ends[need - 1] : more ? (last ? [p, ...last] : null) : p < phases.length - 1 ? [p + 1] : null;
     const unindexed = Object.values(this.status().months).filter((m) => m.inBasin > 0 && m.indexState !== null && m.indexState !== 'done').length;
+    rows.splice(0, need - size);
     const total = this.filteredTotal(filters, labelIds, exec);
     this.count({ do_rows_read: read });
     return {

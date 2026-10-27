@@ -688,8 +688,9 @@ export function MessagesPage() {
   }, [months.data, labelRows.data]);
   const [tokens, setTokens] = useState<FilterToken[]>([]);
   const [size, setSize] = useState(50);
-  // Page n starts after cursors[n]; each page read adds the next one's.
-  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  // Page n starts after cursors[n]; each page read adds the next one's. A page jumped to (the page
+  // footer) has none yet: it asks for the rows before it to be skipped instead.
+  const [cursors, setCursors] = useState<(string | null | undefined)[]>([null]);
   const [page, setPage] = useState(0);
   // The server sorts by the columns it has an index for (Date, Sender, Size): newest first by default.
   const [sort, setSort] = useState<{ by: MessageSort; asc: boolean }>({ by: 'date', asc: false });
@@ -713,6 +714,7 @@ export function MessagesPage() {
     setPage(0);
   }, [key, size, id, sort.by, asc]);
   const cursor = cursors[page] ?? null;
+  const skip = page > 0 && cursors[page] === undefined ? page * size : 0;
   // The search box's words: rows they matched only in the body show where.
   const text = filters.filter((f) => f.key === 'text' && !f.not).flatMap((f) => f.values).join(' ');
   const [hits, setHits] = useState<MessageRow[]>([]);
@@ -731,10 +733,10 @@ export function MessagesPage() {
   const { groups, grouped } = useServerGroups(id, filters, sort, list, toView);
   const messages = useQuery({
     // Grouped, each open group loads its own rows; this page still gives the filter its values.
-    queryKey: ['messages', id, key, size, cursor, sort.by, asc],
+    queryKey: ['messages', id, key, size, cursor, skip, sort.by, asc],
     queryFn: async (): Promise<MessagePage | null> => {
       if (!id) return null;
-      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}), ...(asc ? { asc: '1' } : {}), ...(sort.by !== 'date' ? { sort: sort.by } : {}) });
+      const qs = new URLSearchParams({ size: String(size), ...(filters.length ? { f: key } : {}), ...(cursor ? { cursor } : {}), ...(skip ? { skip: String(skip) } : {}), ...(asc ? { asc: '1' } : {}), ...(sort.by !== 'date' ? { sort: sort.by } : {}) });
       const res = await fetch(`/api/accounts/${id}/messages?${qs}`);
       if (!res.ok) throw new Error(`Couldn't load messages (${res.status})`);
       return res.json();
@@ -751,11 +753,16 @@ export function MessagesPage() {
   const serverSorts = useMemo(() => sorts.split(',').map((x) => SORT_COLUMN[x as MessageSort]), [sorts]);
   useEffect(() => {
     if (!data || messages.isPlaceholderData) return;
-    setCursors((c) => (c[page + 1] === data.next ? c : [...c.slice(0, page + 1), data.next]));
+    setCursors((c) => {
+      if (c[page + 1] === data.next) return c;
+      const n = [...c];
+      n[page + 1] = data.next;
+      return n;
+    });
   }, [data, messages.isPlaceholderData, page]);
   const load = useLumenLoad(messages);
   const [config, setConfig] = useState(() =>
-    view('Messages', { columns: ['date', 'from', 'subject', 'category', 'label', 'size_kb', 'attachments'], sort: { key: 'date', desc: true } }),
+    view('Messages', { columns: ['date', 'from', 'subject', 'category', 'label', 'size_kb', 'attachments'], sort: { key: 'date', desc: true }, pagination: { footer: true } }),
   );
   // A category tab holds one category, so its column says nothing there; the saved view keeps it for All.
   const byCategory = tab !== 'all' && config.columns.includes('category');
@@ -822,7 +829,8 @@ export function MessagesPage() {
         size,
         total: data?.total ?? null,
         more: !!data?.next,
-        onPage: (p) => setPage(Math.max(0, Math.min(p, cursors.length - 1))),
+        // Counted, any page opens (the page footer); not counted, only those reached so far and the next.
+        onPage: (p) => setPage(Math.max(0, Math.min(p, data?.total != null ? Math.ceil(data.total / size) - 1 : cursors.length - 1))),
         onSize: setSize,
         sizes: MESSAGE_PAGE_SIZES,
         // Sender and Size sort once their indexes are built; until then only Date does.
