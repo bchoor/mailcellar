@@ -72,6 +72,29 @@ async function handle(request: Request, env: Env, url: URL): Promise<Response> {
 
 const noStore = { 'cache-control': 'no-store' };
 
+type AccountKind = 'gmail' | 'archive';
+/**
+ * Each person's accounts and their kinds, kept a minute per isolate, so an account's page costs one
+ * Durable Object hop (its mailbox) rather than two (theirs first). An ID not in the kept list is
+ * looked up again before it is refused, so an account added elsewhere is found at once.
+ */
+const kindsKept = new Map<string, { until: number; kinds: Promise<Record<string, AccountKind>> }>();
+const KINDS_MS = 60_000;
+
+/** The account's kind when it is this person's; null when it isn't. */
+async function kindOf(who: Identity, id: string): Promise<AccountKind | null> {
+  const read = () => {
+    const kinds = who.mailbox.accountKinds();
+    kindsKept.set(who.user, { until: Date.now() + KINDS_MS, kinds });
+    kinds.catch(() => kindsKept.delete(who.user));
+    return kinds;
+  };
+  const hit = kindsKept.get(who.user);
+  let kinds = hit && hit.until > Date.now() ? await hit.kinds : null;
+  if (!kinds?.[id]) kinds = await read();
+  return kinds[id] ?? null;
+}
+
 interface Release {
   tag: string;
   published_at: string;
@@ -104,6 +127,8 @@ function suiteOf(env: Env): Suite | undefined {
 /** The API a person's mailboxes serve: who this is, accounts, each account's pages, schedules and usage. Null: not one of these. */
 async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, admin: boolean): Promise<Response | null> {
   const { email, mailbox } = who;
+  // A change may add or remove an account: the next request reads the list again.
+  if (request.method !== 'GET') kindsKept.delete(who.user);
   if (url.pathname === '/api/me' && request.method === 'GET') return Response.json({ ...(await mailbox.me(email)), admin, suite: suiteOf(env) }, { headers: noStore });
   const test = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/test$/);
   if (test && request.method === 'POST') {
@@ -113,7 +138,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
   const archives = await archiveApi(request, env, url, who.user, mailbox);
   if (archives) return archives;
   const account = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})$/);
-  if (account && request.method === 'DELETE' && (await mailbox.accountKind(account[1])) === 'archive') {
+  if (account && request.method === 'DELETE' && (await kindOf(who, account[1])) === 'archive') {
     // An archive has no Google access to revoke.
     if (!(await removeArchive(env, who.user, mailbox, account[1]))) return Response.json({ error: 'not_found' }, { status: 404 });
     return Response.json({ ok: true, revoked: false }, { headers: noStore });
@@ -217,7 +242,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
   // How many messages each Period group holds (spans as from..to, comma separated).
   const periods = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/periods$/);
   if (periods && request.method === 'GET') {
-    if (!(await mailbox.hasMailbox(periods[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    if (!(await kindOf(who, periods[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
     const spans = (url.searchParams.get('spans') ?? '').split(',').map((v) => v.split('..').map(Number) as [number, number]);
     if (!spans.length || spans.length > 40 || spans.some((x) => x.length !== 2 || !x.every(Number.isFinite))) return Response.json({ error: 'bad_spans' }, { status: 400, headers: noStore });
     const n = await accountMailbox(env, who.user, periods[1]).periodCounts(spans);
@@ -226,7 +251,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
   // One page of an account's Messages groups (Group by), from the rollups.
   const grouped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages\/groups$/);
   if (grouped && request.method === 'GET') {
-    if (!(await mailbox.hasMailbox(grouped[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    if (!(await kindOf(who, grouped[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
     const by = url.searchParams.get('by') ?? '';
     const filters = messageFilters(url.searchParams.get('f'));
     if (!filters || !(MESSAGE_GROUPS as readonly string[]).includes(by)) return Response.json({ error: 'bad_group' }, { status: 400, headers: noStore });
@@ -236,7 +261,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
   // One page of an account's messages under the Messages page's filters.
   const paged = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/messages$/);
   if (paged && request.method === 'GET') {
-    if (!(await mailbox.hasMailbox(paged[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    if (!(await kindOf(who, paged[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
     const filters = messageFilters(url.searchParams.get('f'));
     if (!filters) return Response.json({ error: 'bad_filter' }, { status: 400, headers: noStore });
     const size = Number(url.searchParams.get('size'));
@@ -252,7 +277,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
   // Search results' body snippets: the line of each body where the words are, read from its raw file.
   const snips = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/snippets$/);
   if (snips && request.method === 'GET') {
-    if (!(await mailbox.hasMailbox(snips[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    if (!(await kindOf(who, snips[1]))) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
     const ids = (url.searchParams.get('ids') ?? '').split(',').filter((id) => /^[0-9a-f]{1,16}$/.test(id));
     return Response.json(await bodySnippets(env, who.user, snips[1], ids, url.searchParams.get('q') ?? ''), { headers: noStore });
   }
@@ -260,11 +285,18 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
   const scoped = url.pathname.match(/^\/api\/accounts\/(a[A-Za-z0-9_-]{22})\/(archive\/[a-z]+|filters|subscriptions|labels)$/);
   if (scoped && request.method === 'GET') {
     const [, id, page] = scoped;
-    const kind = await mailbox.accountKind(id);
+    const kind = await kindOf(who, id);
     if (!kind) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
     // An archive has no Gmail: its labels are the ones its file named, and it has no Gmail settings.
     if (kind === 'archive' && page === 'labels') return Response.json(await accountMailbox(env, who.user, id).labelMap(), { headers: noStore });
     if (kind === 'archive' && (page === 'filters' || page === 'subscriptions')) return Response.json({ error: 'not_found' }, { status: 404, headers: noStore });
+    if (page.startsWith('archive/')) {
+      const view = page.slice('archive/'.length) as ArchiveView;
+      if (!ARCHIVE_VIEWS.includes(view)) return null;
+      const q = (url.searchParams.get('q') ?? '').slice(0, 200);
+      return Response.json(await accountMailbox(env, who.user, id).archive(view, q), { headers: noStore });
+    }
+    // Gmail's own pages, read live with the account's sign-in.
     const refreshToken = kind === 'gmail' ? await mailbox.accountToken(id) : null;
     if (page === 'labels' && refreshToken) {
       const body = await withGmail(env, refreshToken, gmailLabels);
@@ -276,10 +308,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
       const body = await withGmail<object>(env, refreshToken, page === 'filters' ? filters : subscriptions);
       return Response.json(body, { status: 'error' in body ? 502 : 200, headers: noStore });
     }
-    const view = page.slice('archive/'.length) as ArchiveView;
-    if (!ARCHIVE_VIEWS.includes(view)) return null;
-    const q = (url.searchParams.get('q') ?? '').slice(0, 200);
-    return Response.json(await accountMailbox(env, who.user, id).archive(view, q), { headers: noStore });
+    return null;
   }
   if (url.pathname === '/api/usage' && request.method === 'GET') {
     // Every mailbox meters itself: the user's, and one per Gmail account. The page shows their sum.

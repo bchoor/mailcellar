@@ -2815,6 +2815,11 @@ export class MailboxDO extends DurableObject<Env> {
     return this.accountList().find((a) => a.id === id)?.kind ?? null;
   }
 
+  /** Each of the person's accounts' kind, by ID (the Worker keeps it a minute: index.ts kindOf). */
+  async accountKinds(): Promise<Record<string, 'gmail' | 'archive'>> {
+    return Object.fromEntries(this.accountList().map((a) => [a.id, a.kind]));
+  }
+
   /** The person's mailboxes (id, name, kind), kept in memory once read: adding and removing are the only writers. */
   private accountsKept: { id: string; email: string; kind: 'gmail' | 'archive' }[] | null = null;
   private accountList(): { id: string; email: string; kind: 'gmail' | 'archive' }[] {
