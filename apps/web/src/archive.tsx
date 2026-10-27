@@ -43,9 +43,9 @@ import {
   UserIcon,
   UsersIcon,
 } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMailbox, useMailboxCrumbs } from './mailbox';
-import { bytes, count, monthName } from './format';
+import { bytes, count, moment, monthName } from './format';
 import { MessageDrawer } from './message-drawer';
 import { daySpan, localDay, type Period, periodOf, periodSpan, periods } from './period';
 
@@ -199,7 +199,7 @@ function Chips({ chips }: { chips: Chip[] }) {
     <span className="flex max-w-56 items-center gap-1 overflow-hidden">
       {shown.map((c) => (
         // A badge centres its content, so a long name is cut on both sides: the name ends in an ellipsis instead.
-        <Badge key={c.name} variant={c.bg ? 'default' : 'secondary'} className="min-w-0 max-w-28 justify-start" style={c.bg ? { background: c.bg, color: c.fg } : undefined} title={c.name}>
+        <Badge key={c.name} variant={c.bg ? 'default' : 'secondary'} className={`min-w-0 max-w-28 justify-start ${c.bg ? 'label-chip' : ''}`} style={c.bg ? ({ '--chip-bg': c.bg, '--chip-fg': c.fg } as CSSProperties) : undefined} title={c.name}>
           <span className="truncate">{c.name}</span>
         </Badge>
       ))}
@@ -220,7 +220,7 @@ const view = (name: string, over: Record<string, unknown>): CustomViewConfig => 
   ...customViewConfigSchema.parse(over),
 });
 const TABLE = { id: 'table', kind: 'table', style: 'table', w: 6 };
-const n = { key: 'n', label: 'Messages', icon: MailIcon, value: (r: { n: number }) => r.n, format: 'rounded', aggregate: 'sum' } as const;
+const n = { key: 'n', label: 'Messages', icon: MailIcon, value: (r: { n: number }) => r.n, format: 'rounded', aggregate: 'sum', cardUnit: 'msgs' } as const;
 // Each size reads in its own unit (812 KB, 45.2 MB, 13.1 GB); the key stays for saved views.
 const size = { key: 'size_mb', label: 'Size', icon: HardDriveIcon, value: (r: { bytes: number }) => r.bytes, format: 'bytes', aggregate: 'sum' } as const;
 
@@ -304,7 +304,7 @@ function Found({ s }: { s: BodySnippet }) {
   }
   parts.push(s.text.slice(at));
   return (
-    <span className="block truncate text-xs font-normal text-muted-foreground" style={{ maxWidth: '22rem' }} title={s.text}>
+    <span className="block truncate text-xs font-normal text-muted-foreground" style={{ maxWidth: '15rem' }} title={s.text}>
       {parts}
     </span>
   );
@@ -313,7 +313,7 @@ function Found({ s }: { s: BodySnippet }) {
 /** The attachment a search's words were found in, under the subject. */
 function FoundIn({ name }: { name: string }) {
   return (
-    <span className="flex min-w-0 items-center gap-1 text-xs font-normal text-muted-foreground" style={{ maxWidth: '22rem' }} title={`Found in ${name}`}>
+    <span className="flex min-w-0 items-center gap-1 text-xs font-normal text-muted-foreground" style={{ maxWidth: '15rem' }} title={`Found in ${name}`}>
       <PaperclipIcon className="size-3 shrink-0" aria-hidden />
       <span className="truncate">In {name}</span>
     </span>
@@ -346,14 +346,14 @@ const MESSAGES: ViewDomain<MessageView> = {
   text: (r) => [r.subject, r.fromAddr, r.fromName],
   fields: [
     // The day in the person's time zone, like Period.
-    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.day, format: 'text', render: (r) => dayText(Date.parse(`${r.day}T00:00:00Z`)) },
+    { key: 'date', label: 'Date', icon: CalendarIcon, value: (r) => r.day, format: 'text', render: (r) => <time dateTime={new Date(r.ts).toISOString()} >{moment(r.ts)}</time> },
     {
       key: 'from', label: 'Sender', icon: AtSignIcon, value: (r) => r.fromAddr, format: 'text', filterable: true, groupable: true,
       // Unread: a dot and bold, as in Gmail.
       render: (r) => (
         <span className={`flex items-center gap-1.5 ${r.unread ? 'font-semibold' : ''}`}>
           <span className={`size-2 shrink-0 rounded-full ${r.unread ? 'bg-primary' : ''}`} aria-label={r.unread ? 'Unread' : undefined} />
-          <Clip text={r.fromAddr} w="13rem" />
+          <Clip text={r.fromAddr} w="12rem" />
         </span>
       ),
     },
@@ -364,7 +364,7 @@ const MESSAGES: ViewDomain<MessageView> = {
         <span className="block min-w-0">
           <span className={`flex items-center gap-1 ${r.unread ? 'font-semibold' : ''}`}>
             {r.important && <span className="text-warning" title="Important">★</span>}
-            <Clip text={r.subject} w="22rem" />
+            <Clip text={r.subject} w="15rem" />
           </span>
           {r.found && <Found s={r.found} />}
           {r.attachHit && <FoundIn name={r.attachHit} />}
@@ -381,7 +381,7 @@ const MESSAGES: ViewDomain<MessageView> = {
     { key: 'label', label: 'Labels', icon: TagIcon, value: (r) => r.chips.map((c) => c.name).join(', '), values: (r) => r.chips.map((c) => c.name), format: 'text', filterable: true, groupable: true, render: (r) => <Chips chips={r.chips} />, hideOnPhone: true },
     { key: 'size_kb', label: 'Size', icon: HardDriveIcon, value: (r) => r.size, format: 'bytes', aggregate: 'sum', filterable: true },
     // None reads as a dash, so the few messages with files stand out.
-    { key: 'attachments', label: 'Attachments', icon: PaperclipIcon, value: (r) => r.attachments, format: 'rounded', aggregate: 'sum', filterable: true, hideOnPhone: true, render: (r) => r.attachments || <span className="num text-muted-foreground">—</span> },
+    { key: 'attachments', label: 'Attachments', icon: PaperclipIcon, value: (r) => r.attachments, format: 'rounded', aggregate: 'sum', filterable: true, hideOnPhone: true, hideEmpty: true, render: (r) => r.attachments || <span className="num text-muted-foreground">—</span> },
   ],
 } as ViewDomain<MessageView>;
 
