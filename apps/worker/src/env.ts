@@ -8,6 +8,8 @@ export interface Env {
   /** The account's free-tier meters, one object for every user (quota.ts). */
   QUOTA: DurableObjectNamespace<QuotaDO>;
   ARCHIVE: R2Bucket;
+  /** Workers AI, for its document converter only (toMarkdown): attachment text for search (attachments.ts). */
+  AI: Ai;
   /** The ARCHIVE bucket's name, for its storage and request figures on the Usage page (quota.ts). */
   ARCHIVE_BUCKET: string;
   /** Copies one Gmail account, a batch a run (sync.ts). */

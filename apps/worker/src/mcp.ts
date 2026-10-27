@@ -159,6 +159,7 @@ function row(r: MessageRow, mailbox: string, map: GmailLabels) {
   return {
     mailbox, id: r.id, thread_id: r.threadId, date: date(r.ts), from: sender(r), subject: r.subject, snippet: r.snippet,
     labels: labelNames(r.labels, map), size_bytes: r.size, attachments: r.attachments,
+    ...(r.attachHit ? { found_in_attachment: r.attachHit } : {}),
   };
 }
 
@@ -210,9 +211,9 @@ const TOOLS: Tool[] = [
     name: 'search_messages',
     title: 'Search messages',
     description:
-      'Search the archive, newest first. `query` words must each appear in the subject, sender, labels or body (any order). ' +
+      'Search the archive, newest first. `query` words must each appear in the subject, sender, labels, body or a document attachment\'s text (any order). ' +
       'Narrow with from, to, label, after, before and has_attachment; with no query, lists messages under those filters. ' +
-      'A hit found only in the body carries body_excerpt, with matched words in «». ' +
+      'A hit found only in the body carries body_excerpt, with matched words in «»; one found in an attachment names the file in found_in_attachment (read it with get_attachment). ' +
       'The first page also gives total: how many messages match in all. Page with the returned cursor while has_more is true to read more of them, ' +
       'but to count or break a count down use count_messages, not paging. Read a message with get_message.',
     inputSchema: {
@@ -300,7 +301,7 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Words that must each appear in the subject, sender, labels or body.' },
+        query: { type: 'string', description: 'Words that must each appear in the subject, sender, labels, body or a document attachment\'s text.' },
         from: { type: 'string', description: 'Sender name or address contains this.' },
         to: { type: 'string', description: 'A To, Cc or Bcc address contains this, e.g. a name, an address or @domain.com.' },
         domain: { type: 'string', description: 'Sender domain, subdomains included: amazon.com also counts email.amazon.com.' },
