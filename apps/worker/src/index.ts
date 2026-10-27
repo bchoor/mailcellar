@@ -9,7 +9,7 @@ import { bodySnippets } from './search';
 import { accountQuota } from './quota';
 import { archiveApi, removeArchive } from './archive-api';
 import { accountMailbox } from './sync';
-import { countFetches, measured, meteredEnv, routeName } from './telemetry';
+import { clientError, clientPoints, meteredRequest } from './telemetry';
 
 export { MailboxDO } from './mailbox';
 export { QuotaDO } from './quota';
@@ -27,16 +27,10 @@ async function appPage(request: Request, env: Env, url: URL): Promise<Response> 
 }
 
 // Static assets serve the public page and the app's files; /api/*, /mcp and the app's pages reach
-// this handler (run_worker_first).
-countFetches();
-
+// this handler (run_worker_first). Every request is metered (telemetry.ts).
 export default {
   fetch(request, env): Promise<Response> {
-    const url = new URL(request.url);
-    // The API's requests are measured by route; the app's pages and files by kind.
-    const name = url.pathname.startsWith('/api/') || url.pathname === '/mcp' ? routeName(request.method, url.pathname) : `${request.method} page`;
-    const metered = meteredEnv(env);
-    return measured(metered, 'http', name, () => handle(request, metered, url), (r) => String(r.status));
+    return meteredRequest(request, env, (metered) => handle(request, metered, new URL(request.url)));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -57,6 +51,9 @@ async function handle(request: Request, env: Env, url: URL): Promise<Response> {
   // Cloudflare Access names the person; everything below is their own mailbox, reached only through them.
   const who = await identity(request, env);
   if (!who) return Response.json({ error: 'no_identity' }, { status: 401, headers: noStore });
+  // The pages' telemetry and caught crashes: anyone signed in, invited or not (telemetry.ts).
+  if (request.method === 'POST' && url.pathname === '/api/t') return clientPoints(request);
+  if (request.method === 'POST' && url.pathname === '/api/client-error') return clientError(request);
   // Signed in is not the same as let in: only admins and the guest list are (members.ts).
   const pass = await admit(env, who.email);
   if (!pass) return Response.json({ error: 'not_invited', email: who.email }, { status: 403, headers: noStore });

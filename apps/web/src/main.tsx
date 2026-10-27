@@ -8,6 +8,7 @@ import {
   SchedulesSection,
   type ScheduleItem,
   type ScheduleRun,
+  useLumenTelemetry,
   watchNewBuilds,
 } from '@columenlabs/lumen-ui';
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@columenlabs/lumen-ui/ui/sidebar';
@@ -26,6 +27,7 @@ import {
   Navigate,
   useLocation,
   useParams,
+  useRouterState,
 } from '@tanstack/react-router';
 import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, MailIcon, MailPlusIcon, ScrollTextIcon, ShieldCheckIcon, UserIcon, UsersIcon } from 'lucide-react';
 import type { Suite } from '@mailcellar/schema';
@@ -133,8 +135,14 @@ function useSuitePrefs(suite: Suite | undefined) {
   }, [cookie, domain]);
 }
 
+/** Set by vite.config.ts: the commit the build came from. */
+declare const __BUILD__: string;
+
 function Frame() {
   const me = useMe();
+  // Screens opened, failed requests and Web Vitals, by route template (POST /api/t; crashes go to /api/client-error).
+  const routeId = useRouterState({ select: (s) => String(s.matches[s.matches.length - 1]?.routeId ?? '') });
+  useLumenTelemetry({ app: 'mailcellar', version: __BUILD__.slice(0, 7), route: `/app${routeId === '__root__' ? '/' : routeId}` });
   useSuitePrefs(me.data?.suite);
   if (me.isPending) return null;
   if (me.error instanceof NotInvitedError) return <NotInvited email={me.error.email} />;

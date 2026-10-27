@@ -8,7 +8,7 @@
   "name": "mailcellar",
   "main": "apps/worker/src/index.ts",
   "compatibility_date": "2026-10-01",
-  // AsyncLocalStorage, so telemetry.ts can tie each SQLite statement and request to the work it belongs to.
+  // AsyncLocalStorage, so telemetry.ts (and Lumen's ops meters) can tie each call and SQLite statement to its request or work.
   "compatibility_flags": ["nodejs_als"],
   "workers_dev": false,
   "preview_urls": false,
@@ -48,8 +48,12 @@
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "mailcellar" }],
   // Workers AI's document converter (toMarkdown): attachment text for search. Documents convert at no cost.
   "ai": { "binding": "AI" },
-  // One data point per request, Durable Object call and Workflow step: time, rows, raw file ops, Gmail calls (telemetry.ts).
-  "analytics_engine_datasets": [{ "binding": "TELEMETRY", "dataset": "mailcellar_telemetry" }],
+  // Lumen's ops meters (telemetry.ts): one point per request, binding call, Durable Object method, Workflow step and
+  // browser point, in METRICS. TELEMETRY is the old per-work dataset, written alongside until METRICS is confirmed.
+  "analytics_engine_datasets": [
+    { "binding": "METRICS", "dataset": "mailcellar_requests" },
+    { "binding": "TELEMETRY", "dataset": "mailcellar_telemetry" }
+  ],
   // The private tunnel to the self-hosted email API (Settings ▸ Email, Private tunnel): a Workers VPC
   // service on the tunnel of the machine that runs it.
   "vpc_services": [{ "binding": "FREESEND", "service_id": "01a17b11-701f-7850-8e65-bd0ff4436cc0" }],

@@ -6,6 +6,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@columenlabs/lumen-ops": "0.1.126",
     "@columenlabs/lumen-people": "0.1.89",
     "@columenlabs/lumen-ui-types": "0.1.126",
     "@mailcellar/schema": "workspace:*",
