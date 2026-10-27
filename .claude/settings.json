@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Cloudflare__whoami",
+      "mcp__Cloudflare__search",
+      "mcp__Cloudflare__docs",
+      "mcp__Cloudflare__execute",
+      "mcp__github__pull_request_read",
+      "mcp__github__create_pull_request",
+      "mcp__github__update_pull_request",
+      "mcp__github__update_pull_request_branch",
+      "mcp__github__merge_pull_request",
+      "mcp__github__enable_pr_auto_merge",
+      "mcp__github__actions_list",
+      "mcp__github__actions_get",
+      "mcp__github__get_job_logs",
+      "mcp__github__get_check_run",
+      "Bash(gh pr view *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "Bash(gh run watch *)",
+      "Bash(bunx wrangler secret list *)",
+      "Bash(bunx wrangler secret put *)",
+      "Bash(bunx wrangler deployments list *)",
+      "Bash(bunx wrangler tail *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__Cloudflare__execute|mcp__github__merge_pull_request|mcp__github__enable_pr_auto_merge|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-routine.py\"",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  }
+}
