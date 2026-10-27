@@ -6,6 +6,7 @@ import {
   type ArchiveImport,
   type Me,
   domainOf,
+  ftsIds,
   ftsRowid,
   monthOf,
   type ArchiveRows,
@@ -66,6 +67,7 @@ import { BUCKET, endLaneFile, FLIGHT, freshLane, readLane, rememberCopied, saveL
 import { GmailError } from './gmail';
 import { keepImporting, type ArchiveRecord } from './import';
 import { accountQuota } from './quota';
+import { countRows, measureObject, meteredEnv } from './telemetry';
 
 /**
  * Ordered schema migrations for the mailbox's SQLite database. Each entry runs once,
@@ -392,7 +394,8 @@ export class MailboxDO extends DurableObject<Env> {
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
+    super(ctx, meteredEnv(env));
+    countRows(ctx.storage.sql);
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
       this.refillSearch();
@@ -1978,9 +1981,7 @@ export class MailboxDO extends DurableObject<Env> {
     // Each word in the envelope, the body or an attachment, as one list of IDs: SQLite seeks those rows by key
     // instead of reading the mailbox (textMatch's OR reads every row).
     for (const w of q.text ? ftsQuery(q.text).split(' ').filter(Boolean) : []) {
-      where.push(
-        `id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ? UNION SELECT printf('%x', rowid) FROM body_fts WHERE body_fts MATCH ? UNION SELECT printf('%x', rowid) FROM attach_fts WHERE attach_fts MATCH ?)`,
-      );
+      where.push(`id IN (${ftsIds('message_fts')} UNION ${ftsIds('body_fts')} UNION ${ftsIds('attach_fts')})`);
       args.push(w, w, w);
     }
     const byRcpt = !!q.to || groupBy.includes('recipient');
@@ -2218,10 +2219,7 @@ export class MailboxDO extends DurableObject<Env> {
     const envelope = words ? ftsQuery(text) : '';
     const cols = `id, thread_id AS threadId, ts, from_addr AS fromAddr, from_name AS fromName,
       subject, snippet, size, attachments, labels, state, rcpt${
-        envelope
-          ? `, attach, id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?) AS envelope,
-             id IN (SELECT printf('%x', rowid) FROM attach_fts WHERE attach_fts MATCH ?) AS inAttach`
-          : ''
+        envelope ? `, attach, id IN (${ftsIds('message_fts')}) AS envelope, id IN (${ftsIds('attach_fts')}) AS inAttach` : ''
       }`;
     const [cmp, dir] = asc ? ['>', 'ASC'] : ['<', 'DESC'];
     // A cursor is the phase, then the last row's keys in that phase's order.
@@ -2248,7 +2246,7 @@ export class MailboxDO extends DurableObject<Env> {
         at ? `(${keys.join(', ')}) ${cmp} (${keys.map(() => '?').join(', ')})` : '1',
         bounded && lo !== null && Number.isFinite(lo) ? 'ts >= ?' : '1',
         bounded && hi !== null && Number.isFinite(hi) ? 'ts < ?' : '1',
-        phaseMatch ? `id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?)` : '1',
+        phaseMatch ? `id IN (${ftsIds('message_fts')})` : '1',
         words?.where ?? '1',
         sender ? 'lower(from_addr) = ?' : '1',
         also ?? '1',
@@ -3084,6 +3082,9 @@ export function messageTest(filters: MessageFilter[], labels: { id: string; name
   return (m) => tests.every((t) => t(m));
 }
 
+// Every call, alarm included, writes its time and rows to telemetry.
+measureObject(MailboxDO);
+
 /**
  * A search box's words as a condition on messages: each word in the envelope's index, the body's or
  * the attachments' (so one word can be in the subject and another in the body). Null when there are no words.
@@ -3093,10 +3094,7 @@ export function textMatch(q: string): { where: string; args: string[] } | null {
   if (!words.length) return null;
   return {
     where: words
-      .map(
-        () =>
-          `(id IN (SELECT printf('%x', rowid) FROM message_fts WHERE message_fts MATCH ?) OR id IN (SELECT printf('%x', rowid) FROM body_fts WHERE body_fts MATCH ?) OR id IN (SELECT printf('%x', rowid) FROM attach_fts WHERE attach_fts MATCH ?))`,
-      )
+      .map(() => `(id IN (${ftsIds('message_fts')}) OR id IN (${ftsIds('body_fts')}) OR id IN (${ftsIds('attach_fts')}))`)
       .join(' AND '),
     args: words.flatMap((w) => [w, w, w]),
   };

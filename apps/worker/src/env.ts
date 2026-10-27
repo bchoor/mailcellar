@@ -45,6 +45,8 @@ export interface Env {
   SUITE_PREFS_DOMAIN?: string;
   /** Access service tokens and the person each acts as, `clientId=email` comma-separated (headless page checks). Unset: none. */
   SERVICE_IDENTITIES?: string;
+  /** Analytics Engine dataset: one data point per request, Durable Object call and Workflow step (telemetry.ts). Unbound: none written. */
+  TELEMETRY?: AnalyticsEngineDataset;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
   DEV_USER_EMAIL?: string;
 }

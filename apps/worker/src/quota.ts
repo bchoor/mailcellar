@@ -6,6 +6,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { PAID_DAILY_GUARD, paidNow, SPEND, spendCost, type SpendOverview, type SpendUse, QUOTA_METRICS, quotaStop, quotaLimits, R2_CLASS_A, R2_CLASS_B, quotaCost, quotaReset, quotaStart, type BillingPeriod, type QuotaMetric, type QuotaOverview, type QuotaPart, type QuotaPlan, isMailCellar, QUOTA_PARTS, QUOTA_REFRESH_MS, LEVEL_METRICS, levelLimits, levelCost, type LevelMetric } from '@mailcellar/schema';
 import { createPeople, doSql, sqlStore } from '@columenlabs/lumen-people';
 import type { Env } from './env';
+import { countRows, measureObject, meteredEnv } from './telemetry';
 import type { EmailCheck, Person, SyncStatus } from '@columenlabs/lumen-ui-types/people';
 import type { StoredEmail } from '@columenlabs/lumen-people';
 
@@ -410,7 +411,8 @@ export class QuotaDO extends DurableObject<Env> {
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
+    super(ctx, meteredEnv(env));
+    countRows(ctx.storage.sql);
     ctx.storage.sql.exec(`
       -- MailCellar's own count, by UTC day.
       CREATE TABLE IF NOT EXISTS usage (period TEXT NOT NULL, metric TEXT NOT NULL, value INTEGER NOT NULL, PRIMARY KEY (period, metric)) STRICT, WITHOUT ROWID;
@@ -676,3 +678,6 @@ export class QuotaDO extends DurableObject<Env> {
     };
   }
 }
+
+// Every call writes its time and rows to telemetry.
+measureObject(QuotaDO);

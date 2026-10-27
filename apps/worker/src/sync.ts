@@ -9,6 +9,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { addMonths, asUserId, GMAIL_FIRST_MONTH, mailboxName, monthBounds, monthNow, monthQuery, r2Keys, type CensusState, type IndexedMessage, type SyncParams, type SyncState, type UserId, withRecent, MAX_LANES, paidNow, SYNC_STALE_MS, type JobBy } from '@mailcellar/schema';
 import type { Env } from './env';
+import { measured, meteredEnv } from './telemetry';
 import { accountQuota, type QuotaUse } from './quota';
 import { runCommit, runLane } from './copy';
 import { runImport } from './import';
@@ -627,7 +628,25 @@ export async function runCensus(env: Env, user: UserId, account: string, runId: 
   return { more: c.month !== null && !c.error, counted };
 }
 
+/** The steps of a run, each one writing its time and use to telemetry, named by the step. */
+function measuredSteps(env: Env, step: WorkflowStep): WorkflowStep {
+  return new Proxy(step, {
+    get(target, prop, receiver) {
+      const v = Reflect.get(target, prop, receiver);
+      if (prop !== 'do' || typeof v !== 'function') return typeof v === 'function' ? v.bind(target) : v;
+      return (name: string, ...rest: unknown[]) => {
+        const callback = rest.pop() as () => Promise<unknown>;
+        return (v as (...a: unknown[]) => unknown).call(target, name, ...rest, () => measured(env, 'workflow', name, callback));
+      };
+    },
+  });
+}
+
 export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
+  constructor(ctx: ExecutionContext, env: Env) {
+    super(ctx, meteredEnv(env));
+  }
+
   /** Start the attachment pass for mail copied since attachment search; its own runs, so a slow file never holds the sync. */
   private async startAttachments(user: UserId, account: string): Promise<string | null> {
     if (!(await accountMailbox(this.env, user, account).attachTodo(1, 'new')).length) return null;
@@ -637,6 +656,7 @@ export class SyncWorkflow extends WorkflowEntrypoint<Env, SyncParams> {
   }
 
   async run(event: WorkflowEvent<SyncParams>, step: WorkflowStep): Promise<unknown> {
+    step = measuredSteps(this.env, step);
     const { names } = event.payload;
     if (names) return step.do('names', () => accountQuota(this.env).setNames(names));
     const user = asUserId(event.payload.user);

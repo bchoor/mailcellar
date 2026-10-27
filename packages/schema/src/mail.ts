@@ -48,6 +48,14 @@ export function ftsRowid(id: GmailId): string {
   return BigInt.asIntN(64, BigInt(`0x${id}`)).toString();
 }
 
+/**
+ * SQL: the message IDs an FTS5 table's MATCH ? finds, for `id IN (...)`. A rowid prints back as
+ * hex two ways: bare for a Gmail ID, zero padded to 16 for an imported ID (which can start with 0).
+ */
+export function ftsIds(table: 'message_fts' | 'body_fts' | 'attach_fts'): string {
+  return `SELECT printf(f.p, ${table}.rowid) FROM ${table}, (SELECT '%x' AS p UNION ALL SELECT '%016x') f WHERE ${table} MATCH ?`;
+}
+
 /** Sender domain, lower-cased: the Domains page groups on it. */
 export function domainOf(addr: string): string {
   const at = addr.lastIndexOf('@');
