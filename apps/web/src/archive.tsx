@@ -1,6 +1,6 @@
 // The archive pages, for the mailbox picked in the sidebar. Each reads its own rows from that
 // mailbox's rollups (/api/accounts/:id/archive/*), so no page loads every message.
-import { type FilterToken, LumenLayout, type LumenTab, LumenTabs, LumenSavedWidget, type ServerGroups, Tile, TileRow, useIsMobile, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
+import { type FilterToken, LumenLayout, type LumenTab, LumenTabs, LumenSavedWidget, readableInk, type ServerGroups, Tile, TileRow, useIsMobile, useLumenLoad, usePrefs, type LumenLoad, type ViewDomain } from '@columenlabs/lumen-ui';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@columenlabs/lumen-ui/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@columenlabs/lumen-ui/ui/tooltip';
@@ -199,7 +199,7 @@ function Chips({ chips }: { chips: Chip[] }) {
     <span className="flex max-w-56 items-center gap-1 overflow-hidden">
       {shown.map((c) => (
         // A badge centres its content, so a long name is cut on both sides: the name ends in an ellipsis instead.
-        <Badge key={c.name} variant={c.bg ? 'default' : 'secondary'} className={`min-w-0 max-w-28 justify-start ${c.bg ? 'label-chip' : ''}`} style={c.bg ? ({ '--chip-bg': c.bg, '--chip-fg': c.fg } as CSSProperties) : undefined} title={c.name}>
+        <Badge key={c.name} variant={c.bg ? 'default' : 'secondary'} className={`min-w-0 max-w-28 justify-start ${c.bg ? 'label-chip' : ''}`} style={c.bg ? ({ '--chip-bg': c.bg, '--chip-fg': readableInk(c.bg, c.fg) } as CSSProperties) : undefined} title={c.name}>
           <span className="truncate">{c.name}</span>
         </Badge>
       ))}
