@@ -49,11 +49,8 @@
   // Workers AI's document converter (toMarkdown): attachment text for search. Documents convert at no cost.
   "ai": { "binding": "AI" },
   // Lumen's ops meters (telemetry.ts): one point per request, binding call, Durable Object method, Workflow step and
-  // browser point, in METRICS. TELEMETRY is the old per-work dataset, written alongside until METRICS is confirmed.
-  "analytics_engine_datasets": [
-    { "binding": "METRICS", "dataset": "mailcellar_requests" },
-    { "binding": "TELEMETRY", "dataset": "mailcellar_telemetry" }
-  ],
+  // browser point.
+  "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "mailcellar_requests" }],
   // The private tunnel to the self-hosted email API (Settings ▸ Email, Private tunnel): a Workers VPC
   // service on the tunnel of the machine that runs it.
   "vpc_services": [{ "binding": "FREESEND", "service_id": "01a17b11-701f-7850-8e65-bd0ff4436cc0" }],

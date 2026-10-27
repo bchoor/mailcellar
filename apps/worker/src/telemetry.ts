@@ -40,27 +40,18 @@ import type { Env } from './env';
  *   GROUP BY method ORDER BY rows_read DESC
  *
  * A point holds route templates, codes and numbers: never a raw path, a query, an email or a body.
- * With no dataset bound nothing is written and Server-Timing still works. The old per-work points
- * (TELEMETRY, mailcellar_telemetry) are still written alongside until the new ones are confirmed.
+ * With no dataset bound nothing is written and Server-Timing still works.
  */
 interface Meter {
   cursors: SqlStorageCursor<Record<string, SqlStorageValue>>[];
-  r2a: number;
-  r2b: number;
-  fetches: number;
-  gmail: number;
   refused429: number;
   refused403: number;
 }
 
 const als = new AsyncLocalStorage<Meter>();
 const APP = 'mailcellar';
-const newMeter = (): Meter => ({ cursors: [], r2a: 0, r2b: 0, fetches: 0, gmail: 0, refused429: 0, refused403: 0 });
+const newMeter = (): Meter => ({ cursors: [], refused429: 0, refused403: 0 });
 const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 16);
-
-// R2 operations by billing class (Class A: writes and lists; Class B: reads), for the old points.
-const R2_CLASS_A = new Set(['put', 'list', 'createMultipartUpload', 'resumeMultipartUpload']);
-const R2_CLASS_B = new Set(['get', 'head']);
 
 /** What each binding counts as in Server-Timing; Durable Object namespaces are `do` without saying. */
 const KINDS: Record<string, string> = { ARCHIVE: 'r2', AI: 'ai', ASSETS: 'assets', SYNC: 'workflow', FREESEND: 'vpc' };
@@ -75,16 +66,14 @@ function wire(env: Env): void {
   setRequestSink(env.METRICS);
   setEventSink(env.METRICS, { app: APP, env: 'production', version });
   setClientSink(env.METRICS);
-  // Lumen's meter first (each call timed by its host), then Gmail's calls and refusals counted.
+  // Lumen's meter first (each call timed by its host), then Gmail's refusals counted.
   meterFetch();
   const timed = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const m = als.getStore();
     if (!m) return timed(input, init);
-    m.fetches++;
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const gmail = url.includes('googleapis.com/');
-    if (gmail) m.gmail++;
     const res = await timed(input, init);
     if (gmail && res.status === 429) m.refused429++;
     if (gmail && res.status === 403) m.refused403++;
@@ -97,14 +86,14 @@ const workScope = (env: Env) => ({ app: APP, requestId: newId(), env: 'productio
 
 /**
  * Runs `work` (a Durable Object method or a Workflow step) under its own meter, and writes its
- * event, its calls and its old point when it ends, however it ends.
+ * event and its calls when it ends, however it ends.
  */
 export function measured<T>(env: Env, kind: 'do' | 'workflow', name: string, work: () => T): T {
   if (als.getStore()) return work();
   const m = newMeter();
   const t0 = performance.now();
   return withRequest(workScope(env), name, () => {
-    const done = (ok: boolean) => recordWork(env, m, kind, name, ok, performance.now() - t0);
+    const done = (ok: boolean) => recordWork(m, kind, name, ok, performance.now() - t0);
     let r: T;
     try {
       r = als.run(m, work);
@@ -140,15 +129,14 @@ function rowsOf(m: Meter): [number, number] {
   return [read, written];
 }
 
-/** Called inside the work's scope: its calls, its event, Gmail's refusals and the old point. */
-function recordWork(env: Env, m: Meter, kind: string, name: string, ok: boolean, ms: number): void {
+/** Called inside the work's scope: its calls, its event and Gmail's refusals. */
+function recordWork(m: Meter, kind: string, name: string, ok: boolean, ms: number): void {
   try {
     const [read, written] = rowsOf(m);
     const calls = requestCalls().reduce((n, [, c]) => n + c.n, 0);
     flushCalls();
     meterEvent({ event: kind, code: name, ok, ms, counts: [read, written, calls] });
     refusals(m, name);
-    oldPoint(env, m, kind, name, ok ? 'ok' : 'error', ms, read, written);
   } catch {
     // Telemetry never breaks the work it measures.
   }
@@ -156,15 +144,6 @@ function recordWork(env: Env, m: Meter, kind: string, name: string, ok: boolean,
 
 function refusals(m: Meter, code: string): void {
   if (m.refused429 || m.refused403) meterEvent({ event: 'gmail.refused', code, ok: false, counts: [m.refused429, m.refused403] });
-}
-
-/** The old point (mailcellar_telemetry, #145), written alongside until the new data is confirmed. */
-function oldPoint(env: Env, m: Meter, kind: string, name: string, result: string, ms: number, read: number, written: number): void {
-  env.TELEMETRY?.writeDataPoint({
-    indexes: [kind],
-    blobs: [kind, name, result, env.APP_VERSION.slice(0, 7)],
-    doubles: [ms, read, written, m.r2a, m.r2b, m.fetches, m.gmail, m.refused429 + m.refused403],
-  });
 }
 
 /**
@@ -197,26 +176,11 @@ export function countRows(sql: SqlStorage): void {
 
 /**
  * The env every part sees (the Worker, each object, the Workflow): its bindings metered by Lumen,
- * and its raw files bucket counted by billing class for the old points. Wires the meters once.
+ * wiring the meters once.
  */
 export function meteredEnv(env: Env): Env {
   wire(env);
-  const bucket = env.ARCHIVE;
-  const archive = new Proxy(bucket, {
-    get(target, prop, receiver) {
-      const v = Reflect.get(target, prop, receiver);
-      if (typeof v !== 'function') return v;
-      return (...args: unknown[]) => {
-        const m = als.getStore();
-        if (m && typeof prop === 'string') {
-          if (R2_CLASS_A.has(prop)) m.r2a++;
-          else if (R2_CLASS_B.has(prop)) m.r2b++;
-        }
-        return Reflect.apply(v as (...a: unknown[]) => unknown, target, args);
-      };
-    },
-  });
-  return meteredBindings({ ...env, ARCHIVE: archive }, { kinds: KINDS, skip: ['METRICS', 'TELEMETRY'] });
+  return meteredBindings(env, { kinds: KINDS, skip: ['METRICS'] });
 }
 
 /** A path as a template: emails, tokens and ids folded, the app's hashed files one route. */
@@ -231,14 +195,11 @@ export function routeOf(url: URL): string {
 
 const isApi = (p: string) => p.startsWith('/api/') || p === '/mcp';
 
-/** The old point's name for a request: `GET /api/accounts/:id`, or `GET page`. */
-const oldName = (method: string, url: URL) => (isApi(url.pathname) ? `${method} ${routeOf(url)}` : `${method} page`);
-
 /**
  * The Worker's entry, metered: the request in scope while `handle` runs (its binding calls charged
- * to it), then `Server-Timing` on the answer, one `call` event per call code, the request point
- * and the old point. Telemetry never changes the answer or holds it up: every write is a few
- * in-memory calls, and a failure in it is swallowed.
+ * to it), then `Server-Timing` on the answer, one `call` event per call code and the request
+ * point. Telemetry never changes the answer or holds it up: every write is a few in-memory calls,
+ * and a failure in it is swallowed.
  */
 export async function meteredRequest(request: Request, env: Env, handle: (env: Env) => Promise<Response>): Promise<Response> {
   const url = new URL(request.url);
@@ -251,7 +212,7 @@ export async function meteredRequest(request: Request, env: Env, handle: (env: E
     als.run(m, async () => {
       const end = (res: Response | undefined) => {
         try {
-          return finish(request, url, env, m, route, scope, res, performance.now() - t0) ?? res;
+          return finish(request, url, m, route, scope, res, performance.now() - t0) ?? res;
         } catch {
           return res;
         }
@@ -271,7 +232,6 @@ export async function meteredRequest(request: Request, env: Env, handle: (env: E
 function finish(
   request: Request,
   url: URL,
-  env: Env,
   m: Meter,
   route: string,
   scope: { app: string; requestId: string; env: string; version?: string },
@@ -306,8 +266,6 @@ function finish(
     bytesOut: Number(out?.headers.get('content-length')) || 0,
     scope,
   });
-  const [read, written] = rowsOf(m);
-  oldPoint(env, m, 'http', oldName(request.method, url), String(status), ms, read, written);
   return out;
 }
 

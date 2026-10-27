@@ -47,8 +47,6 @@ export interface Env {
   SERVICE_IDENTITIES?: string;
   /** Analytics Engine dataset mailcellar_requests: Lumen's request, call, work and browser points (telemetry.ts). Unbound: none written. */
   METRICS?: AnalyticsEngineDataset;
-  /** The old per-work points (mailcellar_telemetry), written alongside METRICS until its data is confirmed. Unbound: none written. */
-  TELEMETRY?: AnalyticsEngineDataset;
   /** Local dev only (.dev.vars, with ACCESS_AUD empty): the email to act as, since wrangler dev has no Access. */
   DEV_USER_EMAIL?: string;
 }

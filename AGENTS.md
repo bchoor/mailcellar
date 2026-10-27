@@ -7,7 +7,7 @@ Gmail and mbox archive on Cloudflare Workers. Bun monorepo. MIT.
 - `apps/web`: the app (Vite, React, Lumen UI), served as static assets.
 - `apps/worker`: the Worker (`/api/*`) and `MailboxDO` (SQLite). One per user (`user:default`: accounts, schedules, usage) and one per Gmail account (`accountMailbox`: that account's archive and sync state).
 - `packages/schema`: shared IDs, key layout and API types.
-- `wrangler.jsonc`: one Worker; bindings `MAILBOX`, `QUOTA`, `SYNC`, `ARCHIVE` (R2), `ASSETS`, `METRICS` (Analytics Engine `mailcellar_requests`: Lumen's ops meters, one point per request, binding call, DO method, Workflow step and browser point, `apps/worker/src/telemetry.ts`; `TELEMETRY` is the old per-work dataset until METRICS is confirmed). No account, domain or personal values: those are Worker variables and secrets ([docs/setup.md](docs/setup.md)).
+- `wrangler.jsonc`: one Worker; bindings `MAILBOX`, `QUOTA`, `SYNC`, `ARCHIVE` (R2), `ASSETS`, `METRICS` (Analytics Engine `mailcellar_requests`: Lumen's ops meters, one point per request, binding call, DO method, Workflow step and browser point, `apps/worker/src/telemetry.ts`). No account, domain or personal values: those are Worker variables and secrets ([docs/setup.md](docs/setup.md)).
 
 ## Commands
 
