@@ -20,7 +20,7 @@ jobs:
     name: Type-check, build
     # Pull requests from forks never run on the self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, openship, linux, amd64]
+    runs-on: [self-hosted, openship, linux]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
