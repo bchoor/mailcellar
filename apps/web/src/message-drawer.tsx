@@ -108,8 +108,10 @@ export function MessageDrawer({ account, row, chips, rows, onClose }: { account:
       onClose={onClose}
       title={row?.subject || '(no subject)'}
       description={row ? `${row.fromName || row.fromAddr} · ${when(row.ts)}` : undefined}
-      defaultSize="50%"
-      maxSize="75%"
+      dock="message"
+      defaultSize="40%"
+      minSize="360px"
+      maxSize="60%"
     >
       {row && (
         <>
