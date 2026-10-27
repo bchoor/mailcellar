@@ -39,7 +39,7 @@
       "name": "@mailcellar/worker",
       "dependencies": {
         "@columenlabs/lumen-people": "0.1.89",
-        "@columenlabs/lumen-ui-types": "0.1.119",
+        "@columenlabs/lumen-ui-types": "0.1.120",
         "@mailcellar/schema": "workspace:*",
         "postal-mime": "4.1.4",
       },
@@ -1532,7 +1532,7 @@
 
     "@jridgewell/remapping/@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@mailcellar/worker/@columenlabs/lumen-ui-types": ["@columenlabs/lumen-ui-types@0.1.119", "", { "dependencies": { "@date-fns/utc": "2.1.0", "date-fns": "4.1.0", "jexl": "2.3.0", "zod": "^4.3.6" } }, "sha512-fFsXi6b/Tn1B0pLyhT27MZZxoQvARv8gCGdCE3gBNcIqdMDIIVdK0gMGzvVZ8HjS5n0rgYOAGncHKdypE07//Q=="],
+    "@mailcellar/worker/@columenlabs/lumen-ui-types": ["@columenlabs/lumen-ui-types@0.1.120", "", { "dependencies": { "@date-fns/utc": "2.1.0", "date-fns": "4.1.0", "jexl": "2.3.0", "zod": "^4.3.6" } }, "sha512-NWgEV5tPJweAniOFIcTWsLR6BaQl3e5UXqKc6jThekgA0WS8UQ0hLVvP4Yhdz54jFEcDW+SQpqSyd40vjzg/wg=="],
 
     "@reduxjs/toolkit/reselect": ["reselect@5.3.0", "", {}, "sha512-XGoLeRAVzUTcJ1qkxPQhDJyIZ5d6zzZD9nT7AEZOaaU9UbWclhycElmhO+VD5bFeLuzhPBaOV2oXC8uG35ZSpg=="],
 
