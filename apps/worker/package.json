@@ -6,8 +6,8 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@columenlabs/lumen-people": "0.1.77",
-    "@columenlabs/lumen-ui-types": "0.1.77",
+    "@columenlabs/lumen-people": "0.1.86",
+    "@columenlabs/lumen-ui-types": "0.1.86",
     "@mailcellar/schema": "workspace:*",
     "postal-mime": "4.1.4"
   },
