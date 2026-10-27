@@ -822,6 +822,7 @@ export function MessagesPage() {
       onConfigChange={onConfig}
       rowTitle={(r) => r.subject}
       onOpen={setOpened}
+      openKey={opened?.id ?? null}
       state={noMatch || undefined}
       onTokens={setTokens}
       paging={{
