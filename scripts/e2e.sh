@@ -22,9 +22,7 @@ rm -rf "$STATE"
 config() {
   mkdir -p "$1/.wrangler"
   (cd "$1" && bun -e '
-    const ts = require("typescript");
-    const { config, error } = ts.parseConfigFileTextToJson("wrangler.jsonc", await Bun.file("wrangler.jsonc").text());
-    if (error) throw new Error(ts.flattenDiagnosticMessageText(error.messageText, "\n"));
+    const config = Bun.JSONC.parse(await Bun.file("wrangler.jsonc").text());
     delete config.ai;
     delete config.vpc_services;
     delete config.$schema;
