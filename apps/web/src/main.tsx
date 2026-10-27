@@ -80,7 +80,7 @@ const opsNav = (
   <NavGroup
     label="Operations"
     items={[
-      { title: 'Backfill', to: '/backfill', icon: HourglassIcon },
+      { title: 'Copy mail', to: '/backfill', icon: HourglassIcon },
       { title: 'Cloudflare usage', to: '/usage', icon: GaugeIcon },
     ]}
   />

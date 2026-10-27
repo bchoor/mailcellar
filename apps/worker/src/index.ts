@@ -137,7 +137,7 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
   }
   if (sync && request.method === 'POST') {
     // Sync now: start a run unless one is going; answers with where the sync stands.
-    const r = await mailbox.syncAccount(sync[1], true);
+    const r = await mailbox.syncAccount(sync[1], true, 'you');
     if ('error' in r) return Response.json({ error: r.error }, { status: r.error === 'not_found' ? 404 : 409, headers: noStore });
     return Response.json({ started: r.status === 'started', sync: await mailbox.syncInfo(sync[1]) }, { headers: noStore });
   }

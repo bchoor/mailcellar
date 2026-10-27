@@ -25,6 +25,10 @@ import {
   type AccountStatus,
   type BackfillStatus,
   type BackfillJob,
+  type ActiveJob,
+  type JobRecord,
+  type JobBy,
+  JOBS_HISTORY,
   type CensusState,
   type MonthCoverage,
   type PartState,
@@ -228,6 +232,10 @@ interface StatusBook {
   indexing: string[];
   /** Indexing waits for the account's daily DO write limit. */
   indexWait: { resumesAt: string; label: string } | null;
+  /** Finished jobs, newest first (JOBS_HISTORY). Saved with the row: no write of its own. */
+  history?: JobRecord[];
+  /** Messages and bytes each open backfill job has copied, by job ID; dropped when it ends. */
+  tally?: Record<number, { copied: number; bytes: number }>;
 }
 /** Bump to rebuild every mailbox's status row from its tables once (the shape changed). */
 const STATUS_V = 2;
@@ -310,6 +318,7 @@ export class MailboxDO extends DurableObject<Env> {
     const book = this.status();
     const sql = this.ctx.storage.sql;
     for (const id of new Set(ids)) {
+      const was = book.jobs.find((j) => j.id === id);
       book.jobs = book.jobs.filter((j) => j.id !== id);
       const j = sql.exec<{ id: number; created_at: string; label: string }>(`SELECT id, created_at, label FROM jobs WHERE id = ?`, id).toArray()[0];
       if (!j) continue;
@@ -324,10 +333,44 @@ export class MailboxDO extends DurableObject<Env> {
         if (!from || r.first < from) from = r.first;
         if (r.last > to) to = r.last;
       }
-      book.jobs.push({ id: j.id, createdAt: j.created_at, label: j.label, status: jobStatus(months), months, from, to });
+      const job: BackfillJob = { id: j.id, createdAt: j.created_at, label: j.label, status: jobStatus(months), months, from, to };
+      book.jobs.push(job);
+      // A job that was going and now isn't goes into the history, with what it copied.
+      if (was && (was.status === 'queued' || was.status === 'running') && job.status !== 'queued' && job.status !== 'running') this.logBackfill(job);
     }
     book.jobs.sort((a, b) => b.id - a.id);
     book.jobs.length = Math.min(book.jobs.length, JOBS_KEPT);
+  }
+
+  /** A backfill job ended: keep it in the history, with what it copied and its first error. Saved with the status row. */
+  private logBackfill(job: BackfillJob): void {
+    const book = this.status();
+    const tally = book.tally?.[job.id] ?? { copied: 0, bytes: 0 };
+    if (book.tally) delete book.tally[job.id];
+    const error = job.months.failed
+      ? this.ctx.storage.sql.exec<{ error: string | null }>(`SELECT error FROM job_months WHERE job = ? AND state = 'failed' LIMIT 1`, job.id).toArray()[0]?.error ?? null
+      : job.months.canceled ? 'Taken out of the queue.' : null;
+    const total = Object.values(job.months).reduce((n, x) => n + x, 0);
+    this.logJob({
+      id: `backfill:${job.id}`, kind: 'backfill', label: job.label, by: 'you', startedAt: job.createdAt, endedAt: new Date().toISOString(),
+      result: job.status === 'done' ? 'done' : job.status === 'failed' ? 'failed' : 'stopped',
+      copied: tally.copied, bytes: tally.bytes, months: { done: job.months.done, failed: job.months.failed, total }, error,
+    });
+  }
+
+  /** Add a finished job to the history (in the status row; the caller saves it). */
+  private logJob(r: JobRecord): void {
+    const book = this.status();
+    book.history = [r, ...(book.history ?? []).filter((h) => h.id !== r.id)].slice(0, JOBS_HISTORY);
+    console.log(JSON.stringify({ jobDone: { id: r.id, result: r.result, copied: r.copied, ms: Date.parse(r.endedAt) - Date.parse(r.startedAt), error: r.error } }));
+  }
+
+  /** Messages a backfill job copied: kept with the status row, saved by the caller's changed(). */
+  private tallyJob(job: number, copied: number, bytes: number): void {
+    if (!copied && !bytes) return;
+    const book = this.status();
+    const t = (book.tally ??= {})[job] ?? { copied: 0, bytes: 0 };
+    book.tally[job] = { copied: t.copied + copied, bytes: t.bytes + bytes };
   }
 
   /** Months and jobs changed: update their entries and save the status row. Returns rows written. */
@@ -567,10 +610,39 @@ export class MailboxDO extends DurableObject<Env> {
         if (added) {
           next = { ...next, copied: current.copied + added.copied, bytes: current.bytes + added.bytes, recent: current.recent };
           next.recent = withRecent(next, next.updatedAt);
+          // The open sync job counts its own copies; the run's copy of it is from its start.
+          const run = current.run ?? null;
+          next.run = run && { ...run, copied: run.copied + added.copied, bytes: run.bytes + added.bytes };
         }
       }
       this.putMeta('sync', next);
       return true;
+    });
+  }
+
+  /** What the sync job is doing now, in memory only: shown on the Sync card, never written. */
+  private step: { runId: string; text: string } | null = null;
+
+  /** A sync run says what it is doing. Costs no row. */
+  async runStep(runId: string, text: string): Promise<void> {
+    this.step = { runId, text };
+  }
+
+  /**
+   * The sync job ended (done, failed, or stopped): it goes into the history and the sync state
+   * closes it. Two rows (the sync state and the status row), once a job.
+   */
+  async endRun(runId: string, result: JobRecord['result'], error: string | null): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const main = this.meta<SyncState>('sync');
+      if (!main || main.runId !== runId || !main.run) return;
+      const run = main.run;
+      this.logJob({
+        id: `sync:${run.startedAt}`, kind: 'sync', label: run.by === 'you' ? 'Sync now' : 'Scheduled sync', by: run.by,
+        startedAt: run.startedAt, endedAt: new Date().toISOString(), result, copied: run.copied, bytes: run.bytes, error,
+      });
+      this.step = null;
+      this.count({ do_rows_written: this.putMeta('sync', { ...main, run: null }) + this.saveStatus() });
     });
   }
 
@@ -989,6 +1061,7 @@ export class MailboxDO extends DurableObject<Env> {
       if (main && added.copied) written += this.putMeta('sync', { ...main, copied: main.copied + added.copied, bytes: main.bytes + added.bytes, updatedAt: new Date().toISOString() });
       this.live.delete(part.month);
       this.changedMonths();
+      this.tallyJob(part.job, added.copied, added.bytes);
       written += this.changed([part.month], [part.job]);
       this.count({ do_rows_written: written });
     });
@@ -1313,6 +1386,7 @@ export class MailboxDO extends DurableObject<Env> {
         written += this.putMeta('sync', { ...next, recent: withRecent(next, at) });
       }
       this.sample(Date.now());
+      this.tallyJob(p.job, added, p.bytes);
       written += this.changed(new Set([...running, ...Object.keys(p.copied)]), [p.job]);
       this.count({ do_rows_written: written });
     });
@@ -1420,11 +1494,16 @@ export class MailboxDO extends DurableObject<Env> {
     indexed: number;
     index: { status: 'indexing' | 'waiting' | 'idle'; pausedFor?: string; resumesAt?: string };
     sizes: { at: string; bytes: number }[];
+    running: ActiveJob[];
+    history: JobRecord[];
   }> {
     const book = this.status();
     const wait = book.indexWait && Date.parse(book.indexWait.resumesAt) > Date.now() ? book.indexWait : null;
+    const sync = await this.syncView();
     return {
-      sync: await this.syncView(),
+      sync,
+      running: this.runningJobs(sync),
+      history: structuredClone(book.history ?? []),
       census: structuredClone(book.census),
       months: await this.coverageMonths(),
       jobs: structuredClone(book.jobs),
@@ -1434,6 +1513,39 @@ export class MailboxDO extends DurableObject<Env> {
         ? { status: 'waiting', pausedFor: wait.label, resumesAt: wait.resumesAt }
         : { status: book.indexing.length ? 'indexing' : 'idle' },
     };
+  }
+
+  /**
+   * Jobs going now, from the sync state, the status row and memory (no row): the open sync job
+   * with what it is doing, then each backfill still queued or copying, newest first.
+   */
+  private runningJobs(sync: SyncState | null): ActiveJob[] {
+    const out: ActiveJob[] = [];
+    const status = syncStatus(sync);
+    if (sync?.run && (status === 'running' || status === 'waiting')) {
+      const run = sync.run;
+      out.push({
+        id: `sync:${run.startedAt}`, kind: 'sync', label: run.by === 'you' ? 'Sync now' : 'Scheduled sync', by: run.by, startedAt: run.startedAt,
+        step: this.step?.runId === sync.runId ? this.step.text : null, copied: run.copied, resumesAt: status === 'waiting' ? sync.resumesAt : null,
+      });
+    }
+    const book = this.status();
+    const lanes = this.lanes();
+    for (const j of book.jobs) {
+      if (j.status !== 'queued' && j.status !== 'running') continue;
+      // Months its lanes are copying now, with what they copied that hasn't landed yet.
+      const copying = [...lanes].filter(([, job]) => job === j.id).map(([month]) => month).sort().reverse();
+      const unlanded = copying.reduce((n, m) => n + (this.live.get(m)?.copied ?? 0), 0);
+      const name = (m: string) => new Date(`${m}-01T00:00:00Z`).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+      const total = Object.values(j.months).reduce((n, x) => n + x, 0);
+      out.push({
+        id: `backfill:${j.id}`, kind: 'backfill', label: j.label, by: 'you', startedAt: j.createdAt,
+        step: copying.length ? `Copying ${copying.map(name).join(', ')}` : 'Queued: starts when a lane is free',
+        copied: (book.tally?.[j.id]?.copied ?? 0) + unlanded,
+        months: { done: j.months.done, failed: j.months.failed, total },
+      });
+    }
+    return out;
   }
 
   /** A lane not heard from since this object started (its run died, or the object restarted): its progress from its R2 file. */
@@ -2291,7 +2403,7 @@ export class MailboxDO extends DurableObject<Env> {
         let failed = 0;
         for (const id of ids) {
           try {
-            const r = await this.syncAccount(id, false);
+            const r = await this.syncAccount(id, false, 'schedule');
             if ('error' in r) failed++;
             else if (r.status === 'started') started++;
           } catch (e) {
@@ -2356,7 +2468,8 @@ export class MailboxDO extends DurableObject<Env> {
 
   private async keepRunning(user: UserId, account: string, state: SyncState | null, paused: boolean): Promise<SyncState | null> {
     if (paused || !state) return state;
-    const ownWork = state.phase !== 'live' || state.pending.length > 0 || state.basinQueue.length > 0;
+    // An open sync job is its own work too: a run that died with one open starts again and closes it.
+    const ownWork = state.phase !== 'live' || state.pending.length > 0 || state.basinQueue.length > 0 || !!state.run;
     if (state.lanes?.length) await launchLanes(this.env, user, account);
     if ((ownWork && syncStatus(state) === 'running' && (await runDied(this.env, state.runId))) || (await this.pauseLifted(state))) {
       await syncDeps.start(this.env, user, account);
@@ -2398,6 +2511,8 @@ export class MailboxDO extends DurableObject<Env> {
               jobs: v.jobs,
               totals: { indexed: v.indexed },
               sizes: v.sizes,
+              running: v.running,
+              history: v.history,
             } satisfies AccountStatus;
           }),
         )
@@ -2452,8 +2567,9 @@ export class MailboxDO extends DurableObject<Env> {
   /**
    * Start syncing an account unless a run is going or waiting to resume. Sync now (`manual`)
    * also restarts a sync that stopped on an error; the schedule leaves those for the person.
+   * `by` opens a sync job for the history (Sync now, the schedule); other callers start runs only.
    */
-  async syncAccount(account: string, manual: boolean): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'paused' }> {
+  async syncAccount(account: string, manual: boolean, by?: JobBy): Promise<{ status: 'started' | SyncSummary['status'] } | { error: 'not_found' | 'paused' }> {
     const user = this.userId();
     if (!user || !this.isGmail(account)) return { error: 'not_found' };
     if (this.isPaused()) return { error: 'paused' };
@@ -2462,7 +2578,7 @@ export class MailboxDO extends DurableObject<Env> {
     const dead = status === 'running' && (await runDied(this.env, state!.runId));
     const lifted = status === 'waiting' && (await this.pauseLifted(state!));
     if ((status === 'running' && !dead) || (status === 'waiting' && !lifted) || (status === 'stopped' && !manual)) return { status };
-    await syncDeps.start(this.env, user, account);
+    await syncDeps.start(this.env, user, account, by);
     await this.watch();
     return { status: 'started' };
   }

@@ -43,7 +43,58 @@ export interface SyncState {
   recent?: { at: string; copied: number }[];
   /** Backfill months being copied in parallel now, each by its own lane (a chain of runs). */
   lanes?: string[];
+  /** The sync job going now (Sync now or the schedule), from its start to its end across its chain of runs. */
+  run?: SyncRun | null;
 }
+
+/** Who started a job: the person (Sync now, a backfill, a retry) or the schedule. */
+export type JobBy = 'you' | 'schedule';
+
+/** A sync job in progress, kept in the sync state; written to the job history when it ends. */
+export interface SyncRun {
+  startedAt: string;
+  by: JobBy;
+  /** Messages this job has copied so far. */
+  copied: number;
+  bytes: number;
+}
+
+/** A job going now, as the Sync card shows it. */
+export interface ActiveJob {
+  /** `sync:<startedAt>` or `backfill:<job id>`. */
+  id: string;
+  kind: 'sync' | 'backfill';
+  label: string;
+  by: JobBy | null;
+  startedAt: string;
+  /** What it is doing now, in words; null when not known (the mailbox restarted since it said). */
+  step: string | null;
+  /** Messages copied so far. */
+  copied: number;
+  /** A backfill's months: done, failed, and all of them. */
+  months?: { done: number; failed: number; total: number };
+  /** Waiting until this time (a daily limit, or Gmail asked to slow down). */
+  resumesAt?: string | null;
+}
+
+/** A finished job, kept in the mailbox's status row (JOBS_HISTORY newest). */
+export interface JobRecord {
+  id: string;
+  kind: 'sync' | 'backfill';
+  label: string;
+  by: JobBy | null;
+  startedAt: string;
+  endedAt: string;
+  result: 'done' | 'failed' | 'stopped';
+  copied: number;
+  bytes: number;
+  months?: { done: number; failed: number; total: number };
+  /** Why it failed or stopped. */
+  error: string | null;
+}
+
+/** Finished jobs each mailbox keeps. */
+export const JOBS_HISTORY = 30;
 
 /**
  * Backfill months copied at once, each by its own chain of runs. They share one Gmail rate, so
@@ -142,8 +193,8 @@ export function syncStatus(s: SyncState | null, now = Date.now()): SyncStatus {
   if (!s) return 'idle';
   if (s.phase === 'error') return 'stopped';
   if (s.resumesAt && Date.parse(s.resumesAt) > now) return 'waiting';
-  // Live with nothing left to copy means the last run finished.
-  const busy = s.phase !== 'live' || s.pending.length > 0 || s.basinQueue.length > 0 || !!s.lanes?.length;
+  // Live with nothing left to copy and no sync job open means the last run finished.
+  const busy = s.phase !== 'live' || s.pending.length > 0 || s.basinQueue.length > 0 || !!s.lanes?.length || !!s.run;
   return busy && now - Date.parse(s.updatedAt) < SYNC_STALE_MS ? 'running' : 'idle';
 }
 
@@ -310,6 +361,10 @@ export interface AccountStatus extends AccountCoverage {
   totals: { indexed: number };
   /** Size copied (as Gmail counts it), a point a minute over the last hour, while copying; empty after a restart until copying moves. */
   sizes: { at: string; bytes: number }[];
+  /** Jobs going now: the sync job, then backfills, newest first. */
+  running: ActiveJob[];
+  /** Finished jobs, newest first. */
+  history: JobRecord[];
 }
 
 /**
