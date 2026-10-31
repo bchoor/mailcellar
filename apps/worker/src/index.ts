@@ -1,6 +1,7 @@
 import { ARCHIVE_VIEWS, MESSAGE_PAGE_SIZES, MESSAGE_GROUPS, MESSAGE_SORTS, messageFilters, type MessageGroupBy, type MessageSort, monthNow, type ArchiveView, type Health, type Suite, type UsageDay } from '@mailcellar/schema';
 import { callback, connect, identity, revoke, testAccount, type Identity } from './auth';
 import { filters, gmailLabels, subscriptions, withGmail } from './gmail-settings';
+import { imageFetch, imageSenderOf } from './images';
 import type { Env } from './env';
 import { attachment, openMessage } from './message';
 import { admit, peopleApi } from './members';
@@ -57,6 +58,8 @@ async function handle(request: Request, env: Env, url: URL): Promise<Response> {
   // Signed in is not the same as let in: only admins and the guest list are (members.ts).
   const pass = await admit(env, who.email);
   if (!pass) return Response.json({ error: 'not_invited', email: who.email }, { status: 403, headers: noStore });
+  // An open message's remote images, fetched by the Worker (images.ts); no Durable Object call.
+  if (request.method === 'GET' && url.pathname === '/api/img') return imageFetch(url);
   const people = await peopleApi(request, env, url, who.email, pass.admin);
   if (people) return people;
   if (request.method === 'GET') {
@@ -342,6 +345,15 @@ async function mailboxApi(request: Request, env: Env, url: URL, who: Identity, a
   }
   if (url.pathname === '/api/schedules' && request.method === 'GET')
     return Response.json(await mailbox.schedules(), { headers: noStore });
+  if (url.pathname === '/api/image-senders' && request.method === 'GET') return Response.json(await mailbox.imageSenders(), { headers: noStore });
+  const imageSender = url.pathname.match(/^\/api\/image-senders\/([a-z]{1,10})\/([^/]{1,800})$/);
+  if (imageSender && (request.method === 'PUT' || request.method === 'DELETE')) {
+    const rule = imageSenderOf(imageSender[1], imageSender[2]);
+    if (!rule) return Response.json({ error: 'bad_sender' }, { status: 400, headers: noStore });
+    if (request.method === 'DELETE') await mailbox.removeImageSender(rule.kind, rule.value);
+    else if (!(await mailbox.addImageSender(rule.kind, rule.value))) return Response.json({ error: 'list_full' }, { status: 409, headers: noStore });
+    return Response.json(await mailbox.imageSenders(), { headers: noStore });
+  }
   const schedule = url.pathname.match(/^\/api\/schedules\/([a-z-]{1,40})$/);
   if (schedule && request.method === 'PUT') {
     const text = await request.text();

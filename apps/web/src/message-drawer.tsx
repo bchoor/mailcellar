@@ -1,19 +1,23 @@
 // A message opened from the Messages page, in the kit's drawer. Headers and body come from the
 // message's raw file (/api/accounts/:id/messages/:mid); the row it opened from fills the title
 // while that loads. The body is drawn in a frame that runs no scripts and loads no remote images
-// until the person asks.
+// until the person asks, or the sender is on their list (image-senders.tsx). Shown images come
+// through the app's own fetcher (/api/img), so the sender never sees the reader.
 import { DrawerSection, LumenDrawer, usePrefs } from '@columenlabs/lumen-ui';
+import { ButtonGroup } from '@columenlabs/lumen-ui/ui/button-group';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@columenlabs/lumen-ui/ui/dropdown-menu';
 import { Badge } from '@columenlabs/lumen-ui/ui/badge';
 import { Button } from '@columenlabs/lumen-ui/ui/button';
 import { Skeleton } from '@columenlabs/lumen-ui/ui/skeleton';
-import { type MailAddress, type MessageAttachment, type MessageDetail, type MessageRow, monthOf } from '@mailcellar/schema';
+import { imageRule, type MailAddress, type MessageAttachment, type MessageDetail, type MessageRow, monthOf, SHARED_MAIL_DOMAINS } from '@mailcellar/schema';
 import { useQuery } from '@tanstack/react-query';
 import { ToggleGroup, ToggleGroupItem } from '@columenlabs/lumen-ui/ui/toggle-group';
-import { DownloadIcon, ImageIcon, LayoutGridIcon, ListIcon, MailIcon, PaperclipIcon, UserIcon } from 'lucide-react';
+import { ChevronDownIcon, DownloadIcon, ImageIcon, ImageOffIcon, LayoutGridIcon, ListIcon, MailIcon, PaperclipIcon, ShieldAlertIcon, UserIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { type Chip } from './archive';
 import { bytes } from './format';
 import { AttachmentGrid, AttachmentPreview, kindIcon, kindOf } from './attachment-preview';
+import { useImageSenderChange, useImageSenders } from './image-senders';
 
 const who = (a: MailAddress) => (a.name && a.name !== a.address ? `${a.name} <${a.address}>` : a.address);
 const list = (as: MailAddress[]) => as.map(who).join(', ');
@@ -21,11 +25,23 @@ const list = (as: MailAddress[]) => as.map(who).join(', ');
 /** An image, background or stylesheet the HTML would fetch from the web. */
 const REMOTE = /(?:src|background|srcset)\s*=\s*["']?\s*(?:https?:)?\/\/|url\(\s*["']?\s*(?:https?:)?\/\//i;
 
-/** The message's HTML as its own document: no scripts (sandbox), no remote loads unless `images`. */
+/** A remote image's address through the app's own fetcher. Attribute text may still hold `&amp;`. */
+const viaFetcher = (u: string) => `${location.origin}/api/img?u=${encodeURIComponent(u.replace(/&amp;/gi, '&'))}`;
+
+/** The HTML with every remote image pointed at the fetcher; `srcset` goes, so each image's `src` stands. */
+function proxied(html: string) {
+  return html
+    .replace(/\ssrcset\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(\s(?:src|background)\s*=\s*)(["']?)\s*((?:https?:)?\/\/[^"'\s>]+)/gi, (_m, a: string, q: string, u: string) => `${a}${q}${viaFetcher(u)}`)
+    .replace(/url\(\s*(&quot;|["']?)\s*((?:https?:)?\/\/[^"')\s&]+(?:&amp;[^"')\s&]+)*)/gi, (_m, q: string, u: string) => `url(${q}${viaFetcher(u)}`);
+}
+
+/** The message's HTML as its own document: no scripts (sandbox), no remote loads; with `images`, only the app's fetcher. */
 function frameDoc(html: string, images: boolean) {
-  const csp = `default-src 'none'; style-src 'unsafe-inline'; font-src data:; img-src data:${images ? ' https: http:' : ''}`;
+  const csp = `default-src 'none'; style-src 'unsafe-inline'; font-src data:; img-src data:${images ? " 'self'" : ''}`;
   // A refresh tag would load a page into the frame; the CSP above doesn't cover navigation.
-  const body = html.replace(/<meta[^>]+http-equiv\s*=\s*["']?refresh[^>]*>/gi, '');
+  const page = html.replace(/<meta[^>]+http-equiv\s*=\s*["']?refresh[^>]*>/gi, '');
+  const body = images ? proxied(page) : page;
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="referrer" content="no-referrer"><base target="_blank"><style>html,body{margin:0;background:#fff;color:#111}body{padding:16px;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}img{max-width:100%;height:auto}pre{white-space:pre-wrap}</style></head><body>${body}</body></html>`;
 }
 
@@ -115,6 +131,12 @@ export function MessageDrawer({ account, row, chips, rows, onClose }: { account:
     new Intl.DateTimeFormat('en-US', { timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ts));
   const from = d?.from ? who(d.from) : row ? (row.fromName ? `${row.fromName} <${row.fromAddr}>` : row.fromAddr) : '';
   const remote = !!d?.html && REMOTE.test(d.html);
+  const senders = useImageSenders();
+  const { add, remove } = useImageSenderChange();
+  const sender = d?.sender ?? null;
+  const rule = imageRule(senders.data ?? [], sender);
+  const shown = images || !!rule;
+  const ruleKind = rule && sender && rule === sender.address ? 'address' : 'domain';
   const file = (a: MessageAttachment) => `/api/accounts/${account}/messages/${row?.id}/attachments/${a.index}?month=${month}`;
   const download = file;
   const view = (a: MessageAttachment) => `${file(a)}&view=1`;
@@ -163,12 +185,46 @@ export function MessageDrawer({ account, row, chips, rows, onClose }: { account:
             icon={MailIcon}
             title="Message"
             defaultOpen
-            hint={remote && !images ? 'Images blocked' : null}
+            hint={!remote ? null : rule ? `Allowed: ${rule}` : !images ? 'Images blocked' : null}
             actions={
-              remote && !images ? (
-                <Button size="sm" variant="outline" onClick={() => setImages(true)}>
-                  <ImageIcon /> Show images
+              !remote ? undefined : rule ? (
+                <Button size="icon" variant="ghost" className="size-7" aria-label={`Stop showing images from ${rule}`} title={`Stop showing images from ${rule}`} onClick={() => remove(ruleKind, rule)}>
+                  <ImageOffIcon />
                 </Button>
+              ) : !images ? (
+                <ButtonGroup>
+                  <Button size="sm" variant="outline" onClick={() => setImages(true)}>
+                    <ImageIcon /> Show images
+                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button size="sm" variant="outline" aria-label="More ways to show images" className="px-1.5">
+                        <ChevronDownIcon />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-2rem)]">
+                      <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Always show images from</DropdownMenuLabel>
+                      {sender && !SHARED_MAIL_DOMAINS.has(sender.org) && (
+                        <DropdownMenuItem disabled={!sender.verified || !senders.isSuccess} onSelect={() => add('domain', sender.org)}>
+                          <span className="truncate" title={sender.org}>{sender.org}</span>
+                        </DropdownMenuItem>
+                      )}
+                      {sender && (
+                        <DropdownMenuItem disabled={!sender.verified || !senders.isSuccess} onSelect={() => add('address', sender.address)}>
+                          <span className="truncate" title={sender.address}>{sender.address}</span>
+                        </DropdownMenuItem>
+                      )}
+                      {!sender?.verified && (
+                        <>
+                          {sender && <DropdownMenuSeparator />}
+                          <p className="flex gap-1.5 px-2 py-1.5 text-xs text-muted-foreground">
+                            <ShieldAlertIcon className="size-3.5 shrink-0" /> Gmail didn't confirm this sender, so images show for this message only.
+                          </p>
+                        </>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </ButtonGroup>
               ) : undefined
             }
           >
@@ -181,7 +237,7 @@ export function MessageDrawer({ account, row, chips, rows, onClose }: { account:
             ) : detail.isError ? (
               <p className="text-sm text-destructive">{detail.error.message}</p>
             ) : d?.html ? (
-              <HtmlBody key={`${row.id}-${images}`} html={d.html} images={images} />
+              <HtmlBody key={`${row.id}-${shown}`} html={d.html} images={shown} />
             ) : d?.text ? (
               <pre className="whitespace-pre-wrap break-words font-sans text-sm">{d.text}</pre>
             ) : (

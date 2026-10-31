@@ -86,3 +86,4 @@ export * from './auth';
 export * from './sync';
 export * from './gmail';
 export * from './quota';
+export * from './images';

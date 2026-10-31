@@ -29,13 +29,14 @@ import {
   useParams,
   useRouterState,
 } from '@tanstack/react-router';
-import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, MailIcon, MailPlusIcon, ScrollTextIcon, ShieldCheckIcon, UserIcon, UsersIcon } from 'lucide-react';
+import { CalendarClockIcon, CircleHelpIcon, GaugeIcon, HourglassIcon, ImageIcon, MailIcon, MailPlusIcon, ScrollTextIcon, ShieldCheckIcon, UserIcon, UsersIcon } from 'lucide-react';
 import type { Suite } from '@mailcellar/schema';
 import { type ReactNode, StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { EmailSettings, InvitePage, NotInvited, PEOPLE_SECTIONS, PeoplePage } from './admin';
 import { forgetOnSignOut, keepFresh, persistOptions } from './cache';
 import { AccountsSettings, NoIdentity, NotInvitedError, SettingsFromUrl, useMe } from './auth';
+import { ImageSettings } from './image-senders';
 import { MessagesPage, OverviewPage, PanesPage } from './archive';
 import { FiltersPage, SubscriptionsPage } from './gmail-pages';
 import { MAILBOX_PAGES, MailboxNav, mailboxPath, PANE_PAGES } from './mailbox';
@@ -162,6 +163,7 @@ function Frame() {
       statusEnd={<SyncStatus />}
       settings={[
         { id: 'accounts', title: 'Accounts', icon: UserIcon, description: 'Gmail accounts and mbox archives MailCellar keeps', content: <AccountsSettings /> },
+        { id: 'images', title: 'Images', icon: ImageIcon, description: 'Senders whose images show without asking', content: <ImageSettings /> },
         { id: 'schedules', title: 'Schedules', icon: CalendarClockIcon, description: 'Jobs that run automatically', content: <SchedulesSettings /> },
         ...(me.data?.admin ? [{ id: 'email', title: 'Email', icon: MailIcon, description: 'Where invite emails are sent from', content: <EmailSettings /> }] : []),
       ]}
