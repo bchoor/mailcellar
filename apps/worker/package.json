@@ -8,7 +8,7 @@
   "dependencies": {
     "@columenlabs/lumen-ops": "0.1.126",
     "@columenlabs/lumen-people": "0.1.89",
-    "@columenlabs/lumen-ui-types": "0.1.129",
+    "@columenlabs/lumen-ui-types": "0.1.168",
     "@mailcellar/schema": "workspace:*",
     "postal-mime": "4.1.4"
   },
