@@ -225,6 +225,13 @@ const today = () => new Date().toISOString().slice(0, 10);
 const attachIndexed = (attach: string | null) => !!attach && attach.startsWith('[') && attach !== '[]';
 /** How often the watchdog alarm checks on work in progress (MailboxDO.recover). */
 const WATCH_MS = 5 * 60_000;
+/** How long after a failed alarm it tries again (an hour: a used-up daily allowance can take that long to matter less). */
+const ALARM_RETRY_MS = 60 * 60_000;
+/**
+ * An alarm that is missing, or set more than a minute in the past, is not going to fire: once
+ * Cloudflare gives up retrying a failed alarm, getAlarm can still return its old time.
+ */
+const alarmStuck = (at: number | null) => at === null || at < Date.now() - 60_000;
 
 /** What one ingest call wrote: rows written is what the Free plan's 100k a day counts. */
 export interface IngestResult {
@@ -490,7 +497,7 @@ export class MailboxDO extends DurableObject<Env> {
       // watchdog looks within WATCH_MS, and keeps looking while something is.
       if (this.userId()) {
         const at = await ctx.storage.getAlarm();
-        if (at === null || at > Date.now() + WATCH_MS) await ctx.storage.setAlarm(Date.now() + WATCH_MS);
+        if (alarmStuck(at) || (at !== null && at > Date.now() + WATCH_MS)) await ctx.storage.setAlarm(Date.now() + WATCH_MS);
       }
     });
     this.catchUp();
@@ -2716,8 +2723,26 @@ export class MailboxDO extends DurableObject<Env> {
     return busy;
   }
 
-  /** Gmail sync's scheduled run: start a sync for each account that isn't syncing already. */
+  /**
+   * Gmail sync's scheduled run. Never throws: a thrown alarm is retried a few times within
+   * minutes, then dropped, and nothing sets it again (the account's Free allowance for rows read
+   * ran out 2026-10-29 and sync stopped for days). A failed run tries again in an hour instead.
+   */
   async alarm(): Promise<void> {
+    try {
+      await this.runAlarm();
+    } catch (e) {
+      console.error('alarm', e);
+      try {
+        await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
+      } catch (e2) {
+        console.error('alarm retry', e2);
+      }
+    }
+  }
+
+  /** Start a sync for each account that isn't syncing already, when a slot is due. */
+  private async runAlarm(): Promise<void> {
     let retry = false;
     for (const [key, params] of await this.ctx.storage.list<SyncParams>({ prefix: 'launch:' })) {
       const id = key.slice('launch:'.length);
@@ -3197,8 +3222,8 @@ export class MailboxDO extends DurableObject<Env> {
   /** The Access user (passed in by the Worker) and the accounts the archive keeps. Never includes tokens. */
   async me(email: string): Promise<Me> {
     const sql = this.ctx.storage.sql;
-    // Mailboxes from before schedules ran have no alarm yet; the first visit sets it.
-    if ((await this.ctx.storage.getAlarm()) === null) await this.armSync();
+    // No alarm (a mailbox from before schedules), or one that will never fire: set it again.
+    if (alarmStuck(await this.ctx.storage.getAlarm())) await this.armSync();
     const user = this.userId();
     const rows = sql
       .exec<{ id: string; email: string; scopes: string; added_at: string; tested_at: string; test_error: string | null; kind: 'gmail' | 'archive'; archive: string | null }>(
