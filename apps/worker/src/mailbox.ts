@@ -63,6 +63,9 @@ import {
   type MessageGroupBy,
   type MessageGroups,
   MESSAGE_SORTS,
+  IMAGE_SENDERS_MAX,
+  type ImageSender,
+  type ImageSenderKind,
 } from '@mailcellar/schema';
 import type { Env } from './env';
 import { accountMailbox, accessToken, INDEX_CHUNK, INDEX_ROWS, launchLanes, RUN_COST, runDied, syncDeps } from './sync';
@@ -194,6 +197,12 @@ export const MIGRATIONS: readonly string[] = [
   // own labels. Ingest keeps it from now on; catchUp counts mail already in, a few months a step.
   `ALTER TABLE months ADD COLUMN labelled INTEGER NOT NULL DEFAULT 0;
    INSERT INTO meta (key, value) VALUES ('labelled_fill', 'true') ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
+  // 20: senders whose remote images show without asking (Bikram, 2026-10-31): a domain or one
+  // address, lower case. Kept in the person's own mailbox only.
+  `CREATE TABLE IF NOT EXISTS image_senders (
+     kind TEXT NOT NULL CHECK (kind IN ('domain', 'address')), value TEXT NOT NULL, added_at TEXT NOT NULL,
+     PRIMARY KEY (kind, value)
+   ) STRICT, WITHOUT ROWID;`,
 ];
 
 /** Months a step of the labelled count covers (MailboxDO.fillLabelled): a few hundred ms at most. */
@@ -2628,6 +2637,27 @@ export class MailboxDO extends DurableObject<Env> {
     } else if (f.key === 'domain') n = sum('domains', 'domain', [...new Set(f.values.map((v) => v.toLowerCase()))]);
     if (n === null) return null;
     return f.not ? Math.max(0, all - n) : Math.min(n, all);
+  }
+
+  /** Senders whose remote images show without asking, newest first. */
+  async imageSenders(): Promise<ImageSender[]> {
+    return this.ctx.storage.sql
+      .exec<{ kind: ImageSenderKind; value: string; added_at: string }>(`SELECT kind, value, added_at FROM image_senders ORDER BY added_at DESC LIMIT ?`, IMAGE_SENDERS_MAX)
+      .toArray()
+      .map((r) => ({ kind: r.kind, value: r.value, addedAt: r.added_at }));
+  }
+
+  /** Adds a rule (already cleaned); false when the list is full. */
+  async addImageSender(kind: ImageSenderKind, value: string): Promise<boolean> {
+    const sql = this.ctx.storage.sql;
+    const n = sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM image_senders`).one().n;
+    if (n >= IMAGE_SENDERS_MAX) return false;
+    sql.exec(`INSERT INTO image_senders (kind, value, added_at) VALUES (?, ?, ?) ON CONFLICT (kind, value) DO NOTHING`, kind, value, new Date().toISOString());
+    return true;
+  }
+
+  async removeImageSender(kind: ImageSenderKind, value: string): Promise<void> {
+    this.ctx.storage.sql.exec(`DELETE FROM image_senders WHERE kind = ? AND value = ?`, kind, value);
   }
 
   /** The schedules with the person's changes applied, when Gmail sync next runs, and how it last went. */

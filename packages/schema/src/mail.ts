@@ -1,6 +1,7 @@
 // Shapes of indexed mail, shared by the sync path, the mailbox DO and the app.
 // The DO keeps only what the archive pages need (S4: 635 bytes a message);
 // bodies and headers live in raw files (R2 objects).
+import type { MessageSender } from './images';
 import type { GmailId } from './index';
 
 /** One message as the mailbox DO indexes it. */
@@ -200,4 +201,6 @@ export interface MessageDetail {
   html: string | null;
   text: string | null;
   attachments: MessageAttachment[];
+  /** Who sent it and whether Gmail confirmed it; absent from builds before it. */
+  sender?: MessageSender | null;
 }

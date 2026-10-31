@@ -2,7 +2,7 @@
 // which bytes; only those bytes are read, then parsed in its mailbox's Durable Object, which keeps
 // the last message it parsed: a burst of requests for one message (its attachments' previews)
 // parses it once. No Gmail call.
-import { mailboxName, r2Keys, type MailAddress, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
+import { mailboxName, orgDomain, r2Keys, type MailAddress, type MessageSender, type MessageAttachment, type MessageDetail, type UserId } from '@mailcellar/schema';
 import PostalMime, { type Address, type Attachment, type Email } from 'postal-mime';
 import type { Env } from './env';
 import { htmlToText } from './gmail';
@@ -66,6 +66,35 @@ export async function openMessage(env: Env, user: UserId, account: string, id: s
   return mailbox(env, user, account).messagePart(user, account, id, { part: 'detail' }) as Promise<MessageDetail | null>;
 }
 
+/**
+ * Who sent the message, and whether Gmail confirmed it when the mail arrived. Only the top
+ * Authentication-Results header counts, and only Gmail's (mx.google.com): Gmail writes it above
+ * every header the sender wrote, so a lower one could be forged. Confirmed means DMARC passed for
+ * the From domain, or a passing DKIM signature from the From's registered domain. SPF alone checks
+ * the envelope, not the From the reader sees, so it doesn't count.
+ */
+export function senderOf(mail: Email): MessageSender | null {
+  const address = (mail.from?.address ?? '').trim().toLowerCase();
+  const at = address.lastIndexOf('@');
+  if (at <= 0) return null;
+  const domain = address.slice(at + 1).replace(/\.$/, '');
+  const org = orgDomain(domain);
+  const top = mail.headers.find((h) => h.key === 'authentication-results')?.value ?? '';
+  const [server, ...results] = top.replace(/\([^)]*\)/g, ' ').split(';').map((r) => r.trim().toLowerCase());
+  let verified = false;
+  if (server === 'mx.google.com') {
+    for (const r of results) {
+      const prop = (name: string) => r.match(new RegExp(`(?:^|\\s)${name.replace('.', '\\.')}=@?([^\\s]+)`))?.[1]?.replace(/\.$/, '');
+      if (/^dmarc=pass\b/.test(r) && prop('header.from') === domain) verified = true;
+      if (/^dkim=pass\b/.test(r)) {
+        const d = prop('header.d') ?? prop('header.i')?.replace(/^.*@/, '');
+        if (d && orgDomain(d) === org) verified = true;
+      }
+    }
+  }
+  return { address, domain, org, verified };
+}
+
 /** The message as the app shows it: headers, HTML with its images in place, attachments. */
 export function detailOf(mail: Email): MessageDetail {
   const from = addresses(mail.from ? [mail.from] : undefined)[0] ?? null;
@@ -78,7 +107,7 @@ export function detailOf(mail: Email): MessageDetail {
   }));
   return {
     from, to: addresses(mail.to), cc: addresses(mail.cc), bcc: addresses(mail.bcc), replyTo: addresses(mail.replyTo),
-    date, subject: mail.subject ?? '', html: inlineImages(mail), text: mail.text ?? null, attachments,
+    date, subject: mail.subject ?? '', html: inlineImages(mail), text: mail.text ?? null, attachments, sender: senderOf(mail),
   };
 }
 
