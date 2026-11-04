@@ -6,6 +6,10 @@ inputs:
     description: Bun version
     required: false
     default: "1.4.4"
+  cache:
+    description: Restore the bun download cache (off where the runner has no Actions cache server)
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -13,8 +17,10 @@ runs:
     - uses: oven-sh/setup-bun@v2
       with:
         bun-version: ${{ inputs.bun-version }}
+        no-cache: ${{ inputs.cache != 'true' }}
     # Only Bun's download cache, never node_modules (a stale one can keep an old major linked).
-    - uses: actions/cache@v4
+    - if: ${{ inputs.cache == 'true' }}
+      uses: actions/cache@v4
       with:
         path: ~/.bun/install/cache
         key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
