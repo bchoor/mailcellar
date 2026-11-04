@@ -1,6 +1,8 @@
 name: CI
 
 # Runs on OpenShip's self-hosted runner, never on GitHub-hosted runners (as in EdgeDesk).
+# Runs on OpenShip direct (controller openship): jobs go straight to our runners, not
+# through GitHub's job queue (Bikram, 2026-11-04). OpenShip posts the PR check.
 on:
   push:
     branches: [main]
@@ -27,6 +29,7 @@ jobs:
         with:
           fetch-depth: 0 # the build lists merged PRs from git history (What's new)
       - uses: ./.github/actions/setup-bun
+        with: { cache: "false" }
       - run: bun run type-check
       - run: bun run build
       - name: Bundle the Worker (no upload)
@@ -42,6 +45,7 @@ jobs:
         with:
           fetch-depth: 0 # the build lists merged PRs from git history; the upgrade starts from the base branch
       - uses: ./.github/actions/setup-bun
+        with: { cache: "false" }
       - name: Install the browser
         # The browser and the system libraries it needs (the runner is a bare Linux box).
         run: bunx playwright install --with-deps chromium
