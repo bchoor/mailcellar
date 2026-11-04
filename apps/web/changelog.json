@@ -1,5 +1,43 @@
 [
   {
+    "tag": "v0.0.18",
+    "sha": "8ff6d16259429a28aca8b5d3056326b3da6178db",
+    "published_at": "2026-11-04T19:12:54Z",
+    "takeaways": [
+      {
+        "text": "**Always show images from senders you trust**: In the message panel, the \"Show images\" button now has a ▾ menu to always show images from a sender's domain or exact address, but only when Gmail confirmed the message really came from that sender.",
+        "types": [
+          "feature",
+          "security"
+        ]
+      },
+      {
+        "text": "**Gmail sync restarts itself after a dropped run**: Background Gmail sync for every connected account now re-schedules its next run if Cloudflare dropped it, so new mail keeps arriving in your archive without you doing anything.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Messages page shows all columns again**: On the Messages page, the table now shows all seven columns (Date, Sender, Subject, Category, Labels, Size, Attachments) even with the sidebar and message panel open, and scrolls sideways when it is too narrow.",
+        "types": [
+          "fix"
+        ]
+      },
+      {
+        "text": "**Open tabs pick up new versions**: In any MailCellar tab left open across an update, the page reloads onto the new version when its files are gone, or offers a Reload button when a new version is out.",
+        "types": [
+          "improvement"
+        ]
+      },
+      {
+        "text": "**People shows \"App access\"**: On the People page, the access column is now labeled \"App access\" instead of \"MailCellar\", and the Admins tile reads \"Can’t remove the last admin\".",
+        "types": [
+          "fix"
+        ]
+      }
+    ]
+  },
+  {
     "tag": "v0.0.17",
     "sha": "42120e5b3de42ca77c6d3fd0a021cc0b26cbe80c",
     "published_at": "2026-10-27T19:32:42Z",
