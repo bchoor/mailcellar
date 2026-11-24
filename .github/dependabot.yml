@@ -1,0 +1,33 @@
+# Dependency updates, weekly (Monday, Pacific). The Lumen kit moves fast and its packages
+# must stay on one version, so they come as one PR of their own.
+version: 2
+updates:
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "infra:"
+    groups:
+      lumen:
+        patterns: ["@columenlabs/lumen-*"]
+      minor-and-patch:
+        update-types: [minor, patch]
+        exclude-patterns: ["@columenlabs/lumen-*"]
+
+  - package-ecosystem: github-actions
+    directories: ["/", "/.github/actions/*"]
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Los_Angeles
+    commit-message:
+      prefix: "infra:"
+    groups:
+      actions:
+        patterns: ["*"]
