@@ -1,5 +1,11 @@
 [
   {
+    "tag": "v0.0.19",
+    "sha": "b000d1b0d2233b50f47f49fab32d654a47ae2e71",
+    "published_at": "2026-11-24T07:00:13Z",
+    "takeaways": []
+  },
+  {
     "tag": "v0.0.18",
     "sha": "8ff6d16259429a28aca8b5d3056326b3da6178db",
     "published_at": "2026-11-04T19:12:54Z",
