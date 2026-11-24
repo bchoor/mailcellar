@@ -16,7 +16,7 @@
     "deploy": "bun run build && wrangler deploy"
   },
   "devDependencies": {
-    "playwright": "1.63.0",
-    "wrangler": "4.152.0"
+    "playwright": "1.65.1",
+    "wrangler": "4.166.0"
   }
 }
