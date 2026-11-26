@@ -54,7 +54,7 @@ const newMeter = (): Meter => ({ cursors: [], refused429: 0, refused403: 0 });
 const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 16);
 
 /** What each binding counts as in Server-Timing; Durable Object namespaces are `do` without saying. */
-const KINDS: Record<string, string> = { ARCHIVE: 'r2', AI: 'ai', ASSETS: 'assets', SYNC: 'workflow', FREESEND: 'vpc' };
+const KINDS: Record<string, string> = { ARCHIVE: 'r2', AI: 'ai', ASSETS: 'assets', SYNC: 'workflow', EMAIL: 'email' };
 
 let wired = false;
 

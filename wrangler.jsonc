@@ -51,9 +51,8 @@
   // Lumen's ops meters (telemetry.ts): one point per request, binding call, Durable Object method, Workflow step and
   // browser point.
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "mailcellar_requests" }],
-  // The private tunnel to the self-hosted email API (Settings ▸ Email, Private tunnel): a Workers VPC
-  // service on the tunnel of the machine that runs it.
-  "vpc_services": [{ "binding": "FREESEND", "service_id": "01a17b11-701f-7850-8e65-bd0ff4436cc0" }],
+  // Invite emails: Cloudflare Email Service. The sender (MAIL_FROM) is a Worker variable on a domain onboarded to Email Sending.
+  "send_email": [{ "name": "EMAIL" }],
   "observability": { "enabled": true },
   // wrangler dev keeps localhost as the request's origin (not the route's host), so the
   // Google sign-in redirect matches the client's http://localhost:8787 callback.
