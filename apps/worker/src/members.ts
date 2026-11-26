@@ -1,12 +1,12 @@
 // Who may use MailCellar. Cloudflare Access proves who a person is; the people list decides
 // whether they are let in (Lumen's people kit, kept in QuotaDO). ADMIN_EMAILS are built-in
 // admins; everyone else needs an invite. With no ADMIN_EMAILS there is no list, and Access alone decides.
-import { type EmailOptions, type PeopleApi, peopleRoutes } from '@columenlabs/lumen-people';
-import { can, type EmailCheck, type Person, type SyncStatus } from '@columenlabs/lumen-ui-types/people';
+import { type Mailer, type PeopleApi, peopleRoutes } from '@columenlabs/lumen-people';
+import { can, type Person, type SyncStatus } from '@columenlabs/lumen-ui-types/people';
 import type { Env } from './env';
 import { adminEmails, INVITE_DAYS, MAIL_SCOPE, type PeopleOp, SCOPES } from './people';
 import { syncAccess } from './access-sync';
-import { accountQuota, type StoredEmailRow } from './quota';
+import { accountQuota } from './quota';
 
 /** How long a Worker trusts what the list said about someone: a removal takes effect within this. */
 const ADMIT_MS = 60_000;
@@ -35,37 +35,25 @@ const service = (env: Env): PeopleApi => {
   return Object.fromEntries(ops.map((op) => [op, call(op)])) as unknown as PeopleApi;
 };
 
-/** Invite email through a Resend-style API (FreeSend), reached over the private tunnel or the public internet.
- *  The settings live in QuotaDO; the API key is typed in Admin ▸ Email and never sent back. */
-const emailOptions = (env: Env): EmailOptions => ({
-  routes: [
-    {
-      id: 'tunnel',
-      label: 'Private tunnel',
-      state: env.FREESEND ? 'Linked' : 'Not linked to MailCellar',
-      url: 'http://send.icaruslab.dev/api',
-      urlInfo: 'The server’s own name: the tunnel takes the request to that machine, which passes it on by name.',
-      where: 'the tunnel’s machine',
-      // The tunnel always lands on that machine's web gateway (port 80), which picks the app by
-      // name: a port or a bare IP in the address would never reach it.
-      checkUrl: (u) => {
-        const { hostname, port } = new URL(u);
-        return port || /^[\d.]+$|^localhost$|^\[/.test(hostname)
-          ? 'Use the server’s name with no port, like http://send.icaruslab.dev/api: the tunnel reaches it by name.'
-          : null;
-      },
-      fetch: () => (env.FREESEND ? (req) => env.FREESEND!.fetch(req) : null),
-    },
-    { id: 'public', label: 'Public internet', url: 'https://api.resend.com' },
-  ],
-  store: {
-    get: async () => (await accountQuota(env).emailSettings()) as StoredEmailRow | null,
-    put: async (_req, settings, by) => accountQuota(env).setEmailSettings({ settings, updatedAt: Date.now(), updatedBy: by }),
-    clear: async () => accountQuota(env).setEmailSettings(null),
-    lastTest: async () => (await accountQuota(env).emailTest()) as EmailCheck | null,
-    putTest: async (_req, test) => accountQuota(env).setEmailTest(test),
-  },
-});
+/** Invite email through the Cloudflare Email Service `send_email` binding (`EMAIL`), sent as `MAIL_FROM`.
+ *  Either one unset: no mailer, and every invite gives a link to send by hand. */
+const SEND_TIMEOUT_MS = 10_000;
+const mailer = (env: Env): Mailer | null => {
+  const from = env.MAIL_FROM?.trim();
+  const mail = env.EMAIL;
+  if (!mail || !from) return null;
+  return async (m) => {
+    try {
+      await Promise.race([
+        mail.send({ from: { email: from, name: 'MailCellar' }, to: m.to, subject: m.subject, html: m.html, text: m.text }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Cloudflare did not answer within 10 s')), SEND_TIMEOUT_MS)),
+      ]);
+      return { ok: true, detail: `Sent from ${from}` };
+    } catch (e) {
+      return { ok: false, detail: e instanceof Error ? e.message : 'Cloudflare Email Service refused it' };
+    }
+  };
+};
 
 /** /api/people/*: the routes Admin ▸ People and the invite page call. Null: not one of these. */
 export async function peopleApi(request: Request, env: Env, url: URL, email: string, admin: boolean): Promise<Response | null> {
@@ -79,8 +67,8 @@ export async function peopleApi(request: Request, env: Env, url: URL, email: str
     fixedAdmins: adminEmails(env),
     appName: 'MailCellar',
     link: (token) => `${url.origin}/app/invite/${token}`,
-    // No mailer of its own: the invites go out through Admin ▸ Email's settings.
-    email: emailOptions(env),
+    mailer: () => mailer(env),
+    mailFrom: () => env.MAIL_FROM?.trim() || undefined,
     // Cloudflare Access sends a sign-in code only to the people this list lets in.
     sync: {
       run: async () => syncAccess(env, (await service(env).list()) as Person[]),

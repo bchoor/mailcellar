@@ -36,8 +36,18 @@ export interface Env {
    * and the test switch. Unset: no guest list; anyone Cloudflare Access lets through is in.
    */
   ADMIN_EMAILS?: string;
-  /** The private tunnel to the self-hosted email API (a Workers VPC service), for invite emails. Unbound: only the public route. */
-  FREESEND?: { fetch: (req: Request) => Promise<Response> };
+  /** Cloudflare Email Service (`send_email` binding), for invite emails. Unbound: invites give a link to send by hand. */
+  EMAIL?: {
+    send: (message: {
+      from: string | { email: string; name?: string };
+      to: string | string[];
+      subject: string;
+      html?: string;
+      text?: string;
+    }) => Promise<{ messageId: string }>;
+  };
+  /** The address invite emails come from, on a domain onboarded to Email Sending (a plain Worker variable). Unset: no invite email. */
+  MAIL_FROM?: string;
   /** A suite this deployment joins (plain Worker variables, all optional): the address its app switcher
    *  reads, and the Lumen prefs cookie and its domain shared across the suite's apps. */
   SUITE_LIST_URL?: string;
